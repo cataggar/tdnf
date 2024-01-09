@@ -62,6 +62,11 @@ TDNFMergeStringArrays(
 );
 
 uint32_t
+TDNFAddStringArray(
+    char ***pppszArray,
+    char *pszValue);
+
+uint32_t
 TDNFJoinArrayToString(
     char **ppszArray,
     const char *pszSep,
@@ -250,28 +255,6 @@ TDNFHasOpt(
     PTDNF_CMD_ARGS pArgs,
     const char *pszOptName,
     int *pnHasOpt
-    );
-
-uint32_t
-TDNFSetOpt(
-    PTDNF_CMD_ARGS pArgs,
-    const char *pszOptName,
-    const char *pszOptValue
-    );
-
-uint32_t
-TDNFGetCmdOptValue(
-    PTDNF_CMD_ARGS pArgs,
-    const char *pszOptName,
-    char **ppszOptValue
-    );
-
-uint32_t
-TDNFGetOptWithDefault(
-    PTDNF_CMD_ARGS pArgs,
-    const char *pszOptName,
-    const char *pszDefault,
-    char **ppszOptValue
     );
 
 //log.c

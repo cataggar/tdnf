@@ -152,14 +152,12 @@ TDNFConfigFromCnfTree(PTDNF_CONF pConf, struct cnfnode *cn_top)
         }
         else if (strcmp(cn->name, TDNF_CONF_KEY_EXCLUDE) == 0)
         {
-            dwError = TDNFSplitStringToArray(cn->value,
-                                             (char *)" ", &pConf->ppszExcludes);
+            dwError = TDNFAddStringArray(&pConf->ppszExcludes, cn->value);
             BAIL_ON_TDNF_ERROR(dwError);
         }
         else if (strcmp(cn->name, TDNF_CONF_KEY_MINVERSIONS) == 0)
         {
-            dwError = TDNFSplitStringToArray(cn->value,
-                                             (char *)" ", &pConf->ppszMinVersions);
+            dwError = TDNFAddStringArray(&pConf->ppszMinVersions, cn->value);
             BAIL_ON_TDNF_ERROR(dwError);
         }
         else if (strcmp(cn->name, TDNF_CONF_KEY_OPENMAX) == 0)
@@ -188,8 +186,7 @@ TDNFConfigFromCnfTree(PTDNF_CONF pConf, struct cnfnode *cn_top)
         }
         else if (strcmp(cn->name, TDNF_CONF_KEY_INSTALLONLYPKGS) == 0)
         {
-            dwError = TDNFSplitStringToArray(cn->value,
-                                             (char *)" ", &pConf->ppszInstallOnlyPkgs);
+            dwError = TDNFAddStringArray(&pConf->ppszInstallOnlyPkgs, cn->value);
             BAIL_ON_TDNF_ERROR(dwError);
         }
         else if (strcmp(cn->name, TDNF_CONF_KEY_VARS_DIRS) == 0)
@@ -214,6 +211,7 @@ TDNFConfigFromCnfTree(PTDNF_CONF pConf, struct cnfnode *cn_top)
 
     if (pszProxyUser && pszProxyPass)
     {
+        TDNF_SAFE_FREE_MEMORY(pConf->pszProxyUserPass);
         dwError = TDNFAllocateStringPrintf(
                       &pConf->pszProxyUserPass,
                       "%s:%s",
@@ -242,9 +240,9 @@ TDNFReadConfig(
     char *pszMinVersionsDir = NULL;
     char *pszPkgLocksDir = NULL;
     char *pszProtectedDir = NULL;
-
+    char *pszCacheDir = NULL;
+    char *pszRepoDir = NULL;
     const char *pszTdnfVersion = NULL;
-
     struct cnfnode *cn_conf = NULL;
     struct cnfmodule *mod_ini;
 
@@ -314,6 +312,51 @@ TDNFReadConfig(
         pConf->nSkipSignature = 1;
     }
 
+    if (pConf->pszRepoDir == NULL)
+        pConf->pszRepoDir = strdup(TDNF_DEFAULT_REPO_LOCATION);
+    if (pConf->pszCacheDir == NULL)
+        pConf->pszCacheDir = strdup(TDNF_DEFAULT_CACHE_LOCATION);
+
+    if (!IsNullOrEmptyString(pTdnf->pArgs->pszInstallRoot) &&
+        strcmp(pTdnf->pArgs->pszInstallRoot, "/"))
+    {
+        int nIsDir = 0;
+        dwError = TDNFJoinPath(&pszCacheDir,
+                               pTdnf->pArgs->pszInstallRoot,
+                               pConf->pszCacheDir,
+                               NULL);
+        BAIL_ON_TDNF_ERROR(dwError);
+
+        TDNF_SAFE_FREE_MEMORY(pConf->pszCacheDir);
+        pConf->pszCacheDir = pszCacheDir;
+        pszCacheDir = NULL;
+
+        dwError = TDNFJoinPath(&pszRepoDir,
+                               pTdnf->pArgs->pszInstallRoot,
+                               pConf->pszRepoDir,
+                               NULL);
+        BAIL_ON_TDNF_ERROR(dwError);
+
+        dwError = TDNFIsDir(pszRepoDir, &nIsDir);
+        if (dwError == ERROR_TDNF_FILE_NOT_FOUND)
+        {
+            nIsDir = 0;
+            dwError = 0;
+        }
+        BAIL_ON_TDNF_ERROR(dwError);
+        if (nIsDir)
+        {
+            TDNF_SAFE_FREE_MEMORY(pConf->pszRepoDir);
+            pConf->pszRepoDir = pszRepoDir;
+            pszRepoDir = NULL;
+        }
+    }
+
+    if (pTdnf->pArgs->cn_setopts) {
+        dwError = TDNFConfigFromCnfTree(pConf, pTdnf->pArgs->cn_setopts);
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
     pszTdnfVersion = TDNFGetVersion();
 
     if (pConf->pszOSName == NULL)
@@ -325,15 +368,12 @@ TDNFReadConfig(
     dwError = TDNFAllocateStringPrintf(&pConf->pszUserAgentHeader, "tdnf/%s %s/%s", pszTdnfVersion, pConf->pszOSName, pConf->pszOSVersion);
     BAIL_ON_TDNF_ERROR(dwError);
 
-    if (pConf->pszRepoDir == NULL)
-        pConf->pszRepoDir = strdup(TDNF_DEFAULT_REPO_LOCATION);
-    if (pConf->pszCacheDir == NULL)
-        pConf->pszCacheDir = strdup(TDNF_DEFAULT_CACHE_LOCATION);
     if (pConf->ppszDistroVerPkgs == NULL) {
         dwError = TDNFSplitStringToArray(TDNF_DEFAULT_DISTROVERPKGS,
                                          (char *)" ", &pConf->ppszDistroVerPkgs);
         BAIL_ON_TDNF_ERROR(dwError);
     }
+
     if (pConf->pszPersistDir == NULL)
         pConf->pszPersistDir = strdup(TDNF_DEFAULT_DB_LOCATION);
 
@@ -373,6 +413,8 @@ TDNFReadConfig(
 
 cleanup:
     destroy_cnftree(cn_conf);
+    TDNF_SAFE_FREE_MEMORY(pszCacheDir);
+    TDNF_SAFE_FREE_MEMORY(pszRepoDir);
     TDNF_SAFE_FREE_MEMORY(pszConfDir);
     TDNF_SAFE_FREE_MEMORY(pszMinVersionsDir);
     TDNF_SAFE_FREE_MEMORY(pszPkgLocksDir);
