@@ -330,28 +330,21 @@ error:
 
 uint32_t
 TDNFCreatePackageUrl(
-    PTDNF pTdnf,
-    const char* pszRepoId,
+    PTDNF_REPO_DATA pRepo,
     const char* pszPackageLocation,
     char **ppszPackageUrl
     )
 {
     uint32_t dwError = 0;
     char *pszPackageUrl = NULL;
-    PTDNF_REPO_DATA pRepo = NULL;
 
-    if(!pTdnf ||
-       !pTdnf->pArgs ||
+    if(!pRepo ||
        IsNullOrEmptyString(pszPackageLocation) ||
-       IsNullOrEmptyString(pszRepoId) ||
        !ppszPackageUrl)
     {
         dwError = ERROR_TDNF_INVALID_PARAMETER;
         BAIL_ON_TDNF_ERROR(dwError);
     }
-
-    dwError = TDNFFindRepoById(pTdnf, pszRepoId, &pRepo);
-    BAIL_ON_TDNF_ERROR(dwError);
 
     if (pRepo->ppszBaseUrls && pRepo->ppszBaseUrls[0]) {
         dwError = TDNFJoinPath(&pszPackageUrl, pRepo->ppszBaseUrls[0], pszPackageLocation, NULL);

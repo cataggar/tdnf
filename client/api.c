@@ -1239,8 +1239,12 @@ TDNFRepoSync(
         else
         {
             /* print URLs only */
-            dwError = TDNFCreatePackageUrl(pTdnf,
-                                           pPkgInfo->pszRepoName,
+
+            dwError = TDNFFindRepoById(pTdnf, pPkgInfo->pszRepoName, &pRepo);
+            BAIL_ON_TDNF_ERROR(dwError);
+
+            dwError = TDNFCreatePackageUrl(
+                                           pRepo,
                                            pPkgInfo->pszLocation,
                                            &pszUrl);
             BAIL_ON_TDNF_ERROR(dwError);
