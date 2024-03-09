@@ -189,6 +189,13 @@ TDNFPopulatePkgInfoQueryFormat(
                       "%s-%s.%s",
                       pszSrcName, pszSrcEVR, pszSrcArch);
         BAIL_ON_TDNF_ERROR(dwError);
+
+        dwError = SolvGetPkgLocationFromId(
+                      pSack,
+                      dwPkgId,
+                      &pPkgInfo->pszLocation);
+        BAIL_ON_TDNF_ERROR(dwError);
+
         if (dwPkgIndex < dwCount - 1)
         {
             pPkgInfo->pNext = &pPkgInfos[dwPkgIndex+1];
@@ -335,6 +342,14 @@ TDNFPopulatePkgInfoArray(
                           pSack,
                           dwPkgId,
                           &pPkgInfo->pChangeLogEntries);
+            BAIL_ON_TDNF_ERROR(dwError);
+        }
+        else if (nDetail == DETAIL_LOCATION)
+        {
+            dwError = SolvGetPkgLocationFromId(
+                          pSack,
+                          dwPkgId,
+                          &pPkgInfo->pszLocation);
             BAIL_ON_TDNF_ERROR(dwError);
         }
         else if (nDetail == DETAIL_SOURCEPKG)

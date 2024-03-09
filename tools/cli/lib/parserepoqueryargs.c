@@ -112,6 +112,10 @@ TDNFCliParseRepoQueryArgs(
         {
             pRepoqueryArgs->nExtras = 1;
         }
+        else if (strcasecmp(cn->name, "location") == 0)
+        {
+            pRepoqueryArgs->nLocation = 1;
+        }
         else if (strcasecmp(cn->name, "duplicates") == 0)
         {
             pRepoqueryArgs->nDuplicates = 1;
@@ -131,6 +135,10 @@ TDNFCliParseRepoQueryArgs(
             dwError = TDNFAllocateString(cn->value,
                                          &pRepoqueryArgs->pszQueryFormat);
             BAIL_ON_CLI_ERROR(dwError);
+
+            /* this triggers TDNFRepoQuery() to fill in full URL */
+            if (strstr(pRepoqueryArgs->pszQueryFormat, "%{location}") != NULL)
+                pRepoqueryArgs->nLocation = 1;
         }
         else if (strcasecmp(cn->name, "source") == 0)
         {

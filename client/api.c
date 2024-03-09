@@ -1513,10 +1513,33 @@ TDNFRepoQuery(
         /* TDNFPopulatePkgInfoArray fills in details */
         nDetail = pRepoqueryArgs->nChangeLogs ? DETAIL_CHANGELOG :
                   pRepoqueryArgs->nSource ? DETAIL_SOURCEPKG :
+                  pRepoqueryArgs->nLocation ? DETAIL_LOCATION :
                   DETAIL_LIST;
         dwError = TDNFPopulatePkgInfoArray(pTdnf->pSack, pPkgList, nDetail,
                                        &pPkgInfo, &dwCount);
         BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    if (pRepoqueryArgs->nLocation) {
+        for (dwPkgIndex = 0; dwPkgIndex < dwCount; dwPkgIndex++) {
+            char *pszLocation = NULL;
+            PTDNF_REPO_DATA pRepo = NULL;
+
+            if (strcmp(pPkgInfo[dwPkgIndex].pszRepoName, SYSTEM_REPO_NAME) != 0) {
+                dwError = TDNFFindRepoById(pTdnf, pPkgInfo[dwPkgIndex].pszRepoName, &pRepo);
+                BAIL_ON_TDNF_ERROR(dwError);
+
+                pszLocation = pPkgInfo[dwPkgIndex].pszLocation;
+                if (pszLocation != NULL) {
+                    dwError = TDNFCreatePackageUrl(
+                                                   pRepo,
+                                                   pszLocation,
+                                                   &(pPkgInfo[dwPkgIndex].pszLocation));
+                    BAIL_ON_TDNF_ERROR(dwError);
+                    TDNF_SAFE_FREE_MEMORY(pszLocation);
+                }
+            }
+        }
     }
 
     /* fill in file list or dependencies */
