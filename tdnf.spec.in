@@ -50,8 +50,6 @@ BuildRequires:  gpgme-devel
 BuildRequires:  gcc
 BuildRequires:  make
 BuildRequires:  cmake
-BuildRequires:  python3-devel
-BuildRequires:  python3-setuptools
 %if 0%{?with_check}
 BuildRequires:  createrepo_c
 BuildRequires:  glib
@@ -86,7 +84,6 @@ Requires:   %{name} = %{version}-%{release}
 Requires:   %{name}-automatic = %{version}-%{release}
 Requires:   %{name}-plugin-repogpgcheck = %{version}-%{release}
 Requires:   %{name}-plugin-metalink = %{version}-%{release}
-Requires:   %{name}-python = %{version}-%{release}
 Requires:   python3-pytest
 Requires:   python3-requests
 Requires:   rpm-build
@@ -124,14 +121,6 @@ Requires:   gpgme
 %description plugin-repogpgcheck
 %{name} plugin providing gpg verification for repository metadata
 
-%package    python
-Summary:    python bindings for %{name}
-Group:      Development/Libraries
-Requires:   python3
-
-%description python
-python bindings for %{name}
-
 %package automatic
 Summary:   %{name} - automated upgrades
 Group:     Development/Libraries
@@ -153,7 +142,6 @@ Systemd units that can periodically download package upgrades and apply them.
   ..
 
 %{cmake_build}
-%make_build -C %{__cmake_builddir} python
 
 %install
 %{cmake_install}
@@ -163,11 +151,7 @@ ln -sv %{name} %{buildroot}%{_bindir}/tyum
 ln -sv %{name} %{buildroot}%{_bindir}/yum
 ln -sv %{name} %{buildroot}%{_bindir}/tdnfj
 
-pushd %{__cmake_builddir}/python
-%py3_install
-popd
-
-find %{buildroot} \( -name '*.a' -o -name '*.pyc' \) -delete
+find %{buildroot} -name '*.a' -delete
 
 %check
 pip3 install flake8
@@ -256,10 +240,6 @@ rm -f %{_var}/cache/%{name}/cached-updateinfo.txt
 %dir %{_sysconfdir}/%{name}/pluginconf.d
 %config(noreplace) %{_sysconfdir}/%{name}/pluginconf.d/tdnfrepogpgcheck.conf
 %{_tdnfpluginsdir}/libtdnfrepogpgcheck.so
-
-%files python
-%defattr(-,root,root)
-%{python3_sitelib}/*
 
 %files automatic
 %defattr(-,root,root,0755)

@@ -13,7 +13,6 @@ HIST_DB_DIR="/usr/lib/sysimage/tdnf"
   mkdir -p ${HIST_DB_DIR}
   cmake -DHISTORY_DB_DIR=${HIST_DB_DIR} ..
   make -j${JOBS}
-  make python -j${JOBS}
   make check -j${JOBS}
 } || exit 1
 

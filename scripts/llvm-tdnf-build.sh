@@ -5,7 +5,7 @@ set -e
 pkgs=(llvm-devel clang-devel)
 pkgs+=(which gcc cmake make)
 
-tdnf install -y ${pkgs[@]}
+tdnf install -y --refresh ${pkgs[@]}
 
 export CC="$(which clang)"
 export CFLAGS="-Qunused-arguments -Wno-deprecated -Werror"
@@ -14,11 +14,12 @@ export CFLAGS="-Qunused-arguments -Wno-deprecated -Werror"
 mkdir -p build
 cd build || exit 1
 
-history_loc="/usr/lib/sysimage/tdnf"
-p=$(nproc)
+JOBS=$(( ($(nproc)+1) / 2 ))
+HIST_DB_DIR="/usr/lib/sysimage/tdnf"
 
-mkdir -p $history_loc
-cmake -DHISTORY_DB_DIR=$history_loc .. && \
-  make -j$p && \
-  make python -j$p && \
-  make check -j$p || exit 1
+{
+  mkdir -p ${HIST_DB_DIR}
+  cmake -DHISTORY_DB_DIR=${HIST_DB_DIR} ..
+  make -j${JOBS}
+  make check -j${JOBS}
+} || exit 1
