@@ -13,8 +13,9 @@
 #include "../llconf/entry.h"
 #include "../llconf/ini.h"
 
-#define USERAGENT_HEADER_MAX_LENGTH 256
-#define OS_CONF_FILE "/etc/os-release"
+#define USERAGENT_HEADER_MAX_LENGTH     256
+#define KEY_MAX_LEN                     32
+#define OS_REL_FILE                     "/etc/os-release"
 
 int
 TDNFConfGetRpmVerbosity(
@@ -29,37 +30,53 @@ TDNFConfGetRpmVerbosity(
     return nLogLevel;
 }
 
-static uint32_t TDNFParseOSInfo(PTDNF_CONF pConf)
+static uint32_t TDNFParseOSInfo(PTDNF_CONF pConf, const char *os_rel_fn)
 {
-    char buf[USERAGENT_HEADER_MAX_LENGTH];
     char *name = NULL;
     char *version = NULL;
     uint32_t dwError = 0;
-    FILE *file = NULL;
+    FILE *fp = NULL;
+    size_t s;
+    char *buf;
 
-    file = fopen(OS_CONF_FILE, "r");
-
-    if (!file) {
-        pr_info("Warning: %s file is not present in the system\n", OS_CONF_FILE);
-        return 0;
+    fp = fopen(os_rel_fn, "r");
+    if (!fp) {
+        pr_info("Warning: '%s' file is not present in the system\n", os_rel_fn);
+        return dwError;
     }
 
-    while (fgets(buf, USERAGENT_HEADER_MAX_LENGTH, file))
-    {
-        if (strncmp("ID=", buf, sizeof("ID=")-1) == 0)
-        {
-            if (sscanf(buf, "ID=\"%[^\"]\"", buf) == 1) {
-                dwError = TDNFAllocateString(buf, &name);
-            } else if (sscanf(buf, "ID=%s", buf) == 1) {
-                dwError = TDNFAllocateString(buf, &name);
+    s = USERAGENT_HEADER_MAX_LENGTH;
+    dwError = TDNFAllocateMemory(1, s, (void **)&buf);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    const char keys[][KEY_MAX_LEN] = {
+        "ID",
+        "VERSION_ID"
+    };
+
+    while (getline(&buf, &s, fp) >= 0) {
+        buf[strcspn(buf, "\n")] = '\0';
+        for (int i = 0; i < (int)ARRAY_SIZE(keys); ++i) {
+            const char *key = keys[i];
+            int key_l = strlen(key);
+
+            if (strncmp(key, buf, key_l))
+                continue;
+
+            /* read the value within double quotes */
+            char *beg = strchr(buf + key_l + 1, '"'); // skip till 'KEY='
+            if (beg) {
+                char *end;
+
+                beg += 1;
+                end = strrchr(beg, '"');
+                *end = '\0';
+                snprintf(buf, s, "%s=%s", key, beg);
             }
-            BAIL_ON_TDNF_ERROR(dwError);
-        }
-        else if (strncmp("VERSION_ID=", buf, sizeof("VERSION_ID=")-1) == 0)
-        {
-            if (sscanf(buf, "VERSION_ID=\"%[^\"]\"", buf) == 1) {
-                dwError = TDNFAllocateString(buf, &version);
-            } else if (sscanf(buf, "VERSION_ID=%s", buf) == 1) {
+
+            if (strncmp(buf, "ID=", sizeof("ID=") - 1)) {
+                dwError = TDNFAllocateString(buf, &name);
+            } else if (strncmp(buf, "VERSION_ID=", sizeof("VERSION_ID=") - 1)) {
                 dwError = TDNFAllocateString(buf, &version);
             }
             BAIL_ON_TDNF_ERROR(dwError);
@@ -70,10 +87,8 @@ static uint32_t TDNFParseOSInfo(PTDNF_CONF pConf)
     pConf->pszOSVersion = version;
 
 cleanup:
-    if(file)
-    {
-        fclose(file);
-    }
+    TDNF_SAFE_FREE_MEMORY(buf);
+    fclose(fp);
     return dwError;
 
 error:
@@ -278,7 +293,7 @@ TDNFReadConfig(
         }
     }
 
-    dwError = TDNFParseOSInfo(pConf);
+    dwError = TDNFParseOSInfo(pConf, OS_REL_FILE);
     BAIL_ON_TDNF_ERROR(dwError);
 
     /* cn_conf == NULL => we will not reach here */
