@@ -59,5 +59,3 @@ elif grep -qw "Photon" ${rel_file}; then
   tdnf -y install --enablerepo=photon-debuginfo ${photon_packages[@]}
   pip3 install flake8
 fi
-
-mkdir -p /var/lib/tdnf
