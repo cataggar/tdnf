@@ -603,7 +603,7 @@ SolvApplyListQuery(
              SELECTION_PROVIDES |
              SELECTION_GLOB |     /* foo* */
              SELECTION_CANON |    /* foo-1.2-3.ph4.noarch */
-	     SELECTION_DOTARCH |  /* foo.noarch */
+             SELECTION_DOTARCH |  /* foo.noarch */
              SELECTION_REL;       /* foo>=1.2-3 */
 
     if (pQuery->nScope == SCOPE_SOURCE) {
@@ -636,6 +636,8 @@ SolvApplyListQuery(
             {
                 FOR_POOL_SOLVABLES(p)
                 {
+                    if (pool->considered && !MAPTST(pool->considered, p))
+                        continue;
                     if(is_pseudo_package(pool, &pool->solvables[p]))
                         continue;
                     queue_push(&queueTmp, p);
@@ -650,6 +652,8 @@ SolvApplyListQuery(
 
                     FOR_REPO_SOLVABLES(repo, p, s)
                     {
+                        if (pool->considered && !MAPTST(pool->considered, p))
+                            continue;
                         if (is_pseudo_package(pool, &pool->solvables[p]))
                             continue;
                         queue_push(&queueTmp, p);
@@ -660,6 +664,8 @@ SolvApplyListQuery(
             {
                 FOR_JOB_SELECT(p, pp, how, what)
                 {
+                    if (pool->considered && !MAPTST(pool->considered, p))
+                        continue;
                     if (is_pseudo_package(pool, &pool->solvables[p]))
                         continue;
                     queue_push(&queueTmp, p);
@@ -678,6 +684,8 @@ SolvApplyListQuery(
         Pool *pool = pQuery->pSack->pPool;
         FOR_POOL_SOLVABLES(p)
         {
+            if (pool->considered && !MAPTST(pool->considered, p))
+                continue;
             if(is_pseudo_package(pool, &pool->solvables[p]))
                 continue;
             queue_push(&pQuery->queueResult, p);
