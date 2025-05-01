@@ -108,8 +108,10 @@ char *replace_vars(struct cnfnode *cn_vars, const char *source)
         cn_var = find_child(cn_vars, name);
         if (cn_var) {
             q = cnfnode_getval(cn_var);
-            while(*q && (d < dest + sizeof(dest)-1))
-                *d++ = *q++;
+            if (q != NULL) {
+                while(*q && (d < dest + sizeof(dest)-1))
+                    *d++ = *q++;
+            } /* NULL => empty */
         } /* handle not found vars as empty */
     }
     *d = 0;
