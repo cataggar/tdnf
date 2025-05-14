@@ -26,17 +26,69 @@ def setup_test_function(utils):
 
 def teardown_test(utils):
     set_gpgcheck(utils, False)
+    set_gpgcheck(utils, False, None)
     utils.run(['rpm', '-e', '--allmatches', 'gpg-pubkey'])
     pkgname = utils.config["sglversion_pkgname"]
     utils.run(['tdnf', 'erase', '-y', pkgname])
 
 
-def set_gpgcheck(utils, enabled):
-    utils.edit_config({'gpgcheck': '1' if enabled else '0'}, repo='photon-test')
+def set_gpgcheck(utils, enabled, repo='photon-test'):
+    if enabled is not None:
+        utils.edit_config({'gpgcheck': '1' if enabled else '0'}, repo)
+    else:
+        utils.edit_config({'gpgcheck': None}, repo)
 
 
 def set_repo_key(utils, url):
     utils.edit_config({'gpgkey': url}, repo='photon-test')
+
+
+# install unsigned package with gpgcheck enabled in repo,
+# expect failure
+def test_install_unsigned(utils):
+    set_gpgcheck(utils, None, repo=None)
+    set_gpgcheck(utils, True, repo='photon-test-unsigned')
+    set_repo_key(utils, DEFAULT_KEY)
+    pkgname = utils.config["sglversion_pkgname"]
+    ret = utils.run(['tdnf', '--repoid', 'photon-test-unsigned', 'install', '-y', pkgname])
+    assert ret['retval'] == 1515
+    assert not utils.check_package(pkgname)
+
+
+# install unsigned package with gpgcheck enabled in global config,
+# expect failure
+def test_install_unsigned_global_gpgcheck(utils):
+    set_gpgcheck(utils, True, repo=None)
+    set_gpgcheck(utils, None, repo='photon-test-unsigned')
+    set_repo_key(utils, DEFAULT_KEY)
+    pkgname = utils.config["sglversion_pkgname"]
+    ret = utils.run(['tdnf', '--repoid', 'photon-test-unsigned', 'install', '-y', pkgname])
+    assert ret['retval'] == 1515
+    assert not utils.check_package(pkgname)
+
+
+# install unsigned package with gpgcheck enabled in repo,
+# but disabled on command line,
+# expect success
+def test_install_unsigned_nogpgcheck(utils):
+    set_gpgcheck(utils, True, repo='photon-test-unsigned')
+    set_repo_key(utils, DEFAULT_KEY)
+    pkgname = utils.config["sglversion_pkgname"]
+    ret = utils.run(['tdnf', '--nogpgcheck', '--repoid', 'photon-test-unsigned', 'install', '-y', pkgname])
+    assert ret['retval'] == 0
+    assert utils.check_package(pkgname)
+
+
+# install unsigned package with gpgcheck enabled in repo,
+# but skipsignature on command line,
+# expect success
+def test_install_unsigned_skipsignature(utils):
+    set_gpgcheck(utils, True, repo='photon-test-unsigned')
+    set_repo_key(utils, DEFAULT_KEY)
+    pkgname = utils.config["sglversion_pkgname"]
+    ret = utils.run(['tdnf', '--skipsignature', '--repoid', 'photon-test-unsigned', 'install', '-y', pkgname])
+    assert ret['retval'] == 0
+    assert utils.check_package(pkgname)
 
 
 # 'wrong' key in repo config, but skip signature, expect success
@@ -45,6 +97,17 @@ def test_install_skipsignature(utils):
     set_repo_key(utils, DEFAULT_KEY)
     pkgname = utils.config["sglversion_pkgname"]
     ret = utils.run(['tdnf', 'install', '-y', '--skipsignature', pkgname])
+    assert ret['retval'] == 0
+    assert utils.check_package(pkgname)
+
+
+def test_install_skipdigest(utils):
+    set_gpgcheck(utils, True)
+    keypath = os.path.join(utils.config['repo_path'], 'photon-test', 'keys', 'pubkey.asc')
+    utils.run(['rpm', '--import', keypath])
+    set_repo_key(utils, DEFAULT_KEY)
+    pkgname = utils.config["sglversion_pkgname"]
+    ret = utils.run(['tdnf', 'install', '-y', '--skipdigest', pkgname])
     assert ret['retval'] == 0
     assert utils.check_package(pkgname)
 
