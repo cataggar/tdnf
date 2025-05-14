@@ -364,7 +364,7 @@ TDNFCreateRepo(
     uint32_t dwError = 0;
     PTDNF_REPO_DATA pRepo = NULL;
 
-    if(!ppRepo || !pszId)
+    if(!pTdnf || !pTdnf->pArgs || !ppRepo || !pszId)
     {
         dwError = ERROR_TDNF_INVALID_PARAMETER;
         BAIL_ON_TDNF_ERROR(dwError);
@@ -382,7 +382,7 @@ TDNFCreateRepo(
     pRepo->nEnabled = TDNF_REPO_DEFAULT_ENABLED;
     pRepo->nHasMetaData = 1;
     pRepo->nSkipIfUnavailable = TDNF_REPO_DEFAULT_SKIP;
-    pRepo->nGPGCheck = TDNF_REPO_DEFAULT_GPGCHECK;
+    pRepo->nGPGCheck = pTdnf->pConf->nGPGCheck;
     pRepo->nSSLVerify = pTdnf->pConf->nSSLVerify;
     pRepo->lMetadataExpire = TDNF_REPO_DEFAULT_METADATA_EXPIRE;
     pRepo->nPriority = TDNF_REPO_DEFAULT_PRIORITY;
@@ -640,6 +640,11 @@ TDNFLoadReposFromFile(
         /* default to repo id if name isn't set */
         if (pRepo->pszName == NULL)
             pRepo->pszName = strdup(pRepo->pszId);
+
+        /* override from cmd line */
+        if (pTdnf->pArgs->nNoGPGCheck) {
+            pRepo->nGPGCheck = 0;
+        }
 
         pRepo->pNext = pRepos;
         pRepos = pRepo;
