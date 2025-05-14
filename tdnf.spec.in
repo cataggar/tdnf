@@ -153,9 +153,11 @@ ln -sv %{name} %{buildroot}%{_bindir}/tdnfj
 
 find %{buildroot} -name '*.a' -delete
 
+%if 0%{?with_check}
 %check
 pip3 install flake8
 %make_build -C %{__cmake_builddir} check
+%endif
 
 %post
 /sbin/ldconfig
