@@ -402,7 +402,7 @@ TDNFConfigExpandVars(
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    if(!pConf->pszVarReleaseVer)
+    if(!pConf->pszVarReleaseVer || IsNullOrEmptyString(pTdnf->pArgs->pszReleaseVer))
     {
         int i;
 
@@ -417,6 +417,7 @@ TDNFConfigExpandVars(
             else if (dwError != ERROR_TDNF_NO_DISTROVERPKG)
                 BAIL_ON_TDNF_ERROR(dwError);
         }
+        BAIL_ON_TDNF_ERROR(dwError);
     }
 
     if(!pConf->pszVarBaseArch)
