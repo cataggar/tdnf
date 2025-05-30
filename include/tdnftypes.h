@@ -220,6 +220,8 @@ typedef struct _TDNF_CMD_ARGS
     int nShowVersion;      //show version and exit
     int nNoDeps;           //download no dependencies
     int nNoGPGCheck;       //skip gpg check
+    int nSkipSignature;
+    int nSkipDigest;
     int nNoOutput;         //if quiet and assumeyes are provided
     int nQuiet;            //quiet option
     int nVerbose;          //print debug info
@@ -258,6 +260,8 @@ typedef struct _TDNF_CONF
     int nCheckUpdateCompat;
     int nDistroSyncReinstallChanged;
     int nPluginsEnabled;
+    int nSkipDigest;
+    int nSkipSignature;
     char* pszRepoDir;
     char* pszCacheDir;
     char* pszPersistDir;

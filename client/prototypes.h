@@ -595,30 +595,10 @@ TDNFInitCmdLineRepo(
     );
 
 uint32_t
-TDNFGetGPGCheck(
-    PTDNF pTdnf,
-    const char* pszRepo,
-    int* pnGPGCheck
-    );
-
-uint32_t
-TDNFGetGPGSignatureCheck(
+TDNFGetGPGKeys(
     PTDNF pTdnf,
     PTDNF_REPO_DATA pRepo,
-    int* pnGPGSigCheck,
-    char*** ppszUrlGPGKeys
-    );
-
-uint32_t
-TDNFGetSkipSignatureOption(
-    PTDNF pTdnf,
-    uint32_t *pdwSkipSignature
-    );
-
-uint32_t
-TDNFGetSkipDigestOption(
-    PTDNF pTdnf,
-    uint32_t *pdwSkipDigest
+    char*** pppszUrlGPGKeys
     );
 
 uint32_t
