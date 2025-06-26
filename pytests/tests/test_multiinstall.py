@@ -149,3 +149,47 @@ def test_install_reinstall(utils):
     # both pkgs should remain installed:
     assert utils.check_package(pkgname, version=first)
     assert utils.check_package(pkgname, version=second)
+
+
+def test_autoremove_after_upgrade_user_installed(utils):
+    pkgname = PKGNAME
+    utils.erase_package(pkgname)
+
+    # install first version
+    first = PKG_VERSIONS[0]
+    utils.run(['tdnf', 'install', '-y', '--nogpgcheck', f"{pkgname}={first}"])
+    assert utils.check_package(pkgname, version=first)
+
+    # upgrade to latest
+    upgrade_version = PKG_VERSIONS[3]
+    utils.run(['tdnf', 'upgrade', '-y', '--nogpgcheck'])
+    assert utils.check_package(pkgname, version=upgrade_version)
+
+    utils.run(['tdnf', 'autoremove', '-y'])
+    # check both packages remain installed after autoremove
+    assert utils.check_package(pkgname, version=upgrade_version)
+    assert utils.check_package(pkgname, version=first)
+
+
+def test_autoremove_after_upgrade_auto_installed(utils):
+    pkgname = PKGNAME
+    utils.erase_package(pkgname)
+
+    # install first version
+    first = PKG_VERSIONS[0]
+    utils.run(['tdnf', 'install', '-y', '--nogpgcheck', f"{pkgname}={first}"])
+    assert utils.check_package(pkgname, version=first)
+
+    # mark package as autoinstalled
+    ret = utils.run(['tdnf', 'mark', 'remove', pkgname])
+    assert ret['retval'] == 0
+
+    # upgrade to latest
+    upgrade_version = PKG_VERSIONS[3]
+    utils.run(['tdnf', 'upgrade', '-y', '--nogpgcheck'])
+    assert utils.check_package(pkgname, version=upgrade_version)
+
+    utils.run(['tdnf', 'autoremove', '-y'])
+    # check both packages remain installed after autoremove
+    assert not utils.check_package(pkgname, version=upgrade_version)
+    assert not utils.check_package(pkgname, version=first)
