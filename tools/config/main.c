@@ -24,6 +24,7 @@
 #define ERR_NO_SETTING  4
 #define ERR_REPO_EXISTS 5
 #define ERR_JSON        6
+#define ERR_INTERNAL    7
 
 #define pr_err(fmt, ...) \
     fprintf(stderr, fmt, ##__VA_ARGS__)
@@ -129,6 +130,7 @@ void remove_repo(struct cnfnode *cn_root, const char *repo)
     } else
         fail(ERR_NO_REPO, "repo '%s' not found\n", repo);
 }
+
 static
 char *get_repodir(const char *main_config)
 {
@@ -161,7 +163,9 @@ struct cnfnode *find_repo(const char *repodir, const char *repo, char **pfilenam
     glob_t globbuf =  {0};
     int i, rc = 0;
 
-    snprintf(pattern, sizeof(pattern), "%s/*.repo", repodir);
+    rc = snprintf(pattern, sizeof(pattern), "%s/*.repo", repodir);
+    check_cond(rc >= 0 && rc < (int)sizeof(pattern));
+
     rc = glob(pattern, 0, NULL, &globbuf);
     check_cond(rc == 0 || rc == GLOB_NOMATCH);
     if (rc == 0) {
@@ -220,13 +224,18 @@ int write_file(struct cnfnode *cn_root, const char *filename)
     int rc = 0;
     char buf[256];
 
-    snprintf(buf, sizeof(buf), "%s.tmp", filename);
+    rc = snprintf(buf, sizeof(buf), "%s.tmp", filename);
+    check_cond(rc >= 0 && rc < (int)sizeof(buf));
+
     rc = cnfmodule_unparse_file(mod_ini, buf, cn_root);
     check_cond(rc == 0);
 
     rc = rename(buf, filename);
     check_cond(rc == 0);
 error:
+    /* cleanup tmp fail on error */
+    if (rc)
+        unlink(buf);
     return rc;
 }
 
@@ -255,6 +264,17 @@ error:
         jd = NULL;
     }
     return jd;
+}
+
+static
+int str_is_valid_repo_name(const char *str)
+{
+    /* should start with alnum */
+    if (!str || !*str || !isalnum(*str))
+        return 0;
+    while(*str && (isalnum(*str) || *str == '-' || *str == '_' || *str == '.'))
+        str++;
+    return *str == 0;
 }
 
 int main(int argc, char *argv[])
@@ -299,6 +319,8 @@ int main(int argc, char *argv[])
 
     register_ini(NULL);
     mod_ini = find_cnfmodule("ini");
+    if (mod_ini == NULL)
+        fail(ERR_INTERNAL, "internal error: could not find parser");
 
     /*
      * Process the action(s).
@@ -314,50 +336,62 @@ int main(int argc, char *argv[])
         while (optind + argcount < argc)
             argcount++;
 
+        action = argv[optind];
+
+        if (argcount < 2)
+            fail(ERR_CMDLINE, "expected main or repo name\n");
+
+        repo = argv[optind+1];
+        if (!str_is_valid_repo_name(repo))
+            fail(ERR_CMDLINE, "'%s' is not a valid repository name", repo);
+
+        if (strcmp(action, "create") != 0) {
+            if (repo_config == NULL)
+                cn_root = get_repo_root(main_config, repo, &filename);
+            else {
+                cn_root = cnfmodule_parse_file(mod_ini, repo_config);
+                if (cn_root == NULL) {
+                    fail(ERR_SYSTEM, "could not parse repo file %s\n", repo_config);
+                }
+                filename = strdup(repo_config);
+            }
+        } else { /* create repo config */
+            if(strcmp(repo, "main") != 0) {
+                char buf[256];
+                char *repodir = get_repodir(main_config);
+                if (!find_repo(repodir, repo, NULL)) {
+                    struct cnfnode *cn_repo = create_cnfnode(repo);
+
+                    if (repo_config == NULL) {
+                        cn_root = create_cnfnode("(root)");
+                        if (snprintf(buf, sizeof(buf), "%s/%s.repo", repodir, repo) >= (int)sizeof(buf))
+                            fail(ERR_SYSTEM, "path to repo config is too long");
+                        filename = strdup(buf);
+                    } else {
+                        cn_root = cnfmodule_parse_file(mod_ini, repo_config);
+                        if (cn_root == NULL) {
+                            if (errno == ENOENT)
+                                cn_root = create_cnfnode("(root)");
+                            else
+                                fail(ERR_SYSTEM, "could not parse config file %s\n", repo_config);
+                        }
+                        filename = strdup(repo_config);
+                    }
+                    append_node(cn_root, cn_repo);
+
+                } else
+                    fail(ERR_REPO_EXISTS, "repo '%s' already exists\n", repo);
+                safe_free(repodir);
+            } else
+                fail(ERR_CMDLINE, "invalid repo name 'main'\n");
+        }
+
        	/*
         * Find the action.
         */
-        action = argv[optind];
         if(strcmp(action, "edit") == 0 || strcmp(action, "create") == 0) {
-            if (argcount < 2)
-                fail(ERR_CMDLINE, "expected main or repo name\n");
-
-            repo = argv[optind+1];
-
             if (argcount < 3)
-                fail(ERR_CMDLINE, "Expected at least one setting.");
-
-            if (strcmp(action, "edit") == 0)
-                cn_root = get_repo_root(main_config, repo, &filename);
-            else { /* create repo config */
-                if(strcmp(repo, "main") != 0) {
-                    char buf[256];
-                    char *repodir = get_repodir(main_config);
-                    if (!find_repo(repodir, repo, NULL)) {
-                        struct cnfnode *cn_repo = create_cnfnode(repo);
-
-                        if (repo_config == NULL) {
-                            cn_root = create_cnfnode("(root)");
-                            snprintf(buf, sizeof(buf), "%s/%s.repo", repodir, repo);
-                            filename = strdup(buf);
-                        } else {
-                            cn_root = cnfmodule_parse_file(mod_ini, repo_config);
-                            if (cn_root == NULL) {
-                                if (errno == ENOENT)
-                                    cn_root = create_cnfnode("(root)");
-                                else
-                                    fail(ERR_SYSTEM, "could not parse config file %s\n", repo_config);
-                            }
-                            filename = strdup(repo_config);
-                        }
-                        append_node(cn_root, cn_repo);
-
-                    } else
-                        fail(ERR_REPO_EXISTS, "repo '%s' already exists\n", repo);
-                    safe_free(repodir);
-                } else
-                    fail(ERR_CMDLINE, "invalid repo name 'main'\n");
-            }
+                fail(ERR_CMDLINE, "expected at least one setting.");
 
             if (cn_root) {
                 set_key_values(cn_root, repo, &argv[optind+2]);
@@ -373,15 +407,8 @@ int main(int argc, char *argv[])
                 destroy_cnftree(cn_root);
             }
         } else if (strcmp(action, "get") == 0) {
-            if (argcount < 2)
-                fail(ERR_CMDLINE, "expected main or repo name\n");
-
-            repo = argv[optind+1];
-
             if (argcount < 3)
                 fail(ERR_CMDLINE, "expected one setting\n");
-
-            cn_root = get_repo_root(main_config, repo, NULL);
 
             if (cn_root) {
                 struct cnfnode *cn_repo = find_child(cn_root, repo);
@@ -397,15 +424,8 @@ int main(int argc, char *argv[])
                 destroy_cnftree(cn_root);
             }
         } else if (strcmp(action, "remove") == 0) {
-            if (argcount < 2)
-                fail(ERR_CMDLINE, "expected main or repo name\n");
-
-            repo = argv[optind+1];
-
             if (argcount < 3)
                 fail(ERR_CMDLINE, "expected one setting\n");
-
-            cn_root = get_repo_root(main_config, repo, &filename);
 
             if (cn_root) {
                 remove_keys(cn_root, repo, &argv[optind+2]);
@@ -421,13 +441,6 @@ int main(int argc, char *argv[])
                 destroy_cnftree(cn_root);
             }
         } else if (strcmp(action, "removerepo") == 0) {
-            if (argcount < 2)
-                fail(ERR_CMDLINE, "expected main or repo name\n");
-
-            repo = argv[optind+1];
-
-            cn_root = get_repo_root(main_config, repo, &filename);
-
             if (cn_root) {
                 remove_repo(cn_root, repo);
                 if (filename) {
@@ -446,29 +459,28 @@ int main(int argc, char *argv[])
                 destroy_cnftree(cn_root);
             }
         } else if (strcmp(action, "dump") == 0) {
-            if (argcount < 2)
-                fail(ERR_CMDLINE, "expected main or repo name\n");
-
-            repo = argv[optind+1];
-
-            cn_root = get_repo_root(main_config, repo, &filename);
-
             if (cn_root) {
                 struct cnfnode *cn_repo = find_child(cn_root, repo);
 
-                if (!do_json)
-                    cnfmodule_unparse(mod_ini, stdout, cn_root);
-                else {
-                    struct json_dump *jd = cnftree2json(cn_repo);
+                if (cn_repo) {
                     unlink_node(cn_repo); /* do not dump siblings */
-                    if (jd) {
-                        printf("%s", jd->buf);
-                        jd_destroy(jd);
-                    } else
-                        fail(ERR_JSON, "failed to generate json\n");
-                     /* we unlinked this so need to free explicitely */
-                    destroy_cnftree(cn_repo);
-                }
+                    if (!do_json) {
+                        struct cnfnode *cn_root_tmp = create_cnfnode("(root)");
+                        append_node(cn_root_tmp, cn_repo);
+                        cnfmodule_unparse(mod_ini, stdout, cn_root_tmp);
+                        destroy_cnftree(cn_root_tmp);
+                    } else {
+                        struct json_dump *jd = cnftree2json(cn_repo);
+                        if (jd) {
+                            printf("%s", jd->buf);
+                            jd_destroy(jd);
+                        } else
+                            fail(ERR_JSON, "failed to generate json\n");
+                         /* we unlinked this so need to free explicitely */
+                        destroy_cnftree(cn_repo);
+                    }
+                } else
+                    fail(ERR_NO_REPO, "repo '%s' not found\n", repo);
                 destroy_cnftree(cn_root);
             }
         } else
