@@ -9,12 +9,10 @@ cd build || exit 1
 JOBS=$(( ($(nproc)+1) / 2 ))
 HIST_DB_DIR="/usr/lib/sysimage/tdnf"
 
-{
-  mkdir -p ${HIST_DB_DIR}
-  cmake -DHISTORY_DB_DIR=${HIST_DB_DIR} ..
-  make -j${JOBS}
-  make check -j${JOBS}
-} || exit 1
+mkdir -p ${HIST_DB_DIR}
+cmake -DHISTORY_DB_DIR=${HIST_DB_DIR} ..
+make -j${JOBS}
+make check -j${JOBS}
 
 if ! flake8 ../pytests ; then
   echo "ERROR: flake8 tests failed" >&2
