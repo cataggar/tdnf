@@ -38,6 +38,41 @@ def test_create(utils):
     assert 'Foo' in "\n".join(ret['stdout'])
 
 
+def test_fileoption(utils):
+    ret = utils.run(['tdnf-config', '-f', '/tmp/test.repo', 'create', 'foo', 'name=Foo', 'baseurl=http://foo.bar.com'])
+    assert ret['retval'] == 0
+    assert os.path.exists("/tmp/test.repo")
+
+    ret = utils.run(['tdnf-config', '-f', '/tmp/test.repo', 'edit', 'foo', 'enabled=true'])
+    assert ret['retval'] == 0
+
+    ret = utils.run(['tdnf-config', '-f', '/tmp/test.repo', 'get', 'foo', 'enabled'])
+    assert ret['retval'] == 0
+    assert ret['stdout'][0].strip() == "true"
+
+    ret = utils.run(['tdnf-config', '-f', '/tmp/test.repo', '-j', 'dump', 'foo'])
+    assert ret['retval'] == 0
+
+    repomap = json.loads("\n".join(ret['stdout']))
+    assert 'foo' in repomap
+    assert 'enabled' in repomap['foo']
+    assert repomap['foo']['enabled'] == "true"
+
+    ret = utils.run(['tdnf-config', '-f', '/tmp/test.repo', 'remove', 'foo', 'enabled'])
+    assert ret['retval'] == 0
+
+    ret = utils.run(['tdnf-config', '-f', '/tmp/test.repo', '-j', 'dump', 'foo'])
+    assert ret['retval'] == 0
+
+    repomap = json.loads("\n".join(ret['stdout']))
+    assert 'foo' in repomap
+    assert 'enabled' not in repomap['foo']
+
+    ret = utils.run(['tdnf-config', '-f', '/tmp/test.repo', 'removerepo', 'foo'])
+    assert ret['retval'] == 0
+    assert not os.path.exists("/tmp/test.repo")
+
+
 def test_edit(utils):
     ret = utils.run(['tdnf-config', 'create', 'foo', 'name=Foo', 'baseurl=http://foo.bar.com', 'enabled=0'])
     assert ret['retval'] == 0
