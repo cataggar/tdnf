@@ -72,6 +72,7 @@
 #define TDNF_REPO_KEY_SKIP_MD_FILELISTS   "skip_md_filelists"
 #define TDNF_REPO_KEY_SKIP_MD_UPDATEINFO  "skip_md_updateinfo"
 #define TDNF_REPO_KEY_SKIP_MD_OTHER       "skip_md_other"
+#define TDNF_REPO_KEY_SNAPSHOT_URL        "snapshot"
 
 //file names
 #define TDNF_REPO_METADATA_MARKER         "lastrefresh"
