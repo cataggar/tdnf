@@ -51,7 +51,7 @@ def test_install_unsigned(utils):
     set_repo_key(utils, DEFAULT_KEY)
     pkgname = utils.config["sglversion_pkgname"]
     ret = utils.run(['tdnf', '--repoid', 'photon-test-unsigned', 'install', '-y', pkgname])
-    assert ret['retval'] == 1515
+    assert ret['retval'] == 1531
     assert not utils.check_package(pkgname)
 
 
@@ -63,7 +63,7 @@ def test_install_unsigned_global_gpgcheck(utils):
     set_repo_key(utils, DEFAULT_KEY)
     pkgname = utils.config["sglversion_pkgname"]
     ret = utils.run(['tdnf', '--repoid', 'photon-test-unsigned', 'install', '-y', pkgname])
-    assert ret['retval'] == 1515
+    assert ret['retval'] == 1531
     assert not utils.check_package(pkgname)
 
 
