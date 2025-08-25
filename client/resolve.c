@@ -414,14 +414,19 @@ TDNFPrepareSinglePkg(
     }
 
 cleanup:
-    if(pInstalledPkgList)
+    if (dwError)
+    {
+        pr_err("Error while processing package: '%s'\n", pszPkgName);
+    }
+
+    if (pInstalledPkgList)
     {
         SolvFreePackageList(pInstalledPkgList);
     }
     return dwError;
 
 error:
-    if(dwError == ERROR_TDNF_ALREADY_INSTALLED)
+    if (dwError == ERROR_TDNF_ALREADY_INSTALLED)
     {
         int nShowAlreadyInstalled = 1;
         //dont show already installed errors in the check path
@@ -438,28 +443,32 @@ error:
             pr_err("Package %s is already installed.\n", pszPkgName);
         }
     }
-    if(dwError == ERROR_TDNF_NO_UPGRADE_PATH)
+    else if (dwError == ERROR_TDNF_NO_UPGRADE_PATH)
     {
         dwError = 0;
         pr_err("There is no upgrade path for %s.\n", pszPkgName);
     }
-    if(dwError == ERROR_TDNF_NO_DOWNGRADE_PATH)
+    else if (dwError == ERROR_TDNF_NO_DOWNGRADE_PATH)
     {
         dwError = 0;
         pr_err("There is no downgrade path for %s.\n", pszPkgName);
     }
-    if(dwError == ERROR_TDNF_NO_SEARCH_RESULTS)
+    else if (dwError == ERROR_TDNF_NO_SEARCH_RESULTS)
     {
-        dwError = 0;
-        if(TDNFAddNotResolved(ppszPkgsNotResolved, pszPkgName))
+        dwError = TDNFAddNotResolved(ppszPkgsNotResolved, pszPkgName);
+        if (dwError)
         {
-            pr_err("Error while adding not resolved packages\n");
+            pr_err("Error while adding not resolved packages: '%s'\n", pszPkgName);
         }
     }
-    if(dwError == ERROR_TDNF_ERASE_NEEDS_INSTALL)
+    else if (dwError == ERROR_TDNF_ERASE_NEEDS_INSTALL)
     {
         dwError = 0;
-//TODO: maybe restore solvedinfo based processing here.
+        //TODO: maybe restore solvedinfo based processing here.
+    }
+    else if (dwError == ERROR_TDNF_NO_MATCH)
+    {
+        pr_err("Package '%s' not found\n", pszPkgName);
     }
     goto cleanup;
 }
