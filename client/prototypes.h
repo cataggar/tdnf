@@ -291,6 +291,7 @@ uint32_t
 TDNFGetGlobPackages(
     PSolvSack pSack,
     char* pszPkgGlob,
+    int nIsInstalled,
     Queue* pQueueGlob
     );
 

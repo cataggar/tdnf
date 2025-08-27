@@ -643,6 +643,7 @@ uint32_t
 TDNFGetGlobPackages(
     PSolvSack pSack,
     char* pszPkgGlob,
+    int nIsInstalled,
     Queue* pQueueGoal
     )
 {
@@ -655,10 +656,17 @@ TDNFGetGlobPackages(
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    dwError = SolvFindAvailablePkgByName(
-                  pSack,
-                  pszPkgGlob,
-                  &pSolvPkgList);
+    if (nIsInstalled) {
+        dwError = SolvFindInstalledPkgByName(
+                      pSack,
+                      pszPkgGlob,
+                      &pSolvPkgList);
+    } else {
+        dwError = SolvFindAvailablePkgByName(
+                      pSack,
+                      pszPkgGlob,
+                      &pSolvPkgList);
+    }
     BAIL_ON_TDNF_ERROR(dwError);
 
     if(pSolvPkgList->queuePackages.count > 0)
