@@ -22,13 +22,6 @@ def teardown_test(utils):
 
 
 def test_glob_install(utils):
-    cmd = "tdnf remove -y tdnf*multi*".split()
-    ret = utils.run(cmd)
-    assert ret["retval"] == 0
-    cmd = "rpm -qa 'tdnf*multi*'".split()
-    ret = utils.run(cmd)
-    assert ret["retval"] == 0
-
     cmd = "tdnf install -y tdnf*multi*".split()
     ret = utils.run(cmd)
     assert ret["retval"] == 0
@@ -38,6 +31,10 @@ def test_glob_install(utils):
 
 
 def test_glob_uninstall(utils):
+    mpkg = utils.config['mulversion_pkgname']
+    ret = utils.run(['tdnf', 'install', '-y', mpkg])
+    assert ret['retval'] == 0
+
     cmd = "tdnf remove -y tdnf*multi*".split()
     ret = utils.run(cmd)
     assert ret["retval"] == 0
