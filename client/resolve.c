@@ -123,10 +123,17 @@ TDNFPrepareAllPackages(
 
            if(TDNFIsGlob(pszPkgName))
            {
+               int nIsInstalled = (nAlterType == ALTER_ERASE ||
+                                   nAlterType == ALTER_AUTOERASE ||
+                                   nAlterType == ALTER_UPGRADE ||
+                                   nAlterType == ALTER_DOWNGRADE ||
+                                   nAlterType == ALTER_REINSTALL);
+
                queue_empty(&queueLocal);
                dwError = TDNFGetGlobPackages(
                              pTdnf->pSack,
                              pszPkgName,
+                             nIsInstalled,
                              &queueLocal);
                BAIL_ON_TDNF_ERROR(dwError);
                if(queueLocal.count == 0)
