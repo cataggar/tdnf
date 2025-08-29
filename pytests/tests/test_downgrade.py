@@ -25,6 +25,29 @@ def test_downgrade_no_arg(utils):
     assert ret['retval'] == 1011
 
 
+def test_downgrade_with_test_repo(utils):
+    mpkg = utils.config['mulversion_pkgname']
+    ret = utils.run(f"tdnf install -y {mpkg}".split())
+    assert ret['retval'] == 0
+    cmd = f"tdnf downgrade {mpkg}".split()
+    ret = utils.run(cmd)
+    # invalid response to y/n prompt
+    assert ret['retval'] == 1033
+    assert f"Downgrading: {mpkg}" in " ".join(ret["stdout"])
+
+    cmd.append("-y")
+
+    ret = utils.run(cmd)
+    assert ret['retval'] == 0
+    # downgrade should go through
+    assert f"Downgrading: {mpkg}" in " ".join(ret["stdout"])
+
+    ret = utils.run(cmd)
+    assert ret['retval'] == 0
+    # already at least available version
+    assert f"There is no downgrade path for {mpkg}" in " ".join(ret["stderr"])
+
+
 def test_downgrade_install(utils):
     mpkg = utils.config['mulversion_pkgname']
     ret = utils.run(['tdnf', 'install', '-y', mpkg])
