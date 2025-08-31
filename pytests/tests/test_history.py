@@ -9,6 +9,8 @@
 import pytest
 import os
 
+HIST_DB_DIRS = ["/var/lib/tdnf", "/usr/lib/sysimage/tdnf"]
+
 
 @pytest.fixture(scope='function', autouse=True)
 def setup_test(utils):
@@ -17,13 +19,40 @@ def setup_test(utils):
 
 
 def teardown_test(utils):
-    pkgname1 = utils.config["mulversion_pkgname"]
-    pkgname2 = utils.config["sglversion_pkgname"]
-    pkgname3 = utils.config["sglversion2_pkgname"]
-    for pkg in [pkgname1, pkgname2, pkgname3]:
-        utils.erase_package(pkg)
-    utils.erase_package('tdnf-test-cleanreq-leaf1')
-    utils.erase_package('tdnf-test-cleanreq-required')
+    pkgs = ['tdnf-test-cleanreq-leaf1', 'tdnf-test-cleanreq-required']
+    pkgs.append(utils.config["mulversion_pkgname"])
+    pkgs.append(utils.config["sglversion_pkgname"])
+    pkgs.append(utils.config["sglversion2_pkgname"])
+
+    utils.run("tdnf remove -y " + " ".join(pkgs))
+
+
+def run_hist_util_cmd(utils, cmd):
+    hist_db_util = 'tdnf-history-util'
+    if utils.config.get('build_dir'):
+        hist_db_util = os.path.join(utils.config['build_dir'], 'bin', hist_db_util)
+    else:
+        # for tests during make check through rpm
+        hist_db_util = f"/usr/libexec/tdnf/{hist_db_util}"
+
+    return utils._run(f"{hist_db_util} {cmd}")
+
+
+def test_tdnf_history_util_help(utils):
+    ret = run_hist_util_cmd(utils, "")
+    assert ret['retval']
+    assert "Usage:" in "\n".join(ret['stdout'])
+    assert "Commands:" in "\n".join(ret['stdout'])
+
+
+def test_tdnf_history_util_init(utils):
+    for path in HIST_DB_DIRS:
+        file = f"{path}/history.db"
+        if os.path.exists(file):
+            os.remove(file)
+
+    ret = run_hist_util_cmd(utils, "init")
+    assert ret['retval'] == 0
 
 
 def test_history_list(utils):
@@ -51,9 +80,11 @@ def test_history_list(utils):
     assert 'erase' in '\n'.join(ret['stdout'])
 
     ret = utils.run(['tdnf', 'history'])
+    assert ret['retval'] == 0
     last = ret['stdout'][-1].split()[0]
 
     ret = utils.run(['tdnf', 'history', '--reverse'])
+    assert ret['retval'] == 0
     rev_last = ret['stdout'][-1].split()[0]
     rev_first = ret['stdout'][1].split()[0]
 
@@ -66,34 +97,38 @@ def test_history_rollback(utils):
     utils.erase_package(pkgname)
 
     ret = utils.run(['tdnf', 'history'])
+    assert ret['retval'] == 0
     baseline = ret['stdout'][-1].split()[0]
 
-    utils.run(['tdnf', 'install', '-y', '--nogpgcheck', pkgname])
+    ret = utils.run(['tdnf', 'install', '-y', '--nogpgcheck', pkgname])
+    assert ret['retval'] == 0
     assert utils.check_package(pkgname)
 
-    utils.run(['tdnf', 'history', '-y', 'rollback', '--to', baseline])
+    ret = utils.run(['tdnf', 'history', '-y', 'rollback', '--to', baseline])
     assert ret['retval'] == 0
 
 
 def test_history_undo(utils):
-    pkgname1 = utils.config["mulversion_pkgname"]
-    pkgname2 = utils.config["sglversion_pkgname"]
-    pkgname3 = utils.config["sglversion2_pkgname"]
+    pkgs = [utils.config["mulversion_pkgname"]]
+    pkgs.append(utils.config["sglversion_pkgname"])
+    pkgs.append(utils.config["sglversion2_pkgname"])
 
-    for pkg in [pkgname1, pkgname2, pkgname2]:
-        utils.erase_package(pkg)
+    ret = utils.run("tdnf remove -y " + " ".join(pkgs))
+    assert ret['retval'] == 0
 
     ret = utils.run(['tdnf', 'history'])
+    assert ret['retval'] == 0
     baseline = ret['stdout'][-1].split()[0]
 
-    for pkg in [pkgname1, pkgname2, pkgname3]:
-        utils.run(['tdnf', 'install', '-y', '--nogpgcheck', pkg])
+    for pkg in pkgs:
+        ret = utils.run(['tdnf', 'install', '-y', '--nogpgcheck', pkg])
+        assert ret['retval'] == 0
         assert utils.check_package(pkg)
 
-    # should undo install of pkgname2
-    utils.run(['tdnf', 'history', '-y', 'undo', '--from', str(int(baseline) + 2)])
+    # should undo install of pkgs[1]
+    ret = utils.run(['tdnf', 'history', '-y', 'undo', '--from', str(int(baseline) + 2)])
     assert ret['retval'] == 0
-    assert not utils.check_package(pkgname2)
+    assert not utils.check_package(pkgs[1])
 
 
 def test_history_undo_remove(utils):
@@ -101,17 +136,20 @@ def test_history_undo_remove(utils):
 
     utils.erase_package(pkgname)
 
-    utils.run(['tdnf', 'install', '-y', '--nogpgcheck', pkgname])
+    ret = utils.run(['tdnf', 'install', '-y', '--nogpgcheck', pkgname])
+    assert ret['retval'] == 0
     assert utils.check_package(pkgname)
 
-    utils.run(['tdnf', 'remove', '-y', pkgname])
+    ret = utils.run(['tdnf', 'remove', '-y', pkgname])
+    assert ret['retval'] == 0
     assert not utils.check_package(pkgname)
 
     ret = utils.run(['tdnf', 'history'])
+    assert ret['retval'] == 0
     baseline = ret['stdout'][-1].split()[0]
 
     # should undo remove of pkgname
-    utils.run(['tdnf', 'history', '-y', '--nogpgcheck', 'undo', '--from', str(int(baseline))])
+    ret = utils.run(['tdnf', 'history', '-y', '--nogpgcheck', 'undo', '--from', str(int(baseline))])
     assert ret['retval'] == 0
     assert utils.check_package(pkgname)
 
@@ -121,17 +159,19 @@ def test_history_undo_downloadonly(utils):
 
     utils.erase_package(pkgname)
 
-    utils.run(['tdnf', 'install', '-y', '--nogpgcheck', pkgname])
+    ret = utils.run(['tdnf', 'install', '-y', '--nogpgcheck', pkgname])
+    assert ret['retval'] == 0
     assert utils.check_package(pkgname)
 
-    utils.run(['tdnf', 'remove', '-y', pkgname])
+    ret = utils.run(['tdnf', 'remove', '-y', pkgname])
+    assert ret['retval'] == 0
     assert not utils.check_package(pkgname)
 
     ret = utils.run(['tdnf', 'history'])
     baseline = ret['stdout'][-1].split()[0]
 
     # would undo remove of pkgname
-    utils.run(['tdnf', 'history', '-y', '--downloadonly', '--nogpgcheck', 'undo', '--from', str(int(baseline))])
+    ret = utils.run(['tdnf', 'history', '-y', '--downloadonly', '--nogpgcheck', 'undo', '--from', str(int(baseline))])
     assert ret['retval'] == 0
     assert not utils.check_package(pkgname)
 
@@ -145,17 +185,17 @@ def test_history_undo_testonly(utils):
 
     utils.erase_package(pkgname)
 
-    utils.run(['tdnf', 'install', '-y', '--nogpgcheck', pkgname])
+    ret = utils.run(['tdnf', 'install', '-y', '--nogpgcheck', pkgname])
     assert utils.check_package(pkgname)
 
-    utils.run(['tdnf', 'remove', '-y', pkgname])
+    ret = utils.run(['tdnf', 'remove', '-y', pkgname])
     assert not utils.check_package(pkgname)
 
     ret = utils.run(['tdnf', 'history'])
     baseline = ret['stdout'][-1].split()[0]
 
     # would undo remove of pkgname
-    utils.run(['tdnf', 'history', '-y', '--testonly', '--nogpgcheck', 'undo', '--from', str(int(baseline))])
+    ret = utils.run(['tdnf', 'history', '-y', '--testonly', '--nogpgcheck', 'undo', '--from', str(int(baseline))])
     assert ret['retval'] == 0
     assert not utils.check_package(pkgname)
 
@@ -165,49 +205,51 @@ def test_history_undo_testonly(utils):
 
 
 def test_history_undo_multiple(utils):
-    pkgname1 = utils.config["mulversion_pkgname"]
-    pkgname2 = utils.config["sglversion_pkgname"]
-    pkgname3 = utils.config["sglversion2_pkgname"]
+    pkgs = [utils.config["mulversion_pkgname"]]
+    pkgs.append(utils.config["sglversion_pkgname"])
+    pkgs.append(utils.config["sglversion2_pkgname"])
 
-    for pkg in [pkgname1, pkgname2, pkgname2]:
-        utils.erase_package(pkg)
+    ret = utils.run("tdnf remove -y " + " ".join(pkgs))
+    assert ret['retval'] == 0
 
     ret = utils.run(['tdnf', 'history'])
     baseline = ret['stdout'][-1].split()[0]
 
-    for pkg in [pkgname1, pkgname2, pkgname3]:
-        utils.run(['tdnf', 'install', '-y', '--nogpgcheck', pkg])
+    for pkg in pkgs:
+        ret = utils.run(['tdnf', 'install', '-y', '--nogpgcheck', pkg])
+        assert ret['retval'] == 0
         assert utils.check_package(pkg)
 
-    utils.run(['tdnf', 'history', '-y', 'undo', '--from', str(int(baseline) + 1), '--to', str(int(baseline) + 3)])
+    ret = utils.run(['tdnf', 'history', '-y', 'undo', '--from', str(int(baseline) + 1), '--to', str(int(baseline) + 3)])
     assert ret['retval'] == 0
-    assert not utils.check_package(pkgname1)
-    assert not utils.check_package(pkgname2)
-    assert not utils.check_package(pkgname3)
+    assert not utils.check_package(pkgs[0])
+    assert not utils.check_package(pkgs[1])
+    assert not utils.check_package(pkgs[2])
 
 
 def test_history_redo(utils):
-    pkgname1 = utils.config["mulversion_pkgname"]
-    pkgname2 = utils.config["sglversion_pkgname"]
-    pkgname3 = utils.config["sglversion2_pkgname"]
+    pkgs = [utils.config["mulversion_pkgname"]]
+    pkgs.append(utils.config["sglversion_pkgname"])
+    pkgs.append(utils.config["sglversion2_pkgname"])
 
-    for pkg in [pkgname1, pkgname2, pkgname3]:
-        utils.erase_package(pkg)
+    ret = utils.run("tdnf remove -y " + " ".join(pkgs))
+    assert ret['retval'] == 0
 
     ret = utils.run(['tdnf', 'history'])
+    assert ret['retval'] == 0
     baseline = ret['stdout'][-1].split()[0]
 
-    for pkg in [pkgname1, pkgname2, pkgname2]:
+    for pkg in pkgs:
         utils.run(['tdnf', 'install', '-y', '--nogpgcheck', pkg])
         assert utils.check_package(pkg)
 
-    utils.erase_package(pkgname2)
-    assert not utils.check_package(pkgname2)
+    utils.erase_package(pkgs[1])
+    assert not utils.check_package(pkgs[1])
 
-    # should redo install of pkgname2
+    # should redo install of pkgs[1]
     utils.run(['tdnf', 'history', '-y', 'redo', '--from', str(int(baseline) + 2)])
     assert ret['retval'] == 0
-    assert utils.check_package(pkgname2)
+    assert utils.check_package(pkgs[1])
 
 
 def test_history_mark(utils):
@@ -218,9 +260,10 @@ def test_history_mark(utils):
     assert ret['retval'] == 0
 
     ret = utils.run(['tdnf', 'history'])
+    assert ret['retval'] == 0
     trans_id = ret['stdout'][-1].split()[0]
 
-    utils.run(['tdnf', 'history', '-y', 'undo', trans_id])
+    ret = utils.run(['tdnf', 'history', '-y', 'undo', trans_id])
     assert ret['retval'] == 0
 
     ret = utils.run(['tdnf', 'repoquery', '--userinstalled', pkgname])
@@ -243,7 +286,7 @@ def test_history_redo_and_autoinstall(utils):
     utils.erase_package(pkgname)
     utils.erase_package(pkgname_req)
 
-    utils.run(['tdnf', 'history', '-y', 'redo', trans_id])
+    ret = utils.run(['tdnf', 'history', '-y', 'redo', trans_id])
     assert ret['retval'] == 0
 
     ret = utils.run(['tdnf', 'repoquery', '--userinstalled', pkgname_req])
@@ -258,31 +301,70 @@ def test_history_memcheck(utils):
     assert ret['retval'] == 0
 
 
+def get_host_gpg_keys(utils):
+    host_gpg_keys = []
+    ret = utils._run("rpm -qa 'gpg-pubkey*'")
+    if ret['retval'] == 0:
+        host_gpg_keys = ret['stdout']
+
+    return host_gpg_keys
+
+
 # ignore gpg-pubkey packages since we cannot revert a removal
 def test_history_pubkey_removed(utils):
+    host_gpg_keys = get_host_gpg_keys(utils)
+
     keypath = os.path.join(utils.config['repo_path'], 'photon-test', 'keys', 'pubkey.asc')
-    utils.run(['rpm', '--import', keypath])
-    utils.run(['tdnf', 'history', 'update'])
+
+    ret = utils.run(['rpm', '--import', keypath])
+    assert ret['retval'] == 0
+
+    ret = utils.run(['tdnf', 'history', 'update'])
+    assert ret['retval'] == 0
+
+    new_gpg_key = get_host_gpg_keys(utils)
+    new_gpg_key = list(set(new_gpg_key) - set(host_gpg_keys))
 
     ret = utils.run(['tdnf', 'history'])
+    assert ret['retval'] == 0
     baseline = ret['stdout'][-1].split()[0]
 
-    utils.run(['rpm', '-e', '--allmatches', 'gpg-pubkey'])
-    utils.run(['tdnf', 'history', 'update'])
+    for key in new_gpg_key:
+        ret = utils.run(['rpm', '-ev', key])
+        assert ret['retval'] == 0
+
+    ret = utils.run(['tdnf', 'history', 'update'])
+    assert ret['retval'] == 0
 
     ret = utils.run(['tdnf', 'history', '-y', 'rollback', '--to', baseline])
     assert ret['retval'] == 0
+
+    for key in new_gpg_key:
+        ret = utils.run(['rpm', '-q', key])
+        assert ret['retval']
 
 
 def test_history_pubkey_added(utils):
-    utils.run(['rpm', '-e', '--allmatches', 'gpg-pubkey'])
+    host_gpg_keys = get_host_gpg_keys(utils)
 
     ret = utils.run(['tdnf', 'history'])
+    assert ret['retval'] == 0
     baseline = ret['stdout'][-1].split()[0]
 
     keypath = os.path.join(utils.config['repo_path'], 'photon-test', 'keys', 'pubkey.asc')
-    utils.run(['rpm', '--import', keypath])
-    utils.run(['tdnf', 'history', 'update'])
+    ret = utils.run(['rpm', '--import', keypath])
+    assert ret['retval'] == 0
+
+    ret = utils.run(['tdnf', 'history', 'update'])
+    assert ret['retval'] == 0
 
     ret = utils.run(['tdnf', 'history', '-y', 'rollback', '--to', baseline])
     assert ret['retval'] == 0
+
+    new_gpg_key = get_host_gpg_keys(utils)
+    new_gpg_key = list(set(new_gpg_key) - set(host_gpg_keys))
+    for key in new_gpg_key:
+        ret = utils.run(['rpm', '-q', key])
+        assert ret['retval'] == 0
+        ret = utils._run(f"rpm -ev {key}")
+        assert ret['retval'] == 0

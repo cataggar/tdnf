@@ -8,7 +8,6 @@
 
 import os
 import pytest
-import errno
 import shutil
 
 TESTREPO = 'photon-test'

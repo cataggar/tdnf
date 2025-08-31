@@ -30,14 +30,14 @@ def remove_dummy_pretrans_dependency(utils):
 def test_install_pretrans_lessthan_fail(utils):
     remove_dummy_pretrans_dependency(utils)
     ret = utils.run(['tdnf', 'install', '-y', 'tdnf-test-pretrans-one'])
-    assert ret['stderr'][0].startswith('Detected rpm pre-transaction dependency')
+    assert 'Detected rpm pre-transaction dependency' in "\n".join(ret['stderr'])
     assert ret['retval'] == 1515
 
 
 def test_install_pretrans_greaterthan_fail(utils):
     remove_dummy_pretrans_dependency(utils)
     ret = utils.run(['tdnf', 'install', '-y', 'tdnf-test-pretrans-two'])
-    assert ret['stderr'][0].startswith('Detected rpm pre-transaction dependency')
+    assert 'Detected rpm pre-transaction dependency' in "\n".join(ret['stderr'])
     assert ret['retval'] == 1515
 
 

@@ -10,14 +10,34 @@ import pytest
 
 DIST = os.environ.get('DIST')
 if DIST == 'fedora':
-    DEFAULT_KEY = 'file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-34-primary'
+    DEFAULT_KEY = 'file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-rawhide-primary'
 else:
-    DEFAULT_KEY = 'file:///etc/pki/rpm-gpg/VMWARE-RPM-GPG-KEY'
+    DEFAULT_KEY = 'file:///etc/pki/rpm-gpg/VMWARE-RPM-GPG-KEY-4096'
+
+original_gpg_keys = []
+
+
+def get_host_gpg_keys(utils):
+    host_gpg_keys = []
+    ret = utils._run("rpm -qa 'gpg-pubkey*'")
+    if ret['retval'] == 0:
+        host_gpg_keys = ret['stdout']
+
+    return host_gpg_keys
 
 
 @pytest.fixture(scope='function', autouse=True)
 def setup_test_function(utils):
-    utils.run(['rpm', '-e', '--allmatches', 'gpg-pubkey'])
+    global original_gpg_keys
+    if not original_gpg_keys:
+        original_gpg_keys = get_host_gpg_keys(utils)
+
+    new_gpg_key = get_host_gpg_keys(utils)
+    new_gpg_key = list(set(new_gpg_key) - set(original_gpg_keys))
+    for key in new_gpg_key:
+        ret = utils._run(f"rpm -ev {key}")
+        assert ret['retval'] == 0
+
     pkgname = utils.config["sglversion_pkgname"]
     utils.run(['tdnf', 'erase', '-y', pkgname])
     yield
@@ -27,7 +47,13 @@ def setup_test_function(utils):
 def teardown_test(utils):
     set_gpgcheck(utils, False)
     set_gpgcheck(utils, False, None)
-    utils.run(['rpm', '-e', '--allmatches', 'gpg-pubkey'])
+
+    new_gpg_key = get_host_gpg_keys(utils)
+    new_gpg_key = list(set(new_gpg_key) - set(original_gpg_keys))
+    for key in new_gpg_key:
+        ret = utils._run(f"rpm -ev {key}")
+        assert ret['retval'] == 0
+
     pkgname = utils.config["sglversion_pkgname"]
     utils.run(['tdnf', 'erase', '-y', pkgname])
 

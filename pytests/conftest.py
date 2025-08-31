@@ -212,7 +212,7 @@ class TestUtils(object):
         return False
 
     def list_installed_packages(self):
-        ret = self._run("rpm -qa | grep -v gpg-pubkey")
+        ret = self._run("rpm -qa")
         assert ret['retval'] == 0
         return sorted(ret["stdout"])
 
