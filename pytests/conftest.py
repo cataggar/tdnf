@@ -211,6 +211,11 @@ class TestUtils(object):
                 return True
         return False
 
+    def list_installed_packages(self):
+        ret = self._run("rpm -qa | grep -v gpg-pubkey")
+        assert ret['retval'] == 0
+        return sorted(ret["stdout"])
+
     def erase_package(self, pkgname, pkgversion=None):
         if pkgversion:
             pkg = pkgname + '-' + pkgversion
@@ -327,11 +332,7 @@ class TestUtils(object):
 
     # helper to create directory tree without complains when it exists:
     def makedirs(self, d):
-        try:
-            os.makedirs(d)
-        except OSError as e:
-            if e.errno != errno.EEXIST:
-                raise
+        os.makedirs(path, exist_ok=True)
 
     def create_repoconf(self, filename, baseurl, name):
         templ = """
@@ -372,8 +373,10 @@ ui_repoid_vars=basearch
 @pytest.fixture(scope='session')
 def utils():
     test_utils = TestUtils()
+
     server = Process(target=TestRepoServer,
-                     args=(test_utils.config['repo_path'], ))
+                     args=(test_utils.config['repo_path'],))
+
     server.start()
 
     atexit.register(StopTestRepoServer, server)
@@ -394,3 +397,23 @@ def utils():
         sys.exit(1)
 
     return test_utils
+
+
+@pytest.fixture(scope="module", autouse=True)
+def check_packages_consistency(utils, request):
+    """
+    Automatically runs before and after every test.
+    Verifies that the set of installed packages remains unchanged.
+    """
+    baseline = utils.list_installed_packages()
+    yield
+    final = utils.list_installed_packages()
+    if set(final) != set(baseline):
+        __tracebackhide__ = True
+        added = sorted(set(final) - set(baseline))
+        removed = sorted(set(baseline) - set(final))
+        pytest.fail(
+            f"Installed packages changed in {request.node.fspath}!\n"
+            f"Added: {added}\n"
+            f"Removed: {removed}"
+        )
