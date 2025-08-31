@@ -59,3 +59,4 @@ def test_priority(utils):
     assert ret['retval'] == 0
 
     utils.check_package(pkgname, version=utils.config['mulversion_lower'])
+    utils.erase_package(pkgname)

@@ -16,7 +16,7 @@ def setup_test(utils):
 
 
 def teardown_test(utils):
-    pass
+    utils.run("tdnf remove -y tdnf*pretrans*")
 
 
 def install_dummy_pretrans_dependency(utils):

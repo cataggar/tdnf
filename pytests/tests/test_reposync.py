@@ -22,6 +22,9 @@ TESTREPO = 'photon-test'
 
 @pytest.fixture(scope='function', autouse=True)
 def setup_test(utils):
+    for path in [DOWNLOADDIR, METADATADIR, WORKDIR]:
+        os.makedirs(path, exist_ok=True)
+
     yield
     teardown_test(utils)
 
