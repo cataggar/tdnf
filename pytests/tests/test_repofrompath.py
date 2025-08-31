@@ -75,6 +75,7 @@ def test_repofrompath_created_repo(utils):
                     cwd=workdir)
     assert ret['retval'] == 0
     assert utils.check_package(pkgname)
+    utils.erase_package(pkgname)
 
 
 # check for issue #359 - having set a repo with --repofrompath
@@ -99,6 +100,7 @@ def test_repofrompath_cmdline_repo(utils):
                     cwd=workdir)
     assert ret['retval'] == 0
     assert utils.check_package(pkgname)
+    utils.erase_package(pkgname)
 
 
 # reposync a repo and install from it using repofromdir
@@ -133,3 +135,4 @@ def test_repofromdir_created_repo(utils):
                     cwd=workdir)
     assert ret['retval'] == 0
     assert utils.check_package(pkgname)
+    utils.erase_package(pkgname)

@@ -75,3 +75,4 @@ def test_clean_install_and_clean(utils):
 
     ret = utils.run(['tdnf', 'clean', 'all'])
     assert ret['retval'] == 0
+    utils.erase_package(pkgname)

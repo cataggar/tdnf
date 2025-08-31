@@ -32,20 +32,13 @@ def teardown_test(utils):
     utils.erase_package('tdnf-test-cleanreq-required')
     utils.erase_package('tdnf-test-cleanreq-leaf1')
     utils.erase_package(utils.config["mulversion_pkgname"])
-
-
-# helper to create directory tree without complains when it exists:
-def makedirs(d):
-    try:
-        os.makedirs(d)
-    except OSError as e:
-        if e.errno != errno.EEXIST:
-            raise
+    utils.erase_package(utils.config["sglversion_pkgname"])
+    utils.erase_package(PKGNAME_OBSED)
 
 
 def set_protected_file(utils, value):
     dirname = os.path.join(utils.config['repo_path'], 'protected.d')
-    makedirs(dirname)
+    os.makedirs(dirname, exist_ok=True)
     filename = os.path.join(dirname, 'test.conf')
     with open(filename, 'w') as f:
         f.write(value)
@@ -60,7 +53,8 @@ def test_protected_conf_erase(utils):
     assert utils.check_package(pkgname)
 
     # test - uninstalling should fail
-    utils.run(['tdnf', '-y', '--nogpgcheck', 'remove', pkgname])
+    ret = utils.run(['tdnf', '-y', '--nogpgcheck', 'remove', pkgname])
+    assert ret['retval']
     assert utils.check_package(pkgname)
 
 

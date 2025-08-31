@@ -54,6 +54,7 @@ def test_install_srpm(utils):
     assert not utils.check_package(pkgname)  # source RPMs are never really installed
 
     assert len(glob.glob(os.path.join(RPMBUILD_DIR, 'SPECS', '*.spec'))) > 0
+    utils.erase_package(pkgname)
 
 
 def test_install_srpm_file_with_source_option(utils):
@@ -63,6 +64,7 @@ def test_install_srpm_file_with_source_option(utils):
     assert ret['retval'] == 0
 
     assert len(glob.glob(os.path.join(RPMBUILD_DIR, 'SPECS', '*.spec'))) > 0
+    utils.erase_package(pkgname)
 
 
 # test srpm install if binary is installed (issue #515)
@@ -76,6 +78,7 @@ def test_install_srpm_binary_isinstalled(utils):
     assert ret['retval'] == 0
 
     assert len(glob.glob(os.path.join(RPMBUILD_DIR, 'SPECS', '*.spec'))) > 0
+    utils.erase_package(pkgname)
 
 
 # fail if trying to install an rpm with --source option
@@ -84,6 +87,7 @@ def test_install_rpm_file_with_source_option(utils):
     path = get_pkg_file_path(utils, pkgname)
     ret = utils.run(['tdnf', 'install', '-y', '--source', '--nogpgcheck', path])
     assert ret['retval'] != 0
+    utils.erase_package(pkgname)
 
 
 # fail if trying to install an srpm without --source option
@@ -92,3 +96,4 @@ def test_install_srpm_file_without_source_option(utils):
     path = get_srcpkg_file_path(utils, pkgname)
     ret = utils.run(['tdnf', 'install', '-y', '--nogpgcheck', path])
     assert ret['retval'] != 0
+    utils.erase_package(pkgname)

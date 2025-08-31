@@ -29,18 +29,9 @@ def teardown_test(utils):
     utils.erase_package(utils.config["mulversion_pkgname"])
 
 
-# helper to create directory tree without complains when it exists:
-def makedirs(d):
-    try:
-        os.makedirs(d)
-    except OSError as e:
-        if e.errno != errno.EEXIST:
-            raise
-
-
 def set_locks_file(utils, value):
     dirname = os.path.join(utils.config['repo_path'], 'locks.d')
-    makedirs(dirname)
+    os.makedirs(dirname, exist_ok=True)
     filename = os.path.join(dirname, 'test.conf')
     with open(filename, 'w') as f:
         f.write(value)

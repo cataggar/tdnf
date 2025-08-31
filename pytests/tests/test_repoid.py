@@ -93,3 +93,4 @@ def test_repoid_created_repo(utils):
                     cwd=workdir)
     assert ret['retval'] == 0
     assert utils.check_package(pkgname)
+    utils.erase_package(pkgname)
