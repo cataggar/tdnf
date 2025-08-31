@@ -31,7 +31,7 @@ def teardown_test(utils):
 
 def enable_and_create_repo(utils):
     workdir = WORKDIR
-    utils.makedirs(workdir)
+    os.makedirs(workdir, exist_ok=True)
     reponame = 'photon-test-sha512'
 
     ret = utils.run(['tdnf', '-v', '--disablerepo=*', '--enablerepo=photon-test-sha512', 'makecache'])

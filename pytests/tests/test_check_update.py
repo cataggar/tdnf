@@ -19,7 +19,7 @@ TEST_CONF_PATH = os.path.join(WORKDIR, TEST_CONF_FILE)
 def setup_test(utils):
     tdnf_conf = os.path.join(utils.config['repo_path'], 'tdnf.conf')
 
-    utils.makedirs(WORKDIR)
+    os.makedirs(WORKDIR, exist_ok=True)
     shutil.copy(tdnf_conf, TEST_CONF_PATH)
 
     utils.edit_config({'dnf_check_update_compat': '1'}, section='main', filename=TEST_CONF_PATH)

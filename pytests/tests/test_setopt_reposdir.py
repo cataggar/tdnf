@@ -27,7 +27,7 @@ def teardown_test(utils):
 
 
 def test_setopt_reposdir(utils):
-    utils.makedirs(REPODIR)
+    os.makedirs(REPODIR, exist_ok=True)
     utils.create_repoconf(os.path.join(REPODIR, REPOFILENAME),
                           "http://foo.bar.com/packages",
                           REPONAME)

@@ -25,7 +25,7 @@ def teardown_test(utils):
 def enable_plugins(utils):
     # write a plugin config file
     plugin_conf_path = os.path.join(utils.config['repo_path'], 'pluginconf.d')
-    utils.makedirs(plugin_conf_path)
+    os.makedirs(plugin_conf_path, exist_ok=True)
 
     utils.edit_config({'plugins': '1', 'pluginconfpath': plugin_conf_path})
 

@@ -70,7 +70,7 @@ def test_install_as_file_relpath1(utils):
     filename = os.path.basename(path)
     if os.path.isdir(tmpdir):
         shutil.rmtree(tmpdir)
-    utils.makedirs(tmpdir)
+    os.makedirs(tmpdir, exist_ok=True)
     shutil.copy(path, tmpdir)
     relpath = os.path.join('..', tmpdir, filename)
     cwd = os.getcwd()

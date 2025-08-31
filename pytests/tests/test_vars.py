@@ -19,7 +19,7 @@ REPONAME = 'baseurls-repo'
 @pytest.fixture(scope='module', autouse=True)
 def setup_test(utils):
     workdir = WORKDIR
-    utils.makedirs(workdir)
+    os.makedirs(workdir, exist_ok=True)
     utils.edit_config({'varsdir': workdir})
 
     yield

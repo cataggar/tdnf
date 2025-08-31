@@ -35,7 +35,7 @@ def teardown_test(utils):
 def test_multiple_baseurls(utils):
     reponame = REPONAME
     workdir = WORKDIR
-    utils.makedirs(workdir)
+    os.makedirs(workdir, exist_ok=True)
 
     filename = os.path.join(utils.config['repo_path'], "yum.repos.d", REPOFILENAME)
     # we should get a 404 for the first url and skip to the next one

@@ -56,7 +56,7 @@ def create_repo_conf(repos, reposdir="/etc/yum.repos.d", insecure=False):
 def test_mirrrorlist(utils):
     reponame = REPONAME
     workdir = WORKDIR
-    utils.makedirs(workdir)
+    os.makedirs(workdir, exist_ok=True)
     mirrorlist_path = os.path.join(workdir, MIRRORLIST_FILENAME)
 
     # we should get a 404 for the first url and skip to the next one

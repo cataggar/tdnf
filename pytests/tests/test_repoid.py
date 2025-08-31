@@ -32,7 +32,7 @@ def teardown_test(utils):
 
 
 def test_repoid(utils):
-    utils.makedirs(REPODIR)
+    os.makedirs(REPODIR, exist_ok=True)
     utils.create_repoconf(os.path.join(REPODIR, REPOFILENAME),
                           "http://foo.bar.com/packages",
                           REPONAME)
@@ -45,7 +45,7 @@ def test_repoid(utils):
 
 
 def test_repo(utils):
-    utils.makedirs(REPODIR)
+    os.makedirs(REPODIR, exist_ok=True)
     utils.create_repoconf(os.path.join(REPODIR, REPOFILENAME),
                           "http://foo.bar.com/packages",
                           REPONAME)
@@ -61,7 +61,7 @@ def test_repo(utils):
 def test_repoid_created_repo(utils):
     reponame = 'photon-test'
     workdir = WORKDIR
-    utils.makedirs(workdir)
+    os.makedirs(workdir, exist_ok=True)
 
     ret = utils.run(['tdnf', '--repo={}'.format(reponame),
                      '--download-metadata',

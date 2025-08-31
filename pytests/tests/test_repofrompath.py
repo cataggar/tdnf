@@ -30,7 +30,7 @@ def teardown_test(utils):
 
 def create_repo(utils):
     workdir = WORKDIR
-    utils.makedirs(workdir)
+    os.makedirs(workdir, exist_ok=True)
     reponame = 'photon-test'
 
     ret = utils.run(['tdnf', '--repo={}'.format(reponame),
@@ -107,7 +107,7 @@ def test_repofrompath_cmdline_repo(utils):
 def test_repofromdir_created_repo(utils):
     reponame = 'photon-test'
     workdir = WORKDIR
-    utils.makedirs(workdir)
+    os.makedirs(workdir, exist_ok=True)
 
     ret = utils.run(['tdnf', '--repo={}'.format(reponame),
                      'reposync'],

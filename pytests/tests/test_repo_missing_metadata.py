@@ -31,7 +31,7 @@ def teardown_test(utils):
 def test_repo_no_filelists(utils):
     reponame = 'photon-test'
     workdir = WORKDIR
-    utils.makedirs(workdir)
+    os.makedirs(workdir, exist_ok=True)
 
     ret = utils.run(['tdnf', '--repo={}'.format(reponame),
                      '--download-metadata',

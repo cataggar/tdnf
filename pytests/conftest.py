@@ -330,10 +330,6 @@ class TestUtils(object):
         ret['retval'] = retval
         return ret
 
-    # helper to create directory tree without complains when it exists:
-    def makedirs(self, d):
-        os.makedirs(path, exist_ok=True)
-
     def create_repoconf(self, filename, baseurl, name):
         templ = """
 [{name}]
