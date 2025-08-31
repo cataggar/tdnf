@@ -29,7 +29,8 @@ def setup_test(utils):
 
 
 def teardown_test(utils):
-    shutil.rmtree(WORKDIR)
+    if os.path.isdir(WORKDIR):
+        shutil.rmtree(WORKDIR)
     spkg = utils.config["sglversion_pkgname"]
     mpkg = utils.config["mulversion_pkgname"]
     utils.run(['tdnf', 'erase', '-y', spkg, mpkg])

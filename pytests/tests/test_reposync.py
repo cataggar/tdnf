@@ -15,6 +15,7 @@ ARCH = platform.machine()
 DOWNLOADDIR = '/root/reposync/download'
 METADATADIR = '/root/reposync/metadata'
 WORKDIR = '/root/reposync/workdir'
+BASEDIR = os.path.dirname(WORKDIR)
 REPOFILENAME = 'reposync.repo'
 TESTREPO = 'photon-test'
 
@@ -29,12 +30,8 @@ def teardown_test(utils):
     pkgname = utils.config["mulversion_pkgname"]
     utils.erase_package(pkgname)
 
-    if os.path.isdir(DOWNLOADDIR):
-        shutil.rmtree(DOWNLOADDIR)
-    if os.path.isdir(WORKDIR):
-        shutil.rmtree(WORKDIR)
-    if os.path.isdir(METADATADIR):
-        shutil.rmtree(METADATADIR)
+    if os.path.isdir(BASEDIR):
+        shutil.rmtree(BASEDIR)
     filename = os.path.join(utils.config['repo_path'], "yum.repos.d", REPOFILENAME)
     if os.path.isfile(filename):
         os.remove(filename)

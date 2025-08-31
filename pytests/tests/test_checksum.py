@@ -13,6 +13,7 @@ import platform
 import pytest
 
 WORKDIR = '/root/repofrompath/workdir'
+BASEDIR = os.path.dirname(WORKDIR)
 ARCH = platform.machine()
 
 
@@ -24,8 +25,8 @@ def setup_test(utils):
 
 def teardown_test(utils):
     utils.run(['tdnf', 'erase', '-y', 'tdnf-test-one'])
-    if os.path.isdir(WORKDIR):
-        shutil.rmtree(WORKDIR)
+    if os.path.isdir(BASEDIR):
+        shutil.rmtree(BASEDIR)
 
 
 def enable_and_create_repo(utils):

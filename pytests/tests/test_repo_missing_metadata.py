@@ -14,6 +14,7 @@ REPODIR = '/root/repo_missing_metadata/yum.repos.d'
 REPOFILENAME = 'repo_missing_metadata.repo'
 REPONAME = "repo_missing_metadata-test"
 WORKDIR = '/tmp/repo_missing_metadata/workdir'
+BASEDIR = os.path.dirname(WORKDIR)
 
 
 @pytest.fixture(scope='function', autouse=True)
@@ -23,10 +24,8 @@ def setup_test(utils):
 
 
 def teardown_test(utils):
-    if os.path.isdir(REPODIR):
-        shutil.rmtree(REPODIR)
-    if os.path.isdir(WORKDIR):
-        shutil.rmtree(WORKDIR)
+    if os.path.isdir(BASEDIR):
+        shutil.rmtree(BASEDIR)
 
 
 def test_repo_no_filelists(utils):

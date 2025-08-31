@@ -14,6 +14,7 @@ REPODIR = '/root/repoid/yum.repos.d'
 REPOFILENAME = 'repoid.repo'
 REPONAME = "repoid-test"
 WORKDIR = '/root/repoid/workdir'
+BASEDIR = os.path.dirname(WORKDIR)
 
 
 @pytest.fixture(scope='function', autouse=True)
@@ -23,10 +24,8 @@ def setup_test(utils):
 
 
 def teardown_test(utils):
-    if os.path.isdir(REPODIR):
-        shutil.rmtree(REPODIR)
-    if os.path.isdir(WORKDIR):
-        shutil.rmtree(WORKDIR)
+    if os.path.isdir(BASEDIR):
+        shutil.rmtree(BASEDIR)
     filename = os.path.join(utils.config['repo_path'], "yum.repos.d", REPOFILENAME)
     if os.path.isfile(filename):
         os.remove(filename)

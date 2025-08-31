@@ -11,6 +11,7 @@ import shutil
 import pytest
 
 REPODIR = "/root/priority/repo"
+BASEDIR = os.path.dirname(REPODIR)
 REPONAME = "priority-test"
 REPOFILENAME = f"{REPONAME}.repo"
 
@@ -25,8 +26,8 @@ def setup_test(utils):
 
 
 def teardown_test(utils):
-    if os.path.isdir(REPODIR):
-        shutil.rmtree(REPODIR)
+    if os.path.isdir(BASEDIR):
+        shutil.rmtree(BASEDIR)
     filename = os.path.join(utils.config['repo_path'], "yum.repos.d", REPOFILENAME)
     if os.path.isfile(filename):
         os.remove(filename)
