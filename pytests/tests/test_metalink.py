@@ -75,7 +75,7 @@ def disable_plugin(utils):
     with open(conf_file, 'w') as f:
         tdnf_config.write(f, space_around_delimiters=False)
 
-    utils.makedirs(plugin_conf_path)
+    os.makedirs(plugin_conf_path, exist_ok=True)
 
     plugin_file = os.path.join(plugin_conf_path, 'tdnfmetalink.conf')
     with open(plugin_file, 'w') as f:
@@ -97,7 +97,7 @@ def enable_plugin(utils):
     with open(conf_file, 'w') as f:
         tdnf_config.write(f, space_around_delimiters=False)
 
-    utils.makedirs(plugin_conf_path)
+    os.makedirs(plugin_conf_path, exist_ok=True)
 
     plugin_file = os.path.join(plugin_conf_path, 'tdnfmetalink.conf')
     with open(plugin_file, 'w') as f:

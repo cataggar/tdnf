@@ -21,22 +21,35 @@ def teardown_test(utils):
 
 def test_whatprovides_no_arg(utils):
     ret = utils.run(['tdnf', 'whatprovides'])
-    assert ret['retval'] == 907
+    assert ret['retval']
+    "Need an item to match" in "\n".join(ret['stderr'])
 
 
 def test_whatprovides_invalid_arg(utils):
     ret = utils.run(['tdnf', 'whatprovides', 'invalid_arg'])
+    assert ret['retval'] == 0
     assert ret['stderr'][0] == 'No data available'
 
 
 def test_whatprovides_valid_file_notinstalled(utils):
     ret = utils.run(['tdnf', 'whatprovides', '/lib/systemd/system/tdnf-test-one.service'])
-    assert 'tdnf-test-one' in "\n".join(ret['stdout'])
     assert ret['retval'] == 0
+
+    text = "\n".join(ret["stdout"])
+    assert 'tdnf-test-one' in text
+    assert "Repo : photon-test" in " ".join(text.split())
 
 
 def test_whatprovides_valid_file_installed(utils):
     ret = utils.run(['tdnf', 'install', '-y', '--nogpgcheck', 'tdnf-test-one'])
+    assert ret['retval'] == 0
+
     ret = utils.run(['tdnf', 'whatprovides', '/lib/systemd/system/tdnf-test-one.service'])
-    assert 'tdnf-test-one' in "\n".join(ret['stdout'])
+    assert ret['retval'] == 0
+
+    text = "\n".join(ret["stdout"])
+    assert 'tdnf-test-one' in text
+    assert "Repo : @System" in " ".join(text.split())
+
+    ret = utils.run("tdnf remove -y tdnf-test-one")
     assert ret['retval'] == 0

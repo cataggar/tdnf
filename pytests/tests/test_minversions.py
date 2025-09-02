@@ -36,7 +36,7 @@ def set_minversions_conf(utils, value):
 
 def set_minversions_file(utils, value):
     dirname = os.path.join(utils.config['repo_path'], 'minversions.d')
-    utils.makedirs(dirname)
+    os.makedirs(dirname, exist_ok=True)
     filename = os.path.join(dirname, 'test.conf')
     with open(filename, 'w') as f:
         f.write(value)

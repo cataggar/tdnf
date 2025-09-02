@@ -14,6 +14,7 @@ REPODIR = '/root/repoid/yum.repos.d'
 REPOFILENAME = 'repoid.repo'
 REPONAME = "repoid-test"
 WORKDIR = '/root/repoid/workdir'
+BASEDIR = os.path.dirname(WORKDIR)
 
 
 @pytest.fixture(scope='function', autouse=True)
@@ -23,17 +24,15 @@ def setup_test(utils):
 
 
 def teardown_test(utils):
-    if os.path.isdir(REPODIR):
-        shutil.rmtree(REPODIR)
-    if os.path.isdir(WORKDIR):
-        shutil.rmtree(WORKDIR)
+    if os.path.isdir(BASEDIR):
+        shutil.rmtree(BASEDIR)
     filename = os.path.join(utils.config['repo_path'], "yum.repos.d", REPOFILENAME)
     if os.path.isfile(filename):
         os.remove(filename)
 
 
 def test_repoid(utils):
-    utils.makedirs(REPODIR)
+    os.makedirs(REPODIR, exist_ok=True)
     utils.create_repoconf(os.path.join(REPODIR, REPOFILENAME),
                           "http://foo.bar.com/packages",
                           REPONAME)
@@ -46,7 +45,7 @@ def test_repoid(utils):
 
 
 def test_repo(utils):
-    utils.makedirs(REPODIR)
+    os.makedirs(REPODIR, exist_ok=True)
     utils.create_repoconf(os.path.join(REPODIR, REPOFILENAME),
                           "http://foo.bar.com/packages",
                           REPONAME)
@@ -62,7 +61,7 @@ def test_repo(utils):
 def test_repoid_created_repo(utils):
     reponame = 'photon-test'
     workdir = WORKDIR
-    utils.makedirs(workdir)
+    os.makedirs(workdir, exist_ok=True)
 
     ret = utils.run(['tdnf', '--repo={}'.format(reponame),
                      '--download-metadata',
@@ -94,3 +93,4 @@ def test_repoid_created_repo(utils):
                     cwd=workdir)
     assert ret['retval'] == 0
     assert utils.check_package(pkgname)
+    utils.erase_package(pkgname)

@@ -32,8 +32,8 @@ def teardown_test(utils):
 
 
 def install_root(utils, no_reposd=False):
-    utils.makedirs(INSTALLROOT)
-    utils.makedirs(os.path.join(INSTALLROOT, 'etc/tdnf'))
+    os.makedirs(INSTALLROOT, exist_ok=True)
+    os.makedirs(os.path.join(INSTALLROOT, 'etc/tdnf'), exist_ok=True)
     conffile = os.path.join(utils.config['repo_path'], 'tdnf.conf')
 
     # remove special settings for repodir and cachedir
@@ -45,10 +45,10 @@ def install_root(utils, no_reposd=False):
                     fout.write(line)
 
     if not no_reposd:
-        utils.makedirs(os.path.join(INSTALLROOT, 'etc/yum.repos.d'))
+        os.makedirs(os.path.join(INSTALLROOT, 'etc/yum.repos.d'), exist_ok=True)
         repofile = os.path.join(utils.config['repo_path'], "yum.repos.d", REPOFILENAME)
         shutil.copyfile(repofile, os.path.join(INSTALLROOT, 'etc/yum.repos.d', REPOFILENAME))
-    utils.makedirs(os.path.join(INSTALLROOT, 'var/cache/tdnf'))
+    os.makedirs(os.path.join(INSTALLROOT, 'var/cache/tdnf'), exist_ok=True)
     utils.run(['rpm', '--root', INSTALLROOT, '--initdb'])
 
 
@@ -116,7 +116,7 @@ def test_makecache(utils):
 # --setopt=reposdir overrides any dir in install root
 def test_setopt_reposdir_with_installroot(utils):
     install_root(utils)
-    utils.makedirs(REPODIR)
+    os.makedirs(REPODIR, exist_ok=True)
     utils.create_repoconf(os.path.join(REPODIR, REPOFILENAME),
                           "http://foo.bar.com/packages",
                           REPONAME)

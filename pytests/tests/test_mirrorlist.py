@@ -11,6 +11,7 @@ import shutil
 import pytest
 
 WORKDIR = '/root/mirrortest/workdir'
+BASEDIR = os.path.dirname(WORKDIR)
 REPONAME = 'mirrortest'
 REPOFILENAME = f"{REPONAME}.repo"
 MIRRORLIST_FILENAME = "mirror.list"
@@ -25,8 +26,8 @@ def setup_test(utils):
 def teardown_test(utils):
     pkgname = utils.config["mulversion_pkgname"]
     utils.erase_package(pkgname)
-    if os.path.isdir(WORKDIR):
-        shutil.rmtree(WORKDIR)
+    if os.path.isdir(BASEDIR):
+        shutil.rmtree(BASEDIR)
     filename = os.path.join(utils.config['repo_path'], "yum.repos.d", REPOFILENAME)
     if os.path.isfile(filename):
         os.remove(filename)
@@ -55,7 +56,7 @@ def create_repo_conf(repos, reposdir="/etc/yum.repos.d", insecure=False):
 def test_mirrrorlist(utils):
     reponame = REPONAME
     workdir = WORKDIR
-    utils.makedirs(workdir)
+    os.makedirs(workdir, exist_ok=True)
     mirrorlist_path = os.path.join(workdir, MIRRORLIST_FILENAME)
 
     # we should get a 404 for the first url and skip to the next one

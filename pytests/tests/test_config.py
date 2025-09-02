@@ -23,7 +23,7 @@ def setup_test(utils):
     tdnf_conf = os.path.join(utils.config['repo_path'], 'tdnf.conf')
     tdnf_repo = os.path.join(utils.tdnf_config.get('main', 'repodir'), 'photon-test.repo')
 
-    utils.makedirs(WORKDIR)
+    os.makedirs(WORKDIR, exist_ok=True)
     shutil.copy(tdnf_conf, TEST_CONF_PATH)
     shutil.copy(tdnf_repo, TEST_REPO_PATH)
 
@@ -36,7 +36,8 @@ def setup_test(utils):
 
 
 def teardown_test(utils):
-    shutil.rmtree(WORKDIR)
+    if os.path.isdir(WORKDIR):
+        shutil.rmtree(WORKDIR)
     pkg = utils.config['sglversion_pkgname']
     utils.run(['tdnf', 'erase', '-y', pkg])
 

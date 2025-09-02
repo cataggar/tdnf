@@ -17,7 +17,7 @@ CONFDIR = '/tmp/cleanreq'
 
 @pytest.fixture(scope='function', autouse=True)
 def setup_test(utils):
-    utils.makedirs(CONFDIR)
+    os.makedirs(CONFDIR, exist_ok=True)
     yield
     teardown_test(utils)
 

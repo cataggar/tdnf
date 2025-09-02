@@ -167,6 +167,7 @@ def test_upgrades(utils):
                      '--upgrades'])
     assert ret['retval'] == 0
     assert pkg_high in '\n'.join(ret['stdout'])
+    utils.erase_package(pkg_low)
 
 
 def test_changelog(utils):

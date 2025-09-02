@@ -16,7 +16,8 @@ def setup_test(utils):
 
 
 def teardown_test(utils):
-    pass
+    pkgname = utils.config["mulversion_pkgname"]
+    utils.erase_package(pkgname)
 
 
 def test_erase_no_arg(utils):

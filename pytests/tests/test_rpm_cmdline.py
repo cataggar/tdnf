@@ -70,7 +70,7 @@ def test_install_as_file_relpath1(utils):
     filename = os.path.basename(path)
     if os.path.isdir(tmpdir):
         shutil.rmtree(tmpdir)
-    utils.makedirs(tmpdir)
+    os.makedirs(tmpdir, exist_ok=True)
     shutil.copy(path, tmpdir)
     relpath = os.path.join('..', tmpdir, filename)
     cwd = os.getcwd()
@@ -145,6 +145,8 @@ def test_install_as_mixed(utils):
     assert ret['retval'] == 0
     assert utils.check_package(pkgname)
     assert utils.check_package(pkgname2)
+    ret = utils.run(f"tdnf remove -y {path} {pkgname2}")
+    assert ret['retval'] == 0
 
 
 # test installing a package that has the same name as a file

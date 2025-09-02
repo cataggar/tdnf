@@ -13,6 +13,7 @@ import platform
 import pytest
 
 WORKDIR = '/root/repofrompath/workdir'
+BASEDIR = os.path.dirname(WORKDIR)
 ARCH = platform.machine()
 
 
@@ -23,13 +24,13 @@ def setup_test(utils):
 
 
 def teardown_test(utils):
-    if os.path.isdir(WORKDIR):
-        shutil.rmtree(WORKDIR)
+    if os.path.isdir(BASEDIR):
+        shutil.rmtree(BASEDIR)
 
 
 def create_repo(utils):
     workdir = WORKDIR
-    utils.makedirs(workdir)
+    os.makedirs(workdir, exist_ok=True)
     reponame = 'photon-test'
 
     ret = utils.run(['tdnf', '--repo={}'.format(reponame),
@@ -74,6 +75,7 @@ def test_repofrompath_created_repo(utils):
                     cwd=workdir)
     assert ret['retval'] == 0
     assert utils.check_package(pkgname)
+    utils.erase_package(pkgname)
 
 
 # check for issue #359 - having set a repo with --repofrompath
@@ -98,13 +100,14 @@ def test_repofrompath_cmdline_repo(utils):
                     cwd=workdir)
     assert ret['retval'] == 0
     assert utils.check_package(pkgname)
+    utils.erase_package(pkgname)
 
 
 # reposync a repo and install from it using repofromdir
 def test_repofromdir_created_repo(utils):
     reponame = 'photon-test'
     workdir = WORKDIR
-    utils.makedirs(workdir)
+    os.makedirs(workdir, exist_ok=True)
 
     ret = utils.run(['tdnf', '--repo={}'.format(reponame),
                      'reposync'],
@@ -132,3 +135,4 @@ def test_repofromdir_created_repo(utils):
                     cwd=workdir)
     assert ret['retval'] == 0
     assert utils.check_package(pkgname)
+    utils.erase_package(pkgname)

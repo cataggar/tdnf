@@ -25,7 +25,9 @@ def test_glob_install(utils):
     cmd = "tdnf install -y tdnf*multi*".split()
     ret = utils.run(cmd)
     assert ret["retval"] == 0
-    cmd = "rpm -q tdnf-multi tdnf-test-multiversion".split()
+
+    mpkg = utils.config['mulversion_pkgname']
+    cmd = f"rpm -q tdnf-multi {mpkg}".split()
     ret = utils.run(cmd)
     assert ret["retval"] == 0
 
@@ -45,13 +47,15 @@ def test_glob_uninstall_with_all_repos_disabled(utils):
     ret = utils.run(cmd)
     assert ret["retval"] == 0
 
-    cmd = "rpm -q tdnf-multi tdnf-test-multiversion".split()
+    mpkg = utils.config['mulversion_pkgname']
+    cmd = f"rpm -q tdnf-multi {mpkg}".split()
     ret = utils.run(cmd)
     assert ret["retval"] == 0
 
     cmd = "tdnf remove -y tdnf*multi* --disablerepo=*".split()
     ret = utils.run(cmd)
     assert ret["retval"] == 0
-    cmd = "rpm -q tdnf-multi tdnf-test-multiversion".split()
+
+    cmd = f"rpm -q tdnf-multi {mpkg}".split()
     ret = utils.run(cmd)
     assert ret["retval"]

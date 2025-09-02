@@ -211,6 +211,11 @@ class TestUtils(object):
                 return True
         return False
 
+    def list_installed_packages(self):
+        ret = self._run("rpm -qa")
+        assert ret['retval'] == 0
+        return sorted(ret["stdout"])
+
     def erase_package(self, pkgname, pkgversion=None):
         if pkgversion:
             pkg = pkgname + '-' + pkgversion
@@ -270,7 +275,7 @@ class TestUtils(object):
         return True, None
 
     def _decorate_tdnf_cmd_for_test(self, cmd, noconfig=False):
-        if cmd[0] == 'tdnf' or cmd[0] == 'tdnf-config':
+        if cmd[0] in {'tdnf', 'tdnf-config'}:
             if 'build_dir' in self.config:
                 cmd[0] = os.path.join(self.config['build_dir'], 'bin', cmd[0])
             if ('-c' not in cmd and '--config' not in cmd and not noconfig):
@@ -291,15 +296,18 @@ class TestUtils(object):
         return self._run(memcheck_cmd + cmd, retvalonly=True)
 
     def run(self, cmd, cwd=None, noconfig=False):
+        if isinstance(cmd, str):
+            cmd = cmd.split()
         self._decorate_tdnf_cmd_for_test(cmd, noconfig)
         return self._run(cmd, cwd=cwd)
 
     def _run(self, cmd, retvalonly=False, cwd=None):
         use_shell = not isinstance(cmd, list)
         print(cmd)
-        process = subprocess.Popen(cmd, shell=use_shell,  # nosec
+        process = subprocess.Popen(cmd, shell=use_shell,
                                    stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE,
+                                   stdin=subprocess.DEVNULL,
                                    cwd=cwd)
         out, err = process.communicate()
         if retvalonly:
@@ -321,14 +329,6 @@ class TestUtils(object):
             ret['stderr'] = stderr.split('\n')
         ret['retval'] = retval
         return ret
-
-    # helper to create directory tree without complains when it exists:
-    def makedirs(self, d):
-        try:
-            os.makedirs(d)
-        except OSError as e:
-            if e.errno != errno.EEXIST:
-                raise
 
     def create_repoconf(self, filename, baseurl, name):
         templ = """
@@ -369,8 +369,10 @@ ui_repoid_vars=basearch
 @pytest.fixture(scope='session')
 def utils():
     test_utils = TestUtils()
+
     server = Process(target=TestRepoServer,
-                     args=(test_utils.config['repo_path'], ))
+                     args=(test_utils.config['repo_path'],))
+
     server.start()
 
     atexit.register(StopTestRepoServer, server)
@@ -391,3 +393,23 @@ def utils():
         sys.exit(1)
 
     return test_utils
+
+
+@pytest.fixture(scope="module", autouse=True)
+def check_packages_consistency(utils, request):
+    """
+    Automatically runs before and after every test.
+    Verifies that the set of installed packages remains unchanged.
+    """
+    baseline = utils.list_installed_packages()
+    yield
+    final = utils.list_installed_packages()
+    if set(final) != set(baseline):
+        __tracebackhide__ = True
+        added = sorted(set(final) - set(baseline))
+        removed = sorted(set(baseline) - set(final))
+        pytest.fail(
+            f"Installed packages changed in {request.node.fspath}!\n"
+            f"Added: {added}\n"
+            f"Removed: {removed}"
+        )

@@ -11,6 +11,7 @@ import shutil
 import pytest
 
 WORKDIR = '/root/baseurls/workdir'
+BASEDIR = os.path.dirname(WORKDIR)
 REPOFILENAME = 'baseurls.repo'
 REPONAME = 'baseurls-repo'
 
@@ -24,8 +25,8 @@ def setup_test(utils):
 def teardown_test(utils):
     pkgname = utils.config["mulversion_pkgname"]
     utils.erase_package(pkgname)
-    if os.path.isdir(WORKDIR):
-        shutil.rmtree(WORKDIR)
+    if os.path.isdir(BASEDIR):
+        shutil.rmtree(BASEDIR)
     filename = os.path.join(utils.config['repo_path'], "yum.repos.d", REPOFILENAME)
     if os.path.isfile(filename):
         os.remove(filename)
@@ -34,7 +35,7 @@ def teardown_test(utils):
 def test_multiple_baseurls(utils):
     reponame = REPONAME
     workdir = WORKDIR
-    utils.makedirs(workdir)
+    os.makedirs(workdir, exist_ok=True)
 
     filename = os.path.join(utils.config['repo_path'], "yum.repos.d", REPOFILENAME)
     # we should get a 404 for the first url and skip to the next one

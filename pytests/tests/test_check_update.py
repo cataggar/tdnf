@@ -19,7 +19,7 @@ TEST_CONF_PATH = os.path.join(WORKDIR, TEST_CONF_FILE)
 def setup_test(utils):
     tdnf_conf = os.path.join(utils.config['repo_path'], 'tdnf.conf')
 
-    utils.makedirs(WORKDIR)
+    os.makedirs(WORKDIR, exist_ok=True)
     shutil.copy(tdnf_conf, TEST_CONF_PATH)
 
     utils.edit_config({'dnf_check_update_compat': '1'}, section='main', filename=TEST_CONF_PATH)
@@ -29,7 +29,8 @@ def setup_test(utils):
 
 
 def teardown_test(utils):
-    shutil.rmtree(WORKDIR)
+    if os.path.isdir(WORKDIR):
+        shutil.rmtree(WORKDIR)
     spkg = utils.config["sglversion_pkgname"]
     mpkg = utils.config["mulversion_pkgname"]
     utils.run(['tdnf', 'erase', '-y', spkg, mpkg])
