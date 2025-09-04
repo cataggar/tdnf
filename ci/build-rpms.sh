@@ -1,13 +1,16 @@
 #!/bin/bash
+
 set -e
 
 rpmdir=${1:-rpms}
 
-rm -rf build
-mkdir -p build
+build_dir="build"
 
-pushd build
-cmake .. && ../scripts/build-tdnf-rpms ${rpmdir}
-popd
+[ -d ${build_dir} ] && rm -r ${build_dir}
+mkdir -p ${build_dir}
+
+cmake -S . -B ${build_dir}
+
+./scripts/build-tdnf-rpms ${rpmdir}
 
 createrepo ${rpmdir}
