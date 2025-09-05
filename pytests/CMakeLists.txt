@@ -33,7 +33,7 @@ install(FILES __init__.py conftest.py
 )
 
 add_custom_target(check
-    COMMAND ${CMAKE_COMMAND} -E env LD_LIBRARY_PATH="${CMAKE_LIBRARY_OUTPUT_DIRECTORY}" pytest
+    COMMAND ${CMAKE_COMMAND} -E env LD_LIBRARY_PATH="${CMAKE_LIBRARY_OUTPUT_DIRECTORY}" pytest -v
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     COMMENT "Running tests.."
 )
