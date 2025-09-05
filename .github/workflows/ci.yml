@@ -9,26 +9,53 @@ jobs:
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v2
-            - name: build container
+            - name: Build container
               working-directory: ${{ github.workspace }}
               run: |
                 docker build -t ${DIST}/tdnf-build -f ci/Dockerfile.${DIST} .
-            - name: run container with tests
+            - name: Run container with tests
               working-directory: ${{ github.workspace }}
               run: |
-                docker run --privileged --security-opt seccomp:unconfined --rm -e DIST -v$(pwd):/build -w/build ${DIST}/tdnf-build ./ci/docker-entrypoint.sh
+                docker run --privileged --security-opt seccomp:unconfined --rm \
+                  -e DIST \
+                  -v "$(pwd)":/build \
+                  -w /build \
+                  "${DIST}/tdnf-build" \
+                  ./ci/docker-entrypoint.sh
+            - name: Test tdnf built using LLVM in Photon container
+              working-directory: ${{ github.workspace }}
+              run: |
+                docker run --privileged --security-opt seccomp:unconfined --rm \
+                  -e DIST \
+                  -v "$(pwd)":/build \
+                  -w /build \
+                  "${DIST}/tdnf-build" \
+                  ./ci/llvm-tdnf-build.sh
     fedora:
         env:
             DIST: fedora
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v2
-            - name: build container
+            - name: Build container
               working-directory: ${{ github.workspace }}
               run: |
                 docker build -t ${DIST}/tdnf-build -f ci/Dockerfile.${DIST} .
-            - name: run container with tests
+            - name: Run container with tests
               working-directory: ${{ github.workspace }}
               run: |
-                docker run --security-opt seccomp:unconfined --rm -e DIST -v$(pwd):/build -w/build ${DIST}/tdnf-build ./ci/docker-entrypoint.sh
-
+                docker run --security-opt seccomp:unconfined --rm \
+                  -e DIST \
+                  -v "$(pwd)":/build \
+                  -w /build \
+                  "${DIST}/tdnf-build" \
+                  ./ci/docker-entrypoint.sh
+            - name: Test tdnf built using LLVM in Fedora container
+              working-directory: ${{ github.workspace }}
+              run: |
+                docker run --security-opt seccomp:unconfined --rm \
+                  -e DIST \
+                  -v "$(pwd)":/build \
+                  -w /build \
+                  "${DIST}/tdnf-build" \
+                  ./ci/llvm-tdnf-build.sh
