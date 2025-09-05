@@ -3,59 +3,84 @@ name: tdnf CI
 on: [pull_request, push, workflow_dispatch]
 
 jobs:
-    photon:
-        env:
-            DIST: photon
+    docker-build:
         runs-on: ubuntu-latest
-        steps:
-            - uses: actions/checkout@v2
-            - name: Build container
-              working-directory: ${{ github.workspace }}
-              run: |
-                docker build -t ${DIST}/tdnf-build -f ci/Dockerfile.${DIST} .
-            - name: Run container with tests
-              working-directory: ${{ github.workspace }}
-              run: |
-                docker run --privileged --security-opt seccomp:unconfined --rm \
-                  -e DIST \
-                  -v "$(pwd)":/build \
-                  -w /build \
-                  "${DIST}/tdnf-build" \
-                  ./ci/docker-entrypoint.sh
-            - name: Test tdnf built using LLVM in Photon container
-              working-directory: ${{ github.workspace }}
-              run: |
-                docker run --privileged --security-opt seccomp:unconfined --rm \
-                  -e DIST \
-                  -v "$(pwd)":/build \
-                  -w /build \
-                  "${DIST}/tdnf-build" \
-                  ./ci/llvm-tdnf-build.sh
-    fedora:
+        strategy:
+            matrix:
+                dist: [photon, fedora]
         env:
-            DIST: fedora
-        runs-on: ubuntu-latest
+            DIST: ${{ matrix.dist }}
         steps:
-            - uses: actions/checkout@v2
-            - name: Build container
-              working-directory: ${{ github.workspace }}
+            - uses: actions/checkout@v3
+
+            - name: Build container images
               run: |
-                docker build -t ${DIST}/tdnf-build -f ci/Dockerfile.${DIST} .
+                  docker build -t ${DIST}/tdnf-build -f ci/Dockerfile.${DIST} .
+
+            - name: Save Docker images
+              run: |
+                  docker save ${DIST}/tdnf-build | gzip > ${DIST}-tdnf-build.tar.gz
+
+            - name: Upload saved images
+              uses: actions/upload-artifact@v4
+              with:
+                  name: docker-image-${{ matrix.dist }}
+                  path: ${{ matrix.dist }}-tdnf-build.tar.gz
+
+    load-images-and-test:
+        runs-on: ubuntu-latest
+        needs: docker-build
+        strategy:
+            matrix:
+                dist: [photon, fedora]
+        env:
+            DIST: ${{ matrix.dist }}
+        steps:
+            - uses: actions/checkout@v3
+
+            - name: Download image artifact
+              uses: actions/download-artifact@v4
+              with:
+                  name: docker-image-${{ matrix.dist }}
+
+            - name: Load Docker image
+              run: |
+                  gunzip -c ${{ matrix.dist }}-tdnf-build.tar.gz | docker load
+
             - name: Run container with tests
-              working-directory: ${{ github.workspace }}
               run: |
-                docker run --security-opt seccomp:unconfined --rm \
-                  -e DIST \
-                  -v "$(pwd)":/build \
-                  -w /build \
-                  "${DIST}/tdnf-build" \
-                  ./ci/docker-entrypoint.sh
-            - name: Test tdnf built using LLVM in Fedora container
-              working-directory: ${{ github.workspace }}
+                  docker run --privileged --security-opt seccomp:unconfined --rm \
+                      -e DIST \
+                      -v "$(pwd)":/build \
+                      -w /build \
+                      "${DIST}/tdnf-build" \
+                      ./ci/docker-entrypoint.sh
+
+    llvm-tests:
+        runs-on: ubuntu-latest
+        needs: docker-build
+        strategy:
+            matrix:
+                dist: [photon, fedora]
+        env:
+            DIST: ${{ matrix.dist }}
+        steps:
+            - uses: actions/checkout@v3
+
+            - name: Download image artifact
+              uses: actions/download-artifact@v4
+              with:
+                  name: docker-image-${{ matrix.dist }}
+
+            - name: Load Docker image
               run: |
-                docker run --security-opt seccomp:unconfined --rm \
-                  -e DIST \
-                  -v "$(pwd)":/build \
-                  -w /build \
-                  "${DIST}/tdnf-build" \
-                  ./ci/llvm-tdnf-build.sh
+                  gunzip -c ${{ matrix.dist }}-tdnf-build.tar.gz | docker load
+
+            - name: Run LLVM tests
+              run: |
+                  docker run --privileged --security-opt seccomp:unconfined --rm \
+                      -e DIST \
+                      -v "$(pwd)":/build \
+                      -w /build \
+                      "${DIST}/tdnf-build" \
+                      ./ci/llvm-tdnf-build.sh
