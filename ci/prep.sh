@@ -51,11 +51,11 @@ elif grep -qw "Photon" ${rel_file}; then
     curl-devel
     glib
     glibc-debuginfo
+    python3-virtualenv
     shadow
     zlib-devel
   )
   tdnf -y upgrade --refresh
   tdnf remove -y toybox
   tdnf -y install --enablerepo=photon-debuginfo ${photon_packages[@]}
-  pip3 install flake8
 fi
