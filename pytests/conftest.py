@@ -101,7 +101,7 @@ class TestUtils(object):
             self.config.update(cli_args)
         self.config['distribution'] = os.environ.get('DIST', 'photon')
         script = os.path.join(self.config['test_path'], 'repo/setup-repo.sh')
-        ret = self.run(['sh', script, self.config['repo_path'], self.config['specs_dir']])
+        ret = self.run(['bash', script, self.config['repo_path'], self.config['specs_dir']])
         if ret['retval']:
             pytest.exit("An error occured while running {}, stdout: \n{}".format(
                 script,

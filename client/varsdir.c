@@ -38,6 +38,7 @@ struct cnfnode *parse_varsdirs(char *dirs[])
         while((dent = readdir(fdir))) {
             char buf[256], path[256];
             char *p;
+            int n;
 
             p = dent->d_name;
             /* skip disallowed filenames */
@@ -49,12 +50,15 @@ struct cnfnode *parse_varsdirs(char *dirs[])
                 continue;
             }
 
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wformat-truncation"
-            snprintf(path, sizeof(path), "%s/%s", dirs[i], dent->d_name);
-#pragma GCC diagnostic pop
-#endif /* __GNUC__ && !__clang__ */
+            n = snprintf(path, sizeof(path), "%s/%s", dirs[i], dent->d_name);
+            if (n < 0) {
+              goto error;
+            }
+
+            if (n >= (int)sizeof(path)) {
+                errno = ENAMETOOLONG;
+                goto error;
+            }
 
             fptr = fopen(path, "rt");
             if (fptr == NULL) {
