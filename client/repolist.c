@@ -255,6 +255,10 @@ TDNFCreateRepoFromDirectory(
     BAIL_ON_TDNF_ERROR(dwError);
 
     dwError = TDNFIsDir(pszPath, &nIsDir);
+    if (dwError) {
+        pr_err("CreateRepoFromDir: Error while operating on '%s', '%s'\n",
+                pszPath, strerror(errno));
+    }
     BAIL_ON_TDNF_ERROR(dwError);
 
     if (!nIsDir)
@@ -321,6 +325,10 @@ TDNFCreateRepoFromPath(
     if (pszPath[0] == '/')
     {
         dwError = TDNFIsDir(pszPath, &nIsDir);
+        if (dwError) {
+            pr_err("CreateRepoFromPath: Error while operating on '%s', '%s'\n",
+                    pszPath, strerror(errno));
+        }
         BAIL_ON_TDNF_ERROR(dwError);
 
         if (nIsDir)
