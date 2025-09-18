@@ -18,9 +18,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Build container images
         run: |
-          docker build -t ${DIST}/tdnf-build -f ci/Dockerfile.${DIST} .
+          docker buildx build \
+            --load \
+            --tag ${DIST}/tdnf-build \
+            --file ci/Dockerfile.${DIST} \
+            .
 
       - name: Save Docker images
         run: |
