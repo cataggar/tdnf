@@ -15,7 +15,7 @@
 #define INSTALL_UPGRADE 1
 #define INSTALL_REINSTALL 2
 
-uint32_t
+static uint32_t
 TDNFRpmCleanupTS(PTDNF pTdnf,
                  PTDNFRPMTS pTS)
 {
@@ -51,7 +51,7 @@ error:
     return dwError;
 }
 
-uint32_t
+static uint32_t
 TDNFRpmCreateTS(
     PTDNF pTdnf,
     PTDNF_SOLVED_PKG_INFO pSolvedInfo,
@@ -146,7 +146,7 @@ error:
     goto cleanup;
 }
 
-uint32_t
+static uint32_t
 TDNFRunTransactionWithHistory(
     PTDNF pTdnf,
     PTDNFRPMTS pTS,
@@ -431,7 +431,7 @@ error:
     goto cleanup;
 }
 
-uint32_t
+static uint32_t
 TDNFDetectPreTransFailure(
     rpmts pTS,
     char *pszError
@@ -520,14 +520,15 @@ error:
     goto cleanup;
 }
 
-int
+static int
 doCheck(PTDNFRPMTS pTS)
 {
     int nResult = 0;
+    rpmps ps;
 
     nResult = rpmtsCheck(pTS->pTS);
 
-    rpmps ps = rpmtsProblems(pTS->pTS);
+    ps = rpmtsProblems(pTS->pTS);
     if(ps)
     {
         int nProbs = rpmpsNumProblems(ps);
@@ -541,7 +542,7 @@ doCheck(PTDNFRPMTS pTS)
     return nResult;
 }
 
-void
+static void
 reportProblems(PTDNFRPMTS pTS)
 {
     rpmps ps = NULL;
@@ -608,7 +609,7 @@ error:
  * This can be disabled by setting "openmax=0" in the configuration.
  */
 
-uint32_t
+static uint32_t
 TDNFSetOpenMax(PTDNF pTdnf)
 {
     uint32_t dwError = 0;

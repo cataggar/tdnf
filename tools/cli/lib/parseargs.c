@@ -131,7 +131,7 @@ TDNFCliParseArgs(
     int nOptionIndex = 0;
     int nOption = 0;
     int nIndex = 0;
-    char* pszDefaultInstallRoot = "/";
+    const char* pszDefaultInstallRoot = "/";
 
     if(!ppCmdArgs)
     {
@@ -468,16 +468,6 @@ ParseRpmVerbosity(
 {
     uint32_t dwError = 0;
     uint32_t nIndex = 0;
-    typedef struct _stTemp
-    {
-        char *pszTypeName;
-        int nType;
-    } stTemp;
-
-    if (!pszRpmVerbosity || !pnRpmVerbosity)
-    {
-        return ERROR_TDNF_INVALID_PARAMETER;
-    }
 
     stTemp stTypes[] =
     {
@@ -490,6 +480,11 @@ ParseRpmVerbosity(
         {"info",       TDNF_RPMLOG_INFO},
         {"debug",      TDNF_RPMLOG_DEBUG},
     };
+
+    if (!pszRpmVerbosity || !pnRpmVerbosity)
+    {
+        return ERROR_TDNF_INVALID_PARAMETER;
+    }
 
     for (nIndex = 0; nIndex < ARRAY_SIZE(stTypes); ++nIndex)
     {
@@ -509,12 +504,12 @@ uint32_t
 HandleOptionsError(
     const char *pszName,
     const char *pszArg,
-    struct option *pstOptions
+    struct option *pstOpts
     )
 {
     uint32_t dwError = 0;
 
-    if (IsNullOrEmptyString(pszName) || !pstOptions)
+    if (IsNullOrEmptyString(pszName) || !pstOpts)
     {
         return ERROR_TDNF_INVALID_PARAMETER;
     }
@@ -522,7 +517,7 @@ HandleOptionsError(
     dwError = TDNFCliValidateOptions(
                   pszName,
                   pszArg,
-                  pstOptions);
+                  pstOpts);
     if (dwError == ERROR_TDNF_CLI_OPTION_NAME_INVALID)
     {
        TDNFCliShowNoSuchOption(pszName);

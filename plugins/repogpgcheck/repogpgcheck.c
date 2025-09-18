@@ -46,8 +46,7 @@ error:
 }
 
 uint32_t
-TDNFRepoGPGCheckVerifyVersion(
-    )
+TDNFRepoGPGCheckVerifyVersion(void)
 {
     uint32_t dwError = 0;
     const char *pszVersion = NULL;
@@ -63,7 +62,7 @@ error:
     return dwError;
 }
 
-uint32_t
+static uint32_t
 TDNFVerifyRepoMDSignature(
     PTDNF_PLUGIN_HANDLE pHandle,
     const char *pszRepoMD,
@@ -167,7 +166,7 @@ error:
     goto cleanup;
 }
 
-uint32_t
+static uint32_t
 TDNFVerifySignature(
     PTDNF_PLUGIN_HANDLE pHandle,
     const char *pcszRepoId,

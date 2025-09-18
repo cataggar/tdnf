@@ -8,12 +8,12 @@
 
 #include "includes.h"
 
-char*
+const char *
 TDNFGetUpdateInfoType(
     int nType
     )
 {
-    char* pszType = "Unknown";
+    const char *pszType = "Unknown";
 
     switch(nType)
     {

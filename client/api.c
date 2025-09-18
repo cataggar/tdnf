@@ -76,7 +76,7 @@ TDNFCheckPackages(
     PTDNF_CMD_ARGS pArgs = NULL;
     int nCmdCountOrig = 0;
     char **ppszCmdsOrig = NULL;
-    char *ppszCheckCmds[] = {"check", "*", NULL};
+    const char *ppszCheckCmds[] = {"check", "*", NULL};
 
     if(!pTdnf || !pTdnf->pArgs)
     {
@@ -93,7 +93,7 @@ TDNFCheckPackages(
 
     //pass all packages available to resolve with install operation
     pArgs->nCmdCount = 2;
-    pArgs->ppszCmds = ppszCheckCmds;
+    pArgs->ppszCmds = (char **)ppszCheckCmds;
 
     dwError = TDNFResolve(pTdnf, ALTER_INSTALL, &pSolvedPkgInfo);
     BAIL_ON_TDNF_ERROR(dwError);
@@ -795,7 +795,7 @@ error:
     goto cleanup;
 }
 
-uint32_t
+static uint32_t
 TDNFAddCmdLinePackages(
     PTDNF pTdnf,
     Queue *pQueueGoal
@@ -2199,10 +2199,11 @@ TDNFHistoryResolve(
         const char *pszPkgName = history_get_nevra(hnm, hd->added_ids[i]);
         if (pszPkgName)
         {
+            Queue qResult = {0};
+
             if (strncmp(pszPkgName, "gpg-pubkey-", 11) == 0)
                 continue;
 
-            Queue qResult = {0};
             queue_init(&qResult);
 
             dwError = SolvFindSolvablesByNevraStr(pTdnf->pSack->pPool,
@@ -2566,15 +2567,13 @@ TDNFCloseHandle(
 }
 
 const char*
-TDNFGetVersion(
-    )
+TDNFGetVersion(void)
 {
     return PACKAGE_VERSION;
 }
 
 const char*
-TDNFGetPackageName(
-    )
+TDNFGetPackageName(void)
 {
     return PACKAGE_NAME;
 }

@@ -15,3 +15,4 @@ add_library(${LIB_TDNF_LLCONF} STATIC
 	strutils.c
 )
 
+set_target_properties(${LIB_TDNF_LLCONF} PROPERTIES POSITION_INDEPENDENT_CODE ON)

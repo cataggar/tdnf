@@ -345,7 +345,8 @@ int compare_cnftree_children(const struct cnfnode *cn_root1, const struct cnfnod
 	return 0;
 }
 
-struct cnfnode *cnfnode_walk_step(struct cnfnode *cn)
+#if 0
+static struct cnfnode *cnfnode_walk_step(struct cnfnode *cn)
 {
 	if(cn->first_child)
 		return cn->first_child;
@@ -358,8 +359,10 @@ struct cnfnode *cnfnode_walk_step(struct cnfnode *cn)
 	}
 	return NULL;
 }
+#endif
 
-char *cnfnode_path(struct cnfnode *cn)
+#if 0
+static char *cnfnode_path(struct cnfnode *cn)
 {
 	struct cnfnode *cn_parent;
 	int size = 0;
@@ -391,6 +394,7 @@ char *cnfnode_path(struct cnfnode *cn)
 	}
 	return path;
 }
+#endif
 
 void dump_nodes(struct cnfnode *cn_root, int level)
 {

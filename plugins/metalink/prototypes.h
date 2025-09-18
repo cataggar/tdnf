@@ -77,12 +77,10 @@ TDNFCheckRepoMDFileHashFromMetalink(
 // api.c
 
 const char *
-TDNFPluginGetVersion(
-    );
+TDNFPluginGetVersion(void);
 
 const char *
-TDNFPluginGetName(
-    );
+TDNFPluginGetName(void);
 
 uint32_t
 TDNFPluginLoadInterface(

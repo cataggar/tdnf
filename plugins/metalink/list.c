@@ -8,7 +8,7 @@
 
 #include "includes.h"
 
-TDNF_ML_LIST*
+static TDNF_ML_LIST*
 TDNFMergeList(
     TDNF_ML_LIST* listA,
     TDNF_ML_LIST* listB
@@ -67,7 +67,7 @@ error:
  * and backRef. If the length is odd, the extra node should
  * go in the front list.
  */
-void
+static void
 TDNFFrontBackSplit(
     TDNF_ML_LIST* currHead,
     TDNF_ML_LIST** frontRef,

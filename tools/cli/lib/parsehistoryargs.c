@@ -69,7 +69,7 @@ TDNFCliParseHistoryArgs(
 
     if (pArgs->nCmdCount > 2 && isdigit(pArgs->ppszCmds[2][0]))
     {
-        dwError = TDNFSplitStringToArray(pArgs->ppszCmds[2], "-", &ppszRange);
+        dwError = TDNFSplitStringToArray(pArgs->ppszCmds[2], (char *)"-", &ppszRange);
         BAIL_ON_CLI_ERROR(dwError);
 
         pHistoryArgs->nFrom = strtoi(ppszRange[0]);

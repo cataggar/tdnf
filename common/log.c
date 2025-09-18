@@ -36,7 +36,7 @@ void GlobalSetDnfCheckUpdateCompat(int32_t val)
     }
 }
 
-bool GlobalGetDnfCheckUpdateCompat()
+bool GlobalGetDnfCheckUpdateCompat(void)
 {
     return isDnfCheckUpdateCompat;
 }

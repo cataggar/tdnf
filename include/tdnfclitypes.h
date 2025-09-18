@@ -24,10 +24,10 @@ typedef uint32_t (*PFN_CMD)(PTDNF_CLI_CONTEXT, PTDNF_CMD_ARGS);
 //Map command name to client function
 typedef struct _TDNF_CLI_CMD_MAP
 {
-    char* pszCmdName;
+    const char *pszCmdName;
     PFN_CMD pFnCmd;
     bool ReqRoot;
-}TDNF_CLI_CMD_MAP, *PTDNF_CLI_CMD_MAP;
+} TDNF_CLI_CMD_MAP, *PTDNF_CLI_CMD_MAP;
 
 typedef struct _TDNF_LIST_ARGS
 {

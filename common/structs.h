@@ -47,14 +47,14 @@ enum {
 };
 
 typedef struct _hash_op {
-    char *hash_type;
+    const char *hash_type;
     unsigned int length;
 } hash_op;
 
 typedef struct _hash_type {
-    char *hash_name;
+    const char *hash_name;
     unsigned int hash_value;
-}hash_type;
+} hash_type;
 
 extern hash_op hash_ops[TDNF_HASH_SENTINEL];
 

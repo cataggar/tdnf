@@ -63,7 +63,7 @@ void unregister_all(void)
 void destroy_cnfmodule(struct cnfmodule *cm)
 {
     if(cm->default_file) free(cm->default_file);
-    if(cm->name) free(cm->name);
+    if(cm->name) free((char *)cm->name);
     if(cm->opt_root) destroy_cnftree(cm->opt_root);
     free(cm);
 }
@@ -138,12 +138,14 @@ void cnfmodule_setopts(struct cnfmodule *cm, struct cnfnode *opt_root)
     @param cm pointer to the module
     @param name pointer to the name
 */
-void cnfmodule_setname(struct cnfmodule *cm, const char *name)
+#if 0
+static void cnfmodule_setname(struct cnfmodule *cm, const char *name)
 {
     if(cm->name)
-        free(cm->name);
+        free((char *)cm->name);
     cm->name = strdup(name);
 }
+#endif
 
 /** Parse module options
  * Parse an option string into a cnfnode tree. This can be used to
@@ -162,9 +164,13 @@ struct cnfnode *parse_options(const char *string)
     p = string;
     while(p && *p){
         char *q = buf;
-        while(*p && *p != '=' && *p != ',' && q < buf+255) *q++ = *p++;
+        struct cnfnode *cn;
+
+        while(*p && *p != '=' && *p != ',' && q < buf+255)
+            *q++ = *p++;
+
         *q = 0;
-        struct cnfnode *cn = create_cnfnode(buf);
+        cn = create_cnfnode(buf);
         append_node(cn_top, cn);
 
         if(*p == '='){

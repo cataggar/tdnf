@@ -378,7 +378,7 @@ error:
     goto cleanup;
 }
 
-uint32_t
+static uint32_t
 TDNFEventRepoMDDownloadStart(
     PTDNF pTdnf,
     const char *pcszRepoId,
@@ -420,7 +420,7 @@ error:
     goto cleanup;
 }
 
-uint32_t
+static uint32_t
 TDNFEventRepoMDDownloadEnd(
     PTDNF pTdnf,
     const char *pcszRepoId,
@@ -507,6 +507,7 @@ TDNFGetRepoMD(
         time_t now = time(NULL);
         int needDownload = 0;
         struct stat st = {0};
+        int i, j;
 
         dwError = TDNFGetCachePath(pTdnf, pRepoData,
                                    TDNF_REPO_METADATA_MIRRORLIST, NULL,
@@ -532,7 +533,6 @@ TDNFGetRepoMD(
         BAIL_ON_TDNF_ERROR(dwError);
 
         /* remove comments from mirror file */
-        int i, j;
         for(i = 0, j = 0; pRepoData->ppszBaseUrls[i]; i++) {
             if (pRepoData->ppszBaseUrls[i][0] == '#')
                 continue;
@@ -724,7 +724,7 @@ error:
     goto cleanup;
 }
 
-uint32_t
+static uint32_t
 TDNFDownloadRepoMDPart(
     PTDNF pTdnf,
     PTDNF_REPO_DATA pRepo,

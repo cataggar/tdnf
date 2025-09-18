@@ -139,12 +139,7 @@ TDNFCliParseMode(
     int nIndex = 0;
     int nCount = 0;
     TDNF_UPDATEINFO_OUTPUT nMode = OUTPUT_SUMMARY;
-    struct stTemp
-    {
-        char* pszModeName;
-        int nMode;
-    };
-    struct stTemp  stModes[] =
+    stTemp stModes[] =
     {
         {"summary",   OUTPUT_SUMMARY},
         {"list",      OUTPUT_LIST},
@@ -160,9 +155,9 @@ TDNFCliParseMode(
     nCount = ARRAY_SIZE(stModes);
     for(nIndex = 0; nIndex < nCount; ++nIndex)
     {
-        if(!strcasecmp(stModes[nIndex].pszModeName, pszMode))
+        if(!strcasecmp(stModes[nIndex].pszTypeName, pszMode))
         {
-            nMode = stModes[nIndex].nMode;
+            nMode = stModes[nIndex].nType;
             break;
         }
     }

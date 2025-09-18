@@ -30,7 +30,7 @@ struct MetalinkElementInfo {
     const char   **attributes;
 };
 
-int
+static int
 TDNFGetResourceType(
     const char *resource_type,
     int *type

@@ -269,7 +269,7 @@ TDNFPopulateUpdateInfoOfOneAdvisory(
     PTDNF_UPDATEINFO pInfo = NULL;
     const char* pszTemp = NULL;
     uint32_t dwKeepEntry = 1;
-    const int DATELEN = 200;
+#define DATELEN 200
     char szDate[DATELEN];
     int dwReboot = 0;
 
@@ -370,7 +370,7 @@ TDNFPopulateUpdateInfoOfOneAdvisory(
                 BAIL_ON_TDNF_ERROR(dwError);
             }
             memset(szDate, 0, DATELEN);
-            dwError = strftime(szDate, DATELEN, "%c", pLocalTime);
+            dwError = strftime(szDate, DATELEN, "%Y-%m-%d %H:%M:%S", pLocalTime);
             if(dwError == 0)
             {
                 dwError = ERROR_TDNF_INVALID_PARAMETER;
@@ -386,6 +386,8 @@ TDNFPopulateUpdateInfoOfOneAdvisory(
     }
 
     *ppInfo = pInfo;
+
+#undef DATALEN
 
 cleanup:
     return dwError;

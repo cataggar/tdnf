@@ -150,7 +150,7 @@ error:
     goto cleanup;
 }
 
-uint32_t
+static uint32_t
 SolvLoadRepomdOther(
     Repo* pRepo,
     const char* pszOther

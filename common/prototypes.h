@@ -23,12 +23,6 @@ TDNFReAllocateMemory(
     void** ppMemory
     );
 
-uint32_t
-TDNFAllocateString(
-    const char* pszSrc,
-    char** ppszDst
-    );
-
 void
 TDNFFreeMemory(
     void* pMemory
@@ -76,6 +70,7 @@ TDNFJoinArrayToStringSorted(
     char **ppszResult
 );
 
+__attribute__((format(printf, 2, 3)))
 uint32_t
 TDNFAllocateStringPrintf(
     char** ppszDst,
@@ -294,6 +289,7 @@ GlobalGetDnfCheckUpdateCompat(
     void
     );
 
+__attribute__((format(printf, 2, 3)))
 void
 log_console(
     int32_t loglevel,
@@ -339,6 +335,11 @@ uint32_t
 TDNFChecksumFromHexDigest(
     const char *hex_digest,
     unsigned char *ppdigest
+    );
+
+void
+TDNFFreeUpdateInfoPackages(
+    PTDNF_UPDATEINFO_PKG pPkg
     );
 
 #endif /* __COMMON_PROTOTYPES_H__ */

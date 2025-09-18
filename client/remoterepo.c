@@ -59,7 +59,7 @@ progress_cb(
     return 0;
 }
 
-uint32_t
+static uint32_t
 set_progress_cb(
     CURL *pCurl,
     const char *pszData

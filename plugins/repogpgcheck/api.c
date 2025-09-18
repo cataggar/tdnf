@@ -13,15 +13,13 @@
 TDNF_PLUGIN_INTERFACE _interface = {0};
 
 const char *
-TDNFPluginGetVersion(
-    )
+TDNFPluginGetVersion(void)
 {
     return PLUGIN_VERSION;
 }
 
 const char *
-TDNFPluginGetName(
-    )
+TDNFPluginGetName(void)
 {
     return PLUGIN_NAME;
 }
@@ -55,9 +53,10 @@ TDNFRepoGPGCheckInitialize(
     PTDNF_PLUGIN_HANDLE *ppHandle
     )
 {
-    UNUSED(pszConfig);
     uint32_t dwError = 0;
     PTDNF_PLUGIN_HANDLE pHandle = NULL;
+
+    UNUSED(pszConfig);
 
     /* plugin does not expect config */
     if (!ppHandle)
@@ -214,7 +213,7 @@ TDNFRepoGPGCheckGetErrorString(
 {
     uint32_t dwError = 0;
     char *pszError = NULL;
-    char *pszErrorPre = NULL;
+    const char *pszErrorPre = NULL;
     const char *pszGPGError = NULL;
     TDNF_ERROR_DESC arErrorDesc[] = REPOGPGCHECK_ERROR_TABLE;
 

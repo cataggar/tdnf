@@ -27,7 +27,7 @@ extern struct cnfmodule *cnfmodules;
 struct cnfmodule
 {
   struct cnfmodule *next; /**< The next module in the registration list. */
-  char *name; /**< The text name of this parser module. */
+  const char *name; /**< The text name of this parser module. */
   char *default_file; /**< The file that this module operates on, if none is specified when the parser is instantiated. */
   struct cnfnode *(*parser)(struct cnfmodule *cm, FILE *fptr); /**< The function to use to create an in-memory tree from the given stream. */
   int (*unparser)(struct cnfmodule *cm, FILE *fptr, struct cnfnode *cn_root); /**< The function to use to write the in-memory tree to the given stream. */

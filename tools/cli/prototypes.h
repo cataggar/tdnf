@@ -126,48 +126,12 @@ TDNFCliInvokeAlterHistory(
     PTDNF_HISTORY_ARGS pHistoryArgs
     );
 
-//help.c
-void
-TDNFCliShowUsage(
-    void
-    );
-
-void
-TDNFCliShowHelp(
-    void
-    );
-
-void
-TDNFCliShowNoSuchCommand(
-    const char* pszCmd
-    );
-
 void
 TDNFCliShowNoSuchOption(
     const char* pszOption
     );
 
 //installcmd.c
-
-uint32_t
-PrintSolvedInfo(
-    PTDNF_SOLVED_PKG_INFO pSolvedPkgInfo
-    );
-
-uint32_t
-    PrintSolvedInfoJson(
-    PTDNF_SOLVED_PKG_INFO pSolvedPkgInfo
-    );
-
-uint32_t
-PrintNotAvailable(
-    char** ppszPkgsNotAvailable
-    );
-
-uint32_t
-PrintExistingPackagesSkipped(
-    PTDNF_PKG_INFO pPkgInfos
-    );
 
 uint32_t
 TDNFCliInvokeUpdateInfo(
@@ -223,20 +187,6 @@ TDNFCliValidateOptions(
     struct option* pKnownOptions
     );
 
-//output.c
-
-uint32_t
-GetConsoleWidth(
-    int *pnConsoleWidth
-    );
-
-uint32_t
-GetColumnWidths(
-    int nCount,
-    const int *pnColPercents,
-    int *pnColWidths
-    );
-
 //parseargs.c
 uint32_t
 TDNFCopyOptions(
@@ -264,36 +214,11 @@ HandleOptionsError(
     struct option* pstOptions
     );
 
-uint32_t
-TDNFCliParseArgs(
-    int argc,
-    char** argv,
-    PTDNF_CMD_ARGS* ppCmdArgs
-    );
-
 //parsecleanargs.c
 uint32_t
 ParseCleanType(
     const char* pszCleanType,
     uint32_t* pnCleanType
-    );
-
-uint32_t
-TDNFCliParseCleanArgs(
-    PTDNF_CMD_ARGS pCmdArgs,
-    uint32_t* pnCleanType
-    );
-
-// psarsehistorargs.c
-uint32_t
-TDNFCliParseHistoryArgs(
-    PTDNF_CMD_ARGS pArgs,
-    PTDNF_HISTORY_ARGS* ppHistoryArgs
-    );
-
-void
-TDNFCliFreeHistoryArgs(
-    PTDNF_HISTORY_ARGS pHistoryArgs
     );
 
 //parselistargs.c
@@ -303,12 +228,6 @@ ParseScope(
     TDNF_SCOPE* pnScope
     );
 
-uint32_t
-TDNFCliParseListArgs(
-    PTDNF_CMD_ARGS pCmdArgs,
-    PTDNF_LIST_ARGS* ppListArgs
-    );
-
 //parserepolistargs.c
 uint32_t
 ParseFilter(
@@ -316,37 +235,11 @@ ParseFilter(
     TDNF_REPOLISTFILTER* pnFilter
     );
 
-uint32_t
-TDNFCliParseRepoListArgs(
-    PTDNF_CMD_ARGS pCmdArgs,
-    TDNF_REPOLISTFILTER* pnFilter
-    );
-
-//parsereposyncargs.c
-uint32_t
-TDNFCliParseRepoSyncArgs(
-    PTDNF_CMD_ARGS pCmdArgs,
-    PTDNF_REPOSYNC_ARGS* ppReposyncArgs
-    );
-
-//parserepoqueryargs.c
-uint32_t
-TDNFCliParseRepoQueryArgs(
-    PTDNF_CMD_ARGS pCmdArgs,
-    PTDNF_REPOQUERY_ARGS* ppRepoqueryArgs
-    );
-
 //parseupdateinfo.c
 uint32_t
 ParseMode(
     const char* pszOutMode,
     TDNF_UPDATEINFO_OUTPUT* pnOutMode
-    );
-
-uint32_t
-TDNFCliParseUpdateInfoArgs(
-    PTDNF_CMD_ARGS pCmdArgs,
-    PTDNF_UPDATEINFO_ARGS* ppUpdateInfoArgs
     );
 
 //updateinfocmd.c

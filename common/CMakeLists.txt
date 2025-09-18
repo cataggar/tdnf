@@ -16,3 +16,5 @@ add_library(${LIB_TDNF_COMMON} STATIC
     log.c
     lock.c
 )
+
+set_target_properties(${LIB_TDNF_COMMON} PROPERTIES POSITION_INDEPENDENT_CODE ON)

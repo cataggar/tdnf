@@ -36,7 +36,7 @@ HandleOptionsError(
     );
 
 //updateinfocmd.c
-char*
+const char*
 TDNFGetUpdateInfoType(
     int nType
     );

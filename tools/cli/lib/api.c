@@ -14,7 +14,7 @@ static uint32_t format_string(
     void *data
 );
 
-char *depKey[] = {
+const char *depKey[] = {
     "provides",
     "obsoletes",
     "conflicts",
@@ -745,7 +745,7 @@ error:
 
 /* similar semantics as snprintf() */
 static uint32_t format_string(char **out, size_t size, const char *format,
-                       uint32_t (*tag_handler)(const char *, void *, char **),
+                       uint32_t (*tag_handler_fp)(const char *, void *, char **),
                        void *data)
 {
     const char *p = format;
@@ -757,13 +757,15 @@ static uint32_t format_string(char **out, size_t size, const char *format,
     while (*p) {
         if (*p == '%' && p[1] == '{') {
             const char *tag_start = p + 2;
+            char *tag = NULL;
+            char *value = NULL;
             const char *tag_end = strchr(tag_start, '}');
+            size_t tag_len;
+
             if (!tag_end)
                 return 1;
 
-            char *tag = NULL;
-            char *value = NULL;
-            size_t tag_len = tag_end - tag_start;
+            tag_len = tag_end - tag_start;
 
             dwError = TDNFAllocateMemory(tag_len + 1, 1, (void **)&tag);
             BAIL_ON_TDNF_ERROR(dwError);
@@ -771,7 +773,7 @@ static uint32_t format_string(char **out, size_t size, const char *format,
             strncpy(tag, tag_start, tag_len);
             tag[tag_len] = '\0';
 
-            dwError = tag_handler(tag, data, &value);
+            dwError = tag_handler_fp(tag, data, &value);
             if (dwError == ERROR_TDNF_INVALID_PARAMETER) {
                 pr_err("Unknown tag: %s\n", tag);
             }
@@ -797,10 +799,13 @@ static uint32_t format_string(char **out, size_t size, const char *format,
             p = tag_end + 1;
         }
         else if (*p == '\\') {
+            char esc;
+            char replace;
+
             // Handle escape sequences
             p++;
-            char esc = *p;
-            char replace = 0;
+            esc = *p;
+            replace = 0;
 
             switch (esc) {
                 case '\"': replace = '\"'; break;
@@ -979,7 +984,7 @@ TDNFCliRepoQueryCommand(
             }
             if ((pRepoqueryArgs->depKeySet & (1 << depkey)) && (pPkgInfo->pppszDependencies[depkey]))
             {
-                char *strDepKeys[] = {"Provides", "Obsoletes", "Conflicts",
+                const char *strDepKeys[] = {"Provides", "Obsoletes", "Conflicts",
                                       "Requires", "Recommends", "Suggests",
                                       "Supplements", "Enhances", "Depends",
                                       "RequiresPre"};
@@ -998,18 +1003,19 @@ TDNFCliRepoQueryCommand(
             }
             if (pPkgInfo->pChangeLogEntries)
             {
+                PTDNF_PKG_CHANGELOG_ENTRY pEntry;
+
                 jd_list = jd_create(0);
                 CHECK_JD_NULL(jd_list);
 
                 CHECK_JD_RC(jd_list_start(jd_list));
 
-                PTDNF_PKG_CHANGELOG_ENTRY pEntry;
                 for (pEntry = pPkgInfo->pChangeLogEntries; pEntry; pEntry = pEntry->pNext)
                 {
+                    char szTime[20] = {0};
+
                     jd_entry = jd_create(0);
                     CHECK_JD_NULL(jd_entry);
-
-                    char szTime[20] = {0};
 
                     jd_map_start(jd_entry);
 
@@ -1041,8 +1047,9 @@ TDNFCliRepoQueryCommand(
     {
         for (i = 0; i < (int)dwCount; i++)
         {
-            pPkgInfo = &pPkgInfos[i];
             size_t size = strlen(pRepoqueryArgs->pszQueryFormat) * 4;
+
+            pPkgInfo = &pPkgInfos[i];
 
             dwError = TDNFAllocateMemory(size, sizeof(char), (void **)&pszResult);
             BAIL_ON_CLI_ERROR(dwError);
@@ -1203,7 +1210,7 @@ TDNFCliCheckUpdateCommand(
         {
             pPkg = &pPkgInfo[dwIndex];
             pr_crit("%*s\r", 80, pPkg->pszRepoName);
-            pr_crit("%%s\r", 50, pPkg->pszEVR);
+            pr_crit("%*s\r", 50, pPkg->pszEVR);
             pr_crit("%s.%s", pPkg->pszName, pPkg->pszArch);
             pr_crit("\n");
         }

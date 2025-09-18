@@ -1037,7 +1037,13 @@ int *get_ids_from_map(const char *map, int map_size, int *pcount)
         if (map_isset(map, id))
             count++;
     }
+
+    if (count == 0) {
+        return ids;
+    }
+
     check_ptr(ids = calloc(count, sizeof(int)));
+
     for (id = 1; id <= map_size; id++) {
         if (map_isset(map, id))
             ids[j++] = id;
@@ -1209,7 +1215,7 @@ error:
 }
 
 /* set ctx to the state at trans_id */
-int history_set_state(struct history_ctx *ctx, int trans_id)
+static int history_set_state(struct history_ctx *ctx, int trans_id)
 {
     int rc = 0;
     char *installed_map = NULL;
@@ -1355,14 +1361,16 @@ int history_get_transactions(struct history_ctx *ctx,
     for (i = 0, step = sqlite3_step(res);
          step == SQLITE_ROW;
          step = sqlite3_step(res), i++) {
+        const char *cookie;
+        const char *cmdline;
         check_cond(i >= 0 && i < count);
 
         tas[i].id = sqlite3_column_int(res, COLUMN_TRANSACTIONS_ID);
 
-        const char *cookie = (char *)sqlite3_column_text(res, COLUMN_TRANSACTIONS_COOKIE);
+        cookie = (char *)sqlite3_column_text(res, COLUMN_TRANSACTIONS_COOKIE);
         tas[i].cookie = cookie ? strdup(cookie) : NULL;
 
-        const char *cmdline = (char *)sqlite3_column_text(res, COLUMN_TRANSACTIONS_CMDLINE);
+        cmdline = (char *)sqlite3_column_text(res, COLUMN_TRANSACTIONS_CMDLINE);
         tas[i].cmdline = cmdline ? strdup(cmdline) : NULL;
 
         tas[i].timestamp = sqlite3_column_int(res, COLUMN_TRANSACTIONS_TIMESTAMP);

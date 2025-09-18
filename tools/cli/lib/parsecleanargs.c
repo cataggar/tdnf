@@ -57,12 +57,7 @@ TDNFCliParseCleanType(
     uint32_t dwError = 0;
     int nIndex = 0;
     uint32_t nCleanType = CLEANTYPE_ALL;
-    struct stTemp
-    {
-        char* pszTypeName;
-        int nType;
-    };
-    struct stTemp  stCleanTypes[] =
+    stTemp stCleanTypes[] =
     {
         {"packages",      CLEANTYPE_PACKAGES},
         {"metadata",      CLEANTYPE_METADATA},
