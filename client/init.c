@@ -8,52 +8,6 @@
 
 #include "includes.h"
 
-
-uint32_t
-TDNFCloneSetOpts(
-    PTDNF_CMD_OPT pCmdOptIn,
-    PTDNF_CMD_OPT* ppCmdOpt
-    )
-{
-    uint32_t dwError = 0;
-    PTDNF_CMD_OPT pCmdOpt = NULL;
-    PTDNF_CMD_OPT pCmdOptCurrent = NULL;
-    PTDNF_CMD_OPT* ppCmdOptCurrent = NULL;
-
-    if(!pCmdOptIn || !ppCmdOpt)
-    {
-        dwError = ERROR_TDNF_INVALID_PARAMETER;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    for (ppCmdOptCurrent = &pCmdOpt; pCmdOptIn; pCmdOptIn = pCmdOptIn->pNext)
-    {
-        dwError = TDNFAllocateMemory(1,
-                                     sizeof(TDNF_CMD_OPT),
-                                     (void**)ppCmdOptCurrent);
-        BAIL_ON_TDNF_ERROR(dwError);
-
-        pCmdOptCurrent = *ppCmdOptCurrent;
-
-        dwError = TDNFAllocateString(pCmdOptIn->pszOptName,
-                                     &pCmdOptCurrent->pszOptName);
-        BAIL_ON_TDNF_ERROR(dwError);
-
-        dwError = TDNFAllocateString(pCmdOptIn->pszOptValue,
-                                    &pCmdOptCurrent->pszOptValue);
-        BAIL_ON_TDNF_ERROR(dwError);
-
-        ppCmdOptCurrent = &(pCmdOptCurrent->pNext);
-    }
-
-    *ppCmdOpt = pCmdOpt;
-cleanup:
-    return dwError;
-
-error:
-    goto cleanup;
-}
-
 static
 int _repo_compare(const void *ppRepo1, const void *ppRepo2)
 {
