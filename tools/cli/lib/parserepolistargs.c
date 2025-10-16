@@ -53,12 +53,7 @@ TDNFCliParseFilter(
     uint32_t dwError = 0;
     int nIndex = 0;
     TDNF_REPOLISTFILTER nFilter = REPOLISTFILTER_ENABLED;
-    struct stTemp
-    {
-        char* pszTypeName;
-        int nType;
-    };
-    struct stTemp  stFilterTypes[] =
+    stTemp stFilterTypes[] =
     {
         {"all",      REPOLISTFILTER_ALL},
         {"enabled",  REPOLISTFILTER_ENABLED},

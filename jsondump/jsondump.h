@@ -24,8 +24,10 @@ int jd_map_add_int(struct json_dump *jd, const char *key, int value);
 int jd_map_add_int64(struct json_dump *jd, const char *key, int64_t value);
 int jd_map_add_bool(struct json_dump *jd, const char *key, int value);
 int jd_map_add_null(struct json_dump *jd, const char *key);
-int jd_map_add_fmt(struct json_dump *jd, const char *key, const char *format, ...);
 int jd_map_add_child(struct json_dump *jd, const char *key, const struct json_dump *jd_child);
+
+__attribute__((format(printf, 3, 4)))
+int jd_map_add_fmt(struct json_dump *jd, const char *key, const char *format, ...);
 
 int jd_list_start(struct json_dump *jd);
 int jd_list_add_string(struct json_dump *jd, const char *value);
@@ -33,5 +35,7 @@ int jd_list_add_int(struct json_dump *jd, int value);
 int jd_list_add_int64(struct json_dump *jd, int64_t value);
 int jd_list_add_bool(struct json_dump *jd, int value);
 int jd_list_add_null(struct json_dump *jd);
-int jd_list_add_fmt(struct json_dump *jd, const char *format, ...);
 int jd_list_add_child(struct json_dump *jd, const struct json_dump *jd_child);
+
+__attribute__((format(printf, 2, 3)))
+int jd_list_add_fmt(struct json_dump *jd, const char *format, ...);

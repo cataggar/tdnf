@@ -478,12 +478,6 @@ SolvFindAllUpDownCandidates(
     );
 
 uint32_t
-SolvGetUpdateAdvisories(
-    PSolvSack pSack,
-    Id dwPkgIdpkg,
-    PSolvPackageList* ppPkgList);
-
-uint32_t
 SolvApplyDepsFilter(
     PSolvQuery pQuery,
     char **ppszDeps,

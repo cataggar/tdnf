@@ -38,6 +38,10 @@ static uint32_t TDNFParseOSInfo(PTDNF_CONF pConf, const char *os_rel_fn)
     FILE *fp = NULL;
     size_t s;
     char *buf;
+    const char keys[][KEY_MAX_LEN] = {
+        "ID",
+        "VERSION_ID"
+    };
 
     fp = fopen(os_rel_fn, "r");
     if (!fp) {
@@ -49,14 +53,10 @@ static uint32_t TDNFParseOSInfo(PTDNF_CONF pConf, const char *os_rel_fn)
     dwError = TDNFAllocateMemory(1, s, (void **)&buf);
     BAIL_ON_TDNF_ERROR(dwError);
 
-    const char keys[][KEY_MAX_LEN] = {
-        "ID",
-        "VERSION_ID"
-    };
-
     while (getline(&buf, &s, fp) >= 0) {
         buf[strcspn(buf, "\n")] = '\0';
         for (int i = 0; i < (int)ARRAY_SIZE(keys); ++i) {
+            char *beg;
             const char *key = keys[i];
             int key_l = strlen(key);
 
@@ -64,7 +64,7 @@ static uint32_t TDNFParseOSInfo(PTDNF_CONF pConf, const char *os_rel_fn)
                 continue;
 
             /* read the value within double quotes */
-            char *beg = strchr(buf + key_l + 1, '"'); // skip till 'KEY='
+            beg = strchr(buf + key_l + 1, '"'); // skip till 'KEY='
             if (beg) {
                 char *end;
 
@@ -147,19 +147,19 @@ TDNFConfigFromCnfTree(PTDNF_CONF pConf, struct cnfnode *cn_top)
         else if (strcmp(cn->name, TDNF_CONF_KEY_DISTROVERPKGS) == 0)
         {
             dwError = TDNFSplitStringToArray(cn->value,
-                                             " ", &pConf->ppszDistroVerPkgs);
+                                             (char *)" ", &pConf->ppszDistroVerPkgs);
             BAIL_ON_TDNF_ERROR(dwError);
         }
         else if (strcmp(cn->name, TDNF_CONF_KEY_EXCLUDE) == 0)
         {
             dwError = TDNFSplitStringToArray(cn->value,
-                                             " ", &pConf->ppszExcludes);
+                                             (char *)" ", &pConf->ppszExcludes);
             BAIL_ON_TDNF_ERROR(dwError);
         }
         else if (strcmp(cn->name, TDNF_CONF_KEY_MINVERSIONS) == 0)
         {
             dwError = TDNFSplitStringToArray(cn->value,
-                                             " ", &pConf->ppszMinVersions);
+                                             (char *)" ", &pConf->ppszMinVersions);
             BAIL_ON_TDNF_ERROR(dwError);
         }
         else if (strcmp(cn->name, TDNF_CONF_KEY_OPENMAX) == 0)
@@ -189,13 +189,13 @@ TDNFConfigFromCnfTree(PTDNF_CONF pConf, struct cnfnode *cn_top)
         else if (strcmp(cn->name, TDNF_CONF_KEY_INSTALLONLYPKGS) == 0)
         {
             dwError = TDNFSplitStringToArray(cn->value,
-                                             " ", &pConf->ppszInstallOnlyPkgs);
+                                             (char *)" ", &pConf->ppszInstallOnlyPkgs);
             BAIL_ON_TDNF_ERROR(dwError);
         }
         else if (strcmp(cn->name, TDNF_CONF_KEY_VARS_DIRS) == 0)
         {
             dwError = TDNFSplitStringToArray(cn->value,
-                                             " ", &pConf->ppszVarsDirs);
+                                             (char *)" ", &pConf->ppszVarsDirs);
             BAIL_ON_TDNF_ERROR(dwError);
         }
         else if (strcmp(cn->name, TDNF_CONF_KEY_PLUGINS) == 0)
@@ -331,7 +331,7 @@ TDNFReadConfig(
         pConf->pszCacheDir = strdup(TDNF_DEFAULT_CACHE_LOCATION);
     if (pConf->ppszDistroVerPkgs == NULL) {
         dwError = TDNFSplitStringToArray(TDNF_DEFAULT_DISTROVERPKGS,
-                                         " ", &pConf->ppszDistroVerPkgs);
+                                         (char *)" ", &pConf->ppszDistroVerPkgs);
         BAIL_ON_TDNF_ERROR(dwError);
     }
     if (pConf->pszPersistDir == NULL)
@@ -339,7 +339,7 @@ TDNFReadConfig(
 
     if (pConf->ppszVarsDirs == NULL) {
         dwError = TDNFSplitStringToArray(TDNF_DEFAULT_VARS_DIRS,
-                                         " ", &pConf->ppszVarsDirs);
+                                         (char *)" ", &pConf->ppszVarsDirs);
         BAIL_ON_TDNF_ERROR(dwError);
     }
 

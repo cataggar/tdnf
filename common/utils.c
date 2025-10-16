@@ -6,7 +6,6 @@
  * of the License are located in the COPYING file of this distribution.
  */
 
-#include <ftw.h>
 #include "includes.h"
 
 hash_op hash_ops[TDNF_HASH_SENTINEL] =
@@ -165,7 +164,8 @@ TDNFUtilsFormatSize(
     int nIndex = 0;
     int nLimit = strlen(pszSizes);
     double dKiloBytes = 1024.0;
-    int nMaxSize = 35;
+    int nMaxSize = 512;
+    int nWritten;
 
     if(!ppszFormattedSize)
     {
@@ -182,7 +182,8 @@ TDNFUtilsFormatSize(
     dwError = TDNFAllocateMemory(1, nMaxSize, (void**)&pszFormattedSize);
     BAIL_ON_TDNF_ERROR(dwError);
 
-    if(snprintf(pszFormattedSize, nMaxSize, "%6.2f%c", dSize, pszSizes[nIndex]) >= nMaxSize)
+    nWritten = snprintf(pszFormattedSize, nMaxSize, "%6.2f%c", dSize, pszSizes[nIndex]);
+    if (nWritten < 0 || nWritten >= nMaxSize)
     {
         dwError = ERROR_TDNF_OUT_OF_MEMORY;
         BAIL_ON_TDNF_ERROR(dwError);
@@ -330,7 +331,7 @@ TDNFFreeUpdateInfoSummary(
     }
 }
 
-void
+static void
 TDNFFreeUpdateInfoReferences(
     PTDNF_UPDATEINFO_REF pRef
     )
@@ -467,9 +468,10 @@ TDNFYesOrNo(
     if(!pArgs->nAssumeYes && !pArgs->nAssumeNo)
     {
         while(1) {
-            pr_crit("%s", pszQuestion);
             char buf[256] = {0};
             const char *ret;
+
+            pr_crit("%s", pszQuestion);
 
             ret = fgets(buf, sizeof(buf)-1, stdin);
             if (ret != buf || buf[0] == 0) {
@@ -530,9 +532,11 @@ error:
     goto cleanup;
 }
 
-uint32_t TDNFPathFromUri(
+uint32_t
+TDNFPathFromUri(
     const char* pszKeyUrl,
-    char** ppszPath)
+    char** ppszPath
+)
 {
     uint32_t dwError = 0;
     const char* pszPath = NULL;
@@ -908,7 +912,7 @@ TDNFReadFileToStringArray(
     dwError = TDNFFileReadAllText(pszFile, &pszText, &nLength);
     BAIL_ON_TDNF_ERROR(dwError);
 
-    dwError = TDNFSplitStringToArray(pszText, "\n", &ppszArray);
+    dwError = TDNFSplitStringToArray(pszText, (char *)"\n", &ppszArray);
     BAIL_ON_TDNF_ERROR(dwError);
 
     *pppszArray = ppszArray;

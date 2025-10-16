@@ -8,11 +8,6 @@
 
 #include "includes.h"
 
-void
-TDNFFreeCmdOpt(
-    PTDNF_CMD_OPT pCmdOpt
-    );
-
 uint32_t
 AddSetOpt(
     PTDNF_CMD_ARGS pCmdArgs,

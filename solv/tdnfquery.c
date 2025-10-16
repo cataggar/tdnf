@@ -520,7 +520,7 @@ error:
     goto cleanup;
 }
 
-uint32_t
+static uint32_t
 SolvApplyUpDownScope(
     PSolvQuery pQuery,
     int nUp
@@ -627,11 +627,13 @@ SolvApplyListQuery(
     {
         for (nIndex = 0; nIndex < pQuery->queueJob.count ; nIndex += 2)
         {
-            queue_empty(&queueTmp);
+            Pool *pool;
             Id p = 0, pp = 0, how = 0, what = 0;
+
+            queue_empty(&queueTmp);
             what = pQuery->queueJob.elements[nIndex + 1];
             how = SOLVER_SELECTMASK & pQuery->queueJob.elements[nIndex];
-            Pool *pool = pQuery->pSack->pPool;
+            pool = pQuery->pSack->pPool;
             if (how == SOLVER_SOLVABLE_ALL)
             {
                 FOR_POOL_SOLVABLES(p)
@@ -901,7 +903,7 @@ error:
     goto cleanup;
 }
 
-uint32_t
+static uint32_t
 SolvFindUpDownCandidateForSinglePkg(
     PSolvSack pSack,
     Queue* pQueueCandidate,

@@ -325,8 +325,8 @@ typedef struct _TDNF_REPO_DATA
 typedef struct _TDNF_ERROR_DESC
 {
     int nCode;
-    char* pszName;
-    char* pszDesc;
+    const char* pszName;
+    const char* pszDesc;
 }TDNF_ERROR_DESC, *PTDNF_ERROR_DESC;
 
 typedef struct _TDNF_UPDATEINFO_REF

@@ -62,7 +62,7 @@
 #define safe_free(ptr) { if ((ptr) != NULL) { free(ptr); ptr = NULL; }}
 
 
-void usage(const char *cmdname)
+static void usage(const char *cmdname)
 {
     printf("tdnf history db utility\n\n");
     printf("Usage:\n\n");
@@ -78,8 +78,8 @@ void usage(const char *cmdname)
 
 int main(int argc, char *argv[])
 {
-    char *db_file = HISTORY_DB_DIR"/"HISTORY_DB_FILE;
-    char *rpm_root_dir = "/";
+    const char *db_file = HISTORY_DB_DIR"/"HISTORY_DB_FILE;
+    const char *rpm_root_dir = "/";
     rpmts ts = NULL;
     struct history_ctx *ctx = NULL;
     int rc = 0;

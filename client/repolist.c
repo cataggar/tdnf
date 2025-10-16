@@ -87,7 +87,7 @@ TDNFLoadRepoData(
     {
         if(strcmp(pSetOpt->pszOptName, "repofrompath") == 0)
         {
-            dwError = TDNFSplitStringToArray(pSetOpt->pszOptValue, ",", &ppszUrlIdTuple);
+            dwError = TDNFSplitStringToArray(pSetOpt->pszOptValue, (char *)",", &ppszUrlIdTuple);
             BAIL_ON_TDNF_ERROR(dwError);
             if ((ppszUrlIdTuple[0] == NULL) || ppszUrlIdTuple[1] == NULL)
             {
@@ -107,7 +107,7 @@ TDNFLoadRepoData(
         }
         else if(strcmp(pSetOpt->pszOptName, "repofromdir") == 0)
         {
-            dwError = TDNFSplitStringToArray(pSetOpt->pszOptValue, ",", &ppszUrlIdTuple);
+            dwError = TDNFSplitStringToArray(pSetOpt->pszOptValue, (char *)",", &ppszUrlIdTuple);
             BAIL_ON_TDNF_ERROR(dwError);
             if ((ppszUrlIdTuple[0] == NULL) || ppszUrlIdTuple[1] == NULL)
             {
@@ -417,7 +417,7 @@ error:
     goto cleanup;
 }
 
-uint32_t
+static uint32_t
 TDNFEventRepoReadConfigEnd(
     PTDNF pTdnf,
     const struct cnfnode *cn_section
@@ -451,7 +451,7 @@ error:
     goto cleanup;
 }
 
-uint32_t
+static uint32_t
 TDNFEventRepoReadConfigStart(
     PTDNF pTdnf,
     const struct cnfnode *cn_section
@@ -552,7 +552,7 @@ TDNFLoadReposFromFile(
             else if (strcmp(cn->name, TDNF_REPO_KEY_BASEURL) == 0)
             {
                 dwError = TDNFSplitStringToArray(cn->value,
-                                                 " ", &pRepo->ppszBaseUrls);
+                                                 (char *)" ", &pRepo->ppszBaseUrls);
                 BAIL_ON_TDNF_ERROR(dwError);
             }
             else if (strcmp(cn->name, TDNF_REPO_KEY_METALINK) == 0)
@@ -589,7 +589,7 @@ TDNFLoadReposFromFile(
             else if (strcmp(cn->name, TDNF_REPO_KEY_GPGKEY) == 0)
             {
                 dwError = TDNFSplitStringToArray(cn->value,
-                                                 " ", &pRepo->ppszUrlGPGKeys);
+                                                 (char *)" ", &pRepo->ppszUrlGPGKeys);
                 BAIL_ON_TDNF_ERROR(dwError);
             }
             else if (strcmp(cn->name, TDNF_REPO_KEY_USERNAME) == 0)

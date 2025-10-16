@@ -23,7 +23,9 @@
 #include <libgen.h>
 #include <limits.h>
 #include <sys/file.h>
+#include <ftw.h>
 
+#include <tdnf.h>
 #include <tdnftypes.h>
 #include <tdnferror.h>
 #include <tdnf-common-defines.h>

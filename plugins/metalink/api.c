@@ -19,8 +19,7 @@ TDNFPluginGetVersion(void)
 }
 
 const char *
-TDNFPluginGetName(
-    )
+TDNFPluginGetName(void)
 {
     return PLUGIN_NAME;
 }
@@ -54,9 +53,10 @@ TDNFMetalinkInitialize(
     PTDNF_PLUGIN_HANDLE *ppHandle
     )
 {
-    UNUSED(pszConfig);
     uint32_t dwError = 0;
     PTDNF_PLUGIN_HANDLE pHandle = NULL;
+
+    UNUSED(pszConfig);
 
     /* plugin does not expect config */
     if (!ppHandle)
@@ -218,7 +218,7 @@ TDNFMetalinkGetErrorString(
 {
     uint32_t dwError = 0;
     char *pszError = NULL;
-    char *pszErrorPre = NULL;
+    const char *pszErrorPre = NULL;
     TDNF_ERROR_DESC arErrorDesc[] = METALINK_ERROR_TABLE;
 
     if (!pHandle || !ppszError)

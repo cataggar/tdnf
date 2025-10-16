@@ -163,13 +163,11 @@ TDNFCountCommand(
 
 //version
 const char*
-TDNFGetVersion(
-    );
+TDNFGetVersion(void);
 
 //package name
 const char*
-TDNFGetPackageName(
-    );
+TDNFGetPackageName(void);
 
 //Search installed and available packages for keywords
 //in description, name

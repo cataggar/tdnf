@@ -715,8 +715,9 @@ TDNFFreeHistoryInfoItems(
     {
         for (int i = 0; i < nCount; i++)
         {
-            TDNF_SAFE_FREE_MEMORY(pHistoryItems[i].pszCmdLine);
             int j;
+
+            TDNF_SAFE_FREE_MEMORY(pHistoryItems[i].pszCmdLine);
             if (pHistoryItems[i].ppszAddedPkgs != NULL)
             {
                 for (j = 0; j < pHistoryItems[i].nAddedCount; j++)

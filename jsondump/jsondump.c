@@ -31,6 +31,7 @@
  * modified to accept va_list.
  * The allocated string returned must be free'd by the caller.
  */
+__attribute__((format(printf, 1, 0)))
 static
 char *_alloc_vsprintf(const char *fmt, va_list ap)
 {
@@ -125,7 +126,7 @@ int _jd_realloc(struct json_dump *jd, unsigned int add_size)
  * responsibilty to free it.
  */
 
-char *jsonify_string(const char *str)
+static char *jsonify_string(const char *str)
 {
     char *p;
     const char *q = str;
@@ -233,11 +234,12 @@ int _jd_map_add_raw(struct json_dump *jd, const char *key, const char *value)
 int jd_map_add_string(struct json_dump *jd, const char *key, const char *value)
 {
     int rc;
+    char *json_value;
 
     if (!value)
         return jd_map_add_null(jd, key);
 
-    char *json_value = jsonify_string(value);
+    json_value = jsonify_string(value);
     if (json_value == NULL)
         return -1;
 

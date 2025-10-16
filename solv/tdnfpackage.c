@@ -1378,7 +1378,7 @@ is_obsoleting(Pool *pool, Solvable *s, const Solvable *is)
     return 0;
 }
 
-uint32_t
+static uint32_t
 SolvFindBestAvailable(
     PSolvSack pSack,
     const char* pszPkgName,
@@ -1813,7 +1813,7 @@ check_for_providers(
     )
 {
     char *beg;
-    const char *end;
+    const char *end = NULL;
     uint32_t dwError = 0;
     char pkgname[256] = {0};
     PSolvPackageList pAvailablePkgList = NULL;
@@ -2301,7 +2301,7 @@ error:
     goto cleanup;
 }
 
-uint32_t
+static uint32_t
 SolvGetFileQueueFromId(
     PSolvSack pSack,
     uint32_t dwPkgId,

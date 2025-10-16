@@ -21,8 +21,7 @@
  * is enough to ensure >= a known good version.
 */
 const char *
-TDNFPluginGetEventMapVersion(
-    );
+TDNFPluginGetEventMapVersion(void);
 
 #define TDNF_EVENT_ITEM_TDNF_HANDLE  "tdnf.handle"
 #define TDNF_EVENT_ITEM_REPO_SECTION "repo.section"

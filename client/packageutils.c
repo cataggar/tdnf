@@ -1050,19 +1050,19 @@ TDNFCheckDownloadCacheBytes(
     uint8_t byPkgIndex = 0;
     PTDNF_PKG_INFO pPkgInfo = NULL;
 
-    if(!pSolvedPkgInfo)
-    {
-        dwError = ERROR_TDNF_INVALID_PARAMETER;
-        /* coverity[name_at_decl_position] */
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
     PTDNF_PKG_INFO ppPkgsNeedDownload[4] = {
         pSolvedPkgInfo->pPkgsToInstall,
         pSolvedPkgInfo->pPkgsToDowngrade,
         pSolvedPkgInfo->pPkgsToUpgrade,
         pSolvedPkgInfo->pPkgsToReinstall
     };
+
+    if(!pSolvedPkgInfo)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        /* coverity[name_at_decl_position] */
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
 
     for (byPkgIndex = 0; byPkgIndex < ARRAY_SIZE(ppPkgsNeedDownload); byPkgIndex++)
     {

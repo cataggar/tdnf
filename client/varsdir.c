@@ -6,12 +6,7 @@
  * of the License are located in the COPYING file of this distribution.
  */
 
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-#include <ctype.h>
-#include <dirent.h>
-#include <errno.h>
+#include "includes.h"
 
 #include "../llconf/nodes.h"
 
@@ -25,6 +20,8 @@ struct cnfnode *parse_varsdirs(char *dirs[])
     cn_top = create_cnfnode("(root)");
 
     for (i = 0; dirs[i]; i++) {
+        struct dirent *dent;
+
         fdir = opendir(dirs[i]);
         if (!fdir) {
             if (errno == ENOENT)
@@ -34,11 +31,11 @@ struct cnfnode *parse_varsdirs(char *dirs[])
                 goto error;
         }
 
-        struct dirent *dent;
         while((dent = readdir(fdir))) {
-            char buf[256], path[256];
+            char buf[256], path[258];
             char *p;
             int n;
+            struct cnfnode *cn_var;
 
             p = dent->d_name;
             /* skip disallowed filenames */
@@ -74,7 +71,7 @@ struct cnfnode *parse_varsdirs(char *dirs[])
             while (p >= buf && isspace(*p)) p--;
             p[1] = 0;
 
-            struct cnfnode *cn_var = create_cnfnode(dent->d_name);
+            cn_var = create_cnfnode(dent->d_name);
             cnfnode_setval(cn_var, buf);
             append_node(cn_top, cn_var);
 

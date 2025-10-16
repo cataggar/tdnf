@@ -18,7 +18,7 @@
 
 #include "includes.h"
 
-char *depKeys[] = {
+const char *depKeys[] = {
     "provides",
     "obsoletes",
     "conflicts",
@@ -31,7 +31,7 @@ char *depKeys[] = {
     "requires-pre"
 };
 
-char *whatKeys[REPOQUERY_WHAT_KEY_COUNT] = {
+const char *whatKeys[REPOQUERY_WHAT_KEY_COUNT] = {
     "whatprovides",
     "whatobsoletes",
     "whatconflicts",
@@ -181,7 +181,7 @@ TDNFCliParseRepoQueryArgs(
                     if (strcasecmp(pSetOpt->pszOptName, whatKeys[whatKey]) == 0)
                     {
                         dwError = TDNFSplitStringToArray(pSetOpt->pszOptValue,
-                            ",",
+                            (char *)",",
                             &pRepoqueryArgs->pppszWhatKeys[whatKey]);
                         BAIL_ON_CLI_ERROR(dwError);
                         break;

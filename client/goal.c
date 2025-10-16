@@ -214,7 +214,7 @@ error:
     goto cleanup;
 }
 
-uint32_t
+static uint32_t
 SolvAddDebugInfo(
     Solver *pSolv,
     const char *pszDir
@@ -1194,7 +1194,7 @@ TDNFSolvAddMinVersions(
         dwError = TDNFAllocateString(pszPkg, &pszTmp);
         BAIL_ON_TDNF_ERROR(dwError);
 
-        dwError = TDNFSplitStringToArray(pszTmp, "=", &ppszTokens);
+        dwError = TDNFSplitStringToArray(pszTmp, (char *)"=", &ppszTokens);
         BAIL_ON_TDNF_ERROR(dwError);
 
         if (ppszTokens[0] && ppszTokens[1]) {

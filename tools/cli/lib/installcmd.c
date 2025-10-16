@@ -349,7 +349,7 @@ error:
     goto cleanup;
 }
 
-uint32_t
+static uint32_t
 JDPkgList(
     PTDNF_PKG_INFO pPkgInfos,
     struct json_dump **ppJDList
@@ -647,7 +647,7 @@ PrintAction(
     int nTotalDownloadSize = 0;
     char *pszTotalInstallSize = NULL;
     char *pszTotalDownloadSize = NULL;
-    char *pszEmptyString = "";
+    const char *pszEmptyString = "";
 
     #define COL_COUNT 6
     //Name | Arch | [Epoch:]Version-Release | Repository | Install Size | Download Size
@@ -656,7 +656,7 @@ PrintAction(
 
     #define MAX_COL_LEN 256
     char szEpochVersionRelease[MAX_COL_LEN] = {0};
-    char *ppszInfoToPrint[MAX_COL_LEN] = {0};
+    const char *ppszInfoToPrint[MAX_COL_LEN] = {0};
 
     if(!pPkgInfos)
     {

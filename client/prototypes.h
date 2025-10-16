@@ -660,23 +660,6 @@ TDNFEnsureRepoMDParts(
     );
 
 uint32_t
-TDNFParseRepoMD(
-    PTDNF_REPO_METADATA pRepoMD
-    );
-
-uint32_t
-TDNFFindRepoMDPart(
-    Repo *pSolvRepo,
-    const char *pszType,
-    char **ppszPart
-    );
-
-void
-TDNFFreeRepoMetadata(
-    PTDNF_REPO_METADATA pRepoMD
-    );
-
-uint32_t
 TDNFReplaceFile(
     const char *pszSrcFile,
     const char *pszDstFile
@@ -857,11 +840,6 @@ TDNFFreeUpdateInfoReferences(
     PTDNF_UPDATEINFO_REF pRef
     );
 
-void
-TDNFFreeUpdateInfoPackages(
-    PTDNF_UPDATEINFO_PKG pPkg
-    );
-
 uint32_t
 TDNFPopulateUpdateInfoOfOneAdvisory(
     PSolvSack pSack,
@@ -906,11 +884,6 @@ TDNFIsCurlError(
 
 uint32_t
 TDNFIsSystemError(
-    uint32_t dwError
-    );
-
-uint32_t
-TDNFIsCurlError(
     uint32_t dwError
     );
 
@@ -1046,7 +1019,6 @@ TDNFListInternal(
     TDNF_PKG_DETAIL nDetail
     );
 
-
 uint32_t
 TDNFGetHistoryCtx(
     PTDNF pTdnf,
@@ -1054,8 +1026,8 @@ TDNFGetHistoryCtx(
     int nMustExist
 );
 
-
 struct cnfnode *parse_varsdirs(char *dirs[]);
+
 char *replace_vars(struct cnfnode *cn_vars, const char *source);
 
 #endif /* __CLIENT_PROTOTYPES_H__ */

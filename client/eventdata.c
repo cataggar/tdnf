@@ -77,7 +77,7 @@ error:
     goto cleanup;
 }
 
-uint32_t
+static uint32_t
 TDNFEventContextGetItem(
     PTDNF_EVENT_CONTEXT pContext,
     const char *pcszName,

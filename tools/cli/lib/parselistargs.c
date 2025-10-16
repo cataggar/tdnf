@@ -166,15 +166,10 @@ TDNFCliParseScope(
     uint32_t dwError = 0;
     int nIndex = 0;
     TDNF_SCOPE nScope = SCOPE_ALL;
-    struct stTemp
-    {
-        char* pszTypeName;
-        int nType;
-    };
 
     /* Note: "extras", "obsoletes" and "recent"
        have no effect */
-    struct stTemp  stScopes[] =
+    stTemp stScopes[] =
     {
         {"all",       SCOPE_ALL},
         {"installed", SCOPE_INSTALLED},

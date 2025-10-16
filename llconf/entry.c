@@ -84,7 +84,7 @@ void destroy_cnfresult_list(struct cnfresult *cr_list)
  * @param [in] cr_first the first entry in the list
  * @param [in] cr the entry to be appended
  */
-void append_cnfresult(struct cnfresult *cr_first, struct cnfresult *cr)
+static void append_cnfresult(struct cnfresult *cr_first, struct cnfresult *cr)
 {
 	struct cnfresult **crp;
 

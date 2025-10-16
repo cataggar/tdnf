@@ -310,11 +310,13 @@ void skip_quoted_ifquoted(const char **pp, char qchar)
 
 char *strjoin(const char *str1, const char *str2)
 {
+	char *s;
+
 	if(!str1 && !str2) return NULL;
 	if(!str2) return strdup(str1);
 	if(!str1) return strdup(str2);
 
-	char *s = malloc(strlen(str1)+strlen(str2)+1);
+	s = malloc(strlen(str1)+strlen(str2)+1);
 	strcpy(s, str1);
 	strcat(s, str2);
 	return s;

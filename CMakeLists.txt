@@ -19,6 +19,9 @@ include(GNUInstallDirs)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(AddCCompilerFlag)
+### CFLAGS
+include(CFlags)
+
 include(CreatePackages)
 
 if(NOT CMAKE_BUILD_TYPE)
@@ -42,22 +45,6 @@ endif()
 if(NOT HISTORY_DB_DIR)
     set(HISTORY_DB_DIR /var/lib/tdnf)
 endif()
-
-##
-## C Flags
-##
-add_c_compiler_flag(-Wall)
-add_c_compiler_flag(-Werror)
-add_c_compiler_flag(-Wextra)
-add_c_compiler_flag(-std=gnu99)
-add_c_compiler_flag(-fPIC)
-
-add_c_compiler_flag(-O3 RELEASE)
-add_c_compiler_flag(-s RELEASE)
-add_c_compiler_flag(-g DEBUG)
-
-add_c_compiler_flag(-D_XOPEN_SOURCE=500)
-add_c_compiler_flag(-D_DEFAULT_SOURCE)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 

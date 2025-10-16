@@ -8,7 +8,7 @@
 
 #include "includes.h"
 
-uint32_t
+static uint32_t
 TDNFGPGCheck(
     rpmts pTS,
     const char* pszKeyFile,
@@ -131,7 +131,7 @@ AddKeyFileToKeyring(
         BAIL_ON_TDNF_ERROR(dwError);
     }
     if (rpmKeyringAddKey(pKeyring, key) == 0) {
-        pr_info("added key %s to keyring");
+        pr_info("added key %s to keyring\n", pszFile);
     }
     subkeys = rpmGetSubkeys(key, &subkeysCount);
     rpmPubkeyFree(key);

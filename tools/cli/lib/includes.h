@@ -29,5 +29,6 @@
 #include "../common/structs.h"
 #include "../common/prototypes.h"
 #include "../jsondump/jsondump.h"
+#include "structs.h"
 
 #endif /* __CLI_LIB_INCLUDES_H__ */

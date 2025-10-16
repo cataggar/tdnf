@@ -10,12 +10,10 @@
 #define __PLUGINS_REPOGPGCHECK_PROTOTYPES_H__
 
 const char *
-TDNFPluginGetVersion(
-    );
+TDNFPluginGetVersion(void);
 
 const char *
-TDNFPluginGetName(
-    );
+TDNFPluginGetName(void);
 
 uint32_t
 TDNFPluginLoadInterface(
@@ -64,8 +62,7 @@ FreePluginHandle(
 
 /* repogpgcheck.c */
 uint32_t
-TDNFRepoGPGCheckVerifyVersion(
-    );
+TDNFRepoGPGCheckVerifyVersion(void);
 
 uint32_t
 TDNFRepoMDCheckSignature(

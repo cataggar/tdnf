@@ -55,7 +55,7 @@ int split_nevra(char *nevra, char **name, char **evr, char **arch)
 }
 
 /* split string like "pkg-name=1.2.4-1.ph5"
-   into "pkg-name" and "1.2.4-1.ph5" 
+   into "pkg-name" and "1.2.4-1.ph5"
    There is no arch
 */
 static
@@ -77,7 +77,7 @@ int split_name_equals_evr(char *nevr, char **name, char **evr)
 /* Find packages by nevra as specified with ids. Must be either installed
    or not as set by the 'installed' flag. Adds result to qresult, can
    be multiples if package is in multiple repos. */
-uint32_t
+static uint32_t
 SolvFindSolvablesByNevraId(
     Pool *pool,
     Id name,
@@ -88,11 +88,11 @@ SolvFindSolvablesByNevraId(
     )
 {
     uint32_t dwError = 0;
+    Id p;
 
     ASSERT_ARG(pool);
     ASSERT_ARG(qresult);
 
-    Id p;
     FOR_POOL_SOLVABLES(p)
     {
         const Solvable *s = &pool->solvables[p];
@@ -111,7 +111,7 @@ error:
 
 /* Find packages specfied by nevr (no arch),
    from specified repository */
-uint32_t
+static uint32_t
 SolvFindSolvablesByNevrIdFromRepo(
     Pool *pool,
     Repo *repo,
