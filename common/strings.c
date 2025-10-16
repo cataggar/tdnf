@@ -79,7 +79,7 @@ error:
 uint32_t
 TDNFStringSepCount(
     const char *pszBuf,
-    char *pszSep,
+    const char *pszSep,
     size_t *nSepCount
     )
 {
@@ -120,7 +120,7 @@ error:
 uint32_t
 TDNFSplitStringToArray(
     const char *pszBuf,
-    char *pszSep,
+    const char *pszSep,
     char ***pppszTokens
     )
 {

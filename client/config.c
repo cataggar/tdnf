@@ -99,7 +99,7 @@ error:
 }
 
 struct {
-    char *name;
+    const char *name;
     rpmtransFlags flag;
 } rpmtransflags_map[] = {
     {"noscripts",       RPMTRANS_FLAG_NOSCRIPTS },
