@@ -230,6 +230,10 @@ TDNFDirName(
     char **ppszDirName
 );
 
+int TDNFStrIsValidRepoName(
+    const char *str
+);
+
 //setopt.c
 uint32_t
 AddSetOpt(

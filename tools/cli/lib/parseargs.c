@@ -418,21 +418,31 @@ ParseOption(
             BAIL_ON_CLI_ERROR(dwError);
         }
 
-        psep_eq = strstr(optarg, "=");
+        dwError = TDNFAllocateString(pszArg, &pszCopyArgs);
+        BAIL_ON_CLI_ERROR(dwError);
+
+        psep_eq = strstr(pszCopyArgs, "=");
         if (psep_eq) {
             *psep_eq = 0;
 
-            pseq_dot = strstr(optarg, ".");
+            pseq_dot = strstr(pszCopyArgs, ".");
             if (pseq_dot == NULL) {
-                cn = create_cnfnode(optarg);
+                cn = create_cnfnode(pszCopyArgs);
                 cnfnode_setval(cn, psep_eq + 1);
                 append_node(pCmdArgs->cn_setopts, cn);
             } else {
                 struct cnfnode *cn_repo;
+
                 *pseq_dot = 0;
-                cn_repo = find_child(pCmdArgs->cn_repoopts, optarg);
+
+                if (!TDNFStrIsValidRepoName(pszCopyArgs)) {
+                    dwError = ERROR_TDNF_INVALID_REPO_NAME;
+                    BAIL_ON_CLI_ERROR(dwError);
+                }
+
+                cn_repo = find_child(pCmdArgs->cn_repoopts, pszCopyArgs);
                 if (!cn_repo) {
-                    cn_repo = create_cnfnode(optarg);
+                    cn_repo = create_cnfnode(pszCopyArgs);
                     append_node(pCmdArgs->cn_repoopts, cn_repo);
                 }
                 cn = create_cnfnode(pseq_dot+1);

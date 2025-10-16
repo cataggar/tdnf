@@ -1275,3 +1275,16 @@ cleanup:
 error:
     goto cleanup;
 }
+
+/* return true if str is a valid reponame */
+int TDNFStrIsValidRepoName(const char *str)
+{
+    /* should start with alnum or '@' */
+    /* '@ as a first character to allow "@System" and "@cmdline" */
+    if (!str || !*str || !(isalnum(*str) || (*str == '@')))
+        return 0;
+    str++;
+    while(*str && (isalnum(*str) || *str == '-' || *str == '_' || *str == '.'))
+        str++;
+    return *str == 0;
+}
