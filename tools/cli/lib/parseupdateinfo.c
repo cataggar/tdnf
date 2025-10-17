@@ -7,6 +7,7 @@
  */
 
 #include "includes.h"
+#include "../llconf/nodes.h"
 
 uint32_t
 TDNFCliParseUpdateInfoArgs(
@@ -16,7 +17,7 @@ TDNFCliParseUpdateInfoArgs(
 {
     uint32_t dwError = 0;
     PTDNF_UPDATEINFO_ARGS pUpdateInfoArgs = NULL;
-    PTDNF_CMD_OPT pSetOpt = NULL;
+    struct cnfnode *cn = NULL;
     int nStartIndex = 1;
     int nPackageCount = 0;
     int nIndex = 0;
@@ -37,12 +38,9 @@ TDNFCliParseUpdateInfoArgs(
     pUpdateInfoArgs->nScope = SCOPE_AVAILABLE;
 
     /* scope and mode can be given as options */
-    for (pSetOpt = pCmdArgs->pSetOpt;
-         pSetOpt;
-         pSetOpt = pSetOpt->pNext)
-    {
+    for (cn = pCmdArgs->cn_setopts->first_child; cn; cn = cn->next) {
         dwError = TDNFCliParseScope(
-                      pSetOpt->pszOptName,
+                      cn->name,
                       &pUpdateInfoArgs->nScope);
         if (dwError == 0)
         {
@@ -54,7 +52,7 @@ TDNFCliParseUpdateInfoArgs(
         }
         BAIL_ON_CLI_ERROR(dwError);
         dwError = TDNFCliParseMode(
-                      pSetOpt->pszOptName,
+                      cn->name,
                       &pUpdateInfoArgs->nMode);
         if(dwError == ERROR_TDNF_CLI_NO_MATCH)
         {

@@ -458,6 +458,7 @@ ParseOption(
     {
         char *ToFree = NULL;
         char *pszToken = NULL;
+        struct cnfnode *cn;
 
         dwError = TDNFAllocateString(pszArg, &pszCopyArgs);
         BAIL_ON_CLI_ERROR(dwError);
@@ -466,10 +467,9 @@ ParseOption(
 
         while ((pszToken = strsep(&pszCopyArgs, ",:")))
         {
-            dwError = AddSetOptWithValues(pCmdArgs,
-                                pszName,
-                                pszToken);
-            BAIL_ON_CLI_ERROR((dwError && (pszCopyArgs = ToFree)));
+            cn = create_cnfnode(pszName);
+            cnfnode_setval(cn, pszToken);
+            append_node(pCmdArgs->cn_setopts, cn);
         }
 
         pszCopyArgs = ToFree;
@@ -480,9 +480,12 @@ ParseOption(
         {
             if (strcasecmp(pstOptions[i].name, pszName) == 0)
             {
-                dwError = AddSetOptWithValues(pCmdArgs,
-                                    pszName,
-                                    optarg ? optarg : "1");
+                struct cnfnode *cn;
+
+                cn = create_cnfnode(pszName);
+                cnfnode_setval(cn, optarg ? optarg : "1");
+                append_node(pCmdArgs->cn_setopts, cn);
+
                 break;
             }
         }

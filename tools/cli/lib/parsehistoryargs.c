@@ -17,6 +17,8 @@
  */
 
 #include "includes.h"
+#include "../llconf/nodes.h"
+
 
 uint32_t
 TDNFCliParseHistoryArgs(
@@ -26,7 +28,7 @@ TDNFCliParseHistoryArgs(
 {
     uint32_t dwError = 0;
     PTDNF_HISTORY_ARGS pHistoryArgs = NULL;
-    PTDNF_CMD_OPT pSetOpt = NULL;
+    struct cnfnode *cn = NULL;
     char **ppszRange = NULL;
 
     if (!pArgs || !ppHistoryArgs)
@@ -79,25 +81,18 @@ TDNFCliParseHistoryArgs(
         }
     }
 
-    for (pSetOpt = pArgs->pSetOpt;
-         pSetOpt;
-         pSetOpt = pSetOpt->pNext)
-    {
-        if (strcasecmp(pSetOpt->pszOptName, "info") == 0)
-        {
+    for (cn = pArgs->cn_setopts->first_child; cn; cn = cn->next) {
+        if (strcasecmp(cn->name, "info") == 0) {
             pHistoryArgs->nInfo = 1;
         }
-        else if (strcasecmp(pSetOpt->pszOptName, "reverse") == 0)
-        {
+        else if (strcasecmp(cn->name, "reverse") == 0) {
             pHistoryArgs->nReverse = 1;
         }
-        else if (strcasecmp(pSetOpt->pszOptName, "from") == 0)
-        {
-            pHistoryArgs->nFrom = strtoi(pSetOpt->pszOptValue);
+        else if (strcasecmp(cn->name, "from") == 0) {
+            pHistoryArgs->nFrom = strtoi(cn->value);
         }
-        else if (strcasecmp(pSetOpt->pszOptName, "to") == 0)
-        {
-            pHistoryArgs->nTo = strtoi(pSetOpt->pszOptValue);
+        else if (strcasecmp(cn->name, "to") == 0) {
+            pHistoryArgs->nTo = strtoi(cn->value);
         }
     }
 

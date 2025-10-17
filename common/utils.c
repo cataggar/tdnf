@@ -420,10 +420,6 @@ TDNFFreeCmdArgs(
     TDNF_SAFE_FREE_MEMORY(pCmdArgs->pszConfFile);
     TDNF_SAFE_FREE_MEMORY(pCmdArgs->pszReleaseVer);
 
-    if(pCmdArgs->pSetOpt)
-    {
-        TDNFFreeCmdOpt(pCmdArgs->pSetOpt);
-    }
     destroy_cnftree(pCmdArgs->cn_setopts);
     destroy_cnftree(pCmdArgs->cn_repoopts);
     TDNF_SAFE_FREE_MEMORY(pCmdArgs);

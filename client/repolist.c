@@ -193,7 +193,6 @@ TDNFLoadRepoData(
     PTDNF_REPO_DATA pReposAll = NULL;
     PTDNF_REPO_DATA *ppRepoNext = NULL;
     PTDNF_CONF pConf = NULL;
-    PTDNF_CMD_OPT pSetOpt = NULL;
     DIR *pDir = NULL;
     struct dirent *pEnt = NULL;
     char **ppszUrlIdTuple = NULL;
@@ -201,6 +200,7 @@ TDNFLoadRepoData(
     PTDNF_REPO_DATA pRepoParseNext = NULL;
     PTDNF_REPO_DATA pRepo = NULL;
     struct cnfnode *cn_repo;
+    struct cnfnode *cn;
 
     if(!pTdnf || !pTdnf->pConf || !pTdnf->pArgs || !ppReposAll)
     {
@@ -216,13 +216,9 @@ TDNFLoadRepoData(
 
     ppRepoNext = &((*ppRepoNext)->pNext);
 
-    for(pSetOpt = pTdnf->pArgs->pSetOpt;
-        pSetOpt;
-        pSetOpt = pSetOpt->pNext)
-    {
-        if(strcmp(pSetOpt->pszOptName, "repofrompath") == 0)
-        {
-            dwError = TDNFSplitStringToArray(pSetOpt->pszOptValue, (char *)",", &ppszUrlIdTuple);
+    for (cn = pTdnf->pArgs->cn_setopts->first_child; cn; cn = cn->next) {
+        if(strcmp(cn->name, "repofrompath") == 0) {
+            dwError = TDNFSplitStringToArray(cn->value, ",", &ppszUrlIdTuple);
             BAIL_ON_TDNF_ERROR(dwError);
             if ((ppszUrlIdTuple[0] == NULL) || ppszUrlIdTuple[1] == NULL)
             {
@@ -239,10 +235,9 @@ TDNFLoadRepoData(
 
             TDNF_SAFE_FREE_STRINGARRAY(ppszUrlIdTuple);
             ppszUrlIdTuple = NULL;
-        }
-        else if(strcmp(pSetOpt->pszOptName, "repofromdir") == 0)
-        {
-            dwError = TDNFSplitStringToArray(pSetOpt->pszOptValue, (char *)",", &ppszUrlIdTuple);
+
+        } else if(strcmp(cn->name, "repofromdir") == 0) {
+            dwError = TDNFSplitStringToArray(cn->value, ",", &ppszUrlIdTuple);
             BAIL_ON_TDNF_ERROR(dwError);
             if ((ppszUrlIdTuple[0] == NULL) || ppszUrlIdTuple[1] == NULL)
             {
@@ -727,7 +722,7 @@ TDNFRepoListFinalize(
     )
 {
     uint32_t dwError = 0;
-    PTDNF_CMD_OPT pSetOpt = NULL;
+    struct cnfnode *cn = NULL;
     PTDNF_REPO_DATA pRepo = NULL;
     int nRepoidSeen = 0;
 
@@ -739,25 +734,21 @@ TDNFRepoListFinalize(
 
     /* There could be overrides to enable/disable
        repo such as cmdline args, api overrides */
-    for (pSetOpt = pTdnf->pArgs->pSetOpt; pSetOpt; pSetOpt = pSetOpt->pNext)
-    {
-        if(strcmp(pSetOpt->pszOptName, "enablerepo") == 0)
-        {
+    for (cn = pTdnf->pArgs->cn_setopts->first_child; cn; cn = cn->next) {
+        if(strcmp(cn->name, "enablerepo") == 0) {
             dwError = TDNFAlterRepoState(
                           pTdnf->pRepos,
                           1,
-                          pSetOpt->pszOptValue);
+                          cn->value);
         }
-        else if(strcmp(pSetOpt->pszOptName, "disablerepo") == 0)
-        {
+        else if(strcmp(cn->name, "disablerepo") == 0) {
             dwError = TDNFAlterRepoState(
                           pTdnf->pRepos,
                           0,
-                          pSetOpt->pszOptValue);
+                          cn->value);
         }
-        else if((strcmp(pSetOpt->pszOptName, "repo") == 0) ||
-                (strcmp(pSetOpt->pszOptName, "repoid") == 0))
-        {
+        else if((strcmp(cn->name, "repo") == 0) ||
+                (strcmp(cn->name, "repoid") == 0)) {
             if (!nRepoidSeen)
             {
                 dwError = TDNFAlterRepoState(
@@ -768,7 +759,7 @@ TDNFRepoListFinalize(
             dwError = TDNFAlterRepoState(
                           pTdnf->pRepos,
                           1,
-                          pSetOpt->pszOptValue);
+                          cn->value);
         }
         BAIL_ON_TDNF_ERROR(dwError);
     }

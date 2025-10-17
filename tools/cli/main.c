@@ -125,12 +125,6 @@ int main(int argc, char **argv)
 
             _context.hTdnf = pTdnf;
 
-            if (pCmdArgs->nVerbose)
-            {
-                dwError = TDNFCliVerboseShowEnv(pCmdArgs);
-                BAIL_ON_CLI_ERROR(dwError);
-            }
-
             dwError = pCmd->pFnCmd(&_context, pCmdArgs);
             BAIL_ON_CLI_ERROR(dwError);
         }
@@ -276,38 +270,6 @@ TDNFCliShowVersion(
 error:
     JD_SAFE_DESTROY(jd);
     return;
-}
-
-uint32_t
-TDNFCliVerboseShowEnv(
-    PTDNF_CMD_ARGS pCmdArgs
-    )
-{
-    uint32_t dwError = 0;
-    PTDNF_CMD_OPT pOpt = NULL;
-
-    if(!pCmdArgs)
-    {
-        dwError = ERROR_TDNF_CLI_INVALID_ARGUMENT;
-        BAIL_ON_CLI_ERROR(dwError);
-    }
-
-    pOpt = pCmdArgs->pSetOpt;
-    if(pOpt)
-    {
-        pr_info("Setting options:\n");
-        while(pOpt)
-        {
-            pr_info("\t%s = %s\n", pOpt->pszOptName, pOpt->pszOptValue);
-            pOpt = pOpt->pNext;
-        }
-    }
-
-cleanup:
-    return dwError;
-
-error:
-    goto cleanup;
 }
 
 uint32_t

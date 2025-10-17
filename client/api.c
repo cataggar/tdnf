@@ -7,6 +7,7 @@
  */
 
 #include "includes.h"
+#include "../llconf/nodes.h"
 
 uid_t gEuid;
 
@@ -188,7 +189,7 @@ TDNFGetSkipProblemOption(
     )
 {
     uint32_t dwError = 0;
-    PTDNF_CMD_OPT pSetOpt = NULL;
+    struct cnfnode *cn = NULL;
 
     if (!pTdnf || !pTdnf->pArgs || !pdwSkipProblem)
     {
@@ -198,15 +199,11 @@ TDNFGetSkipProblemOption(
 
     *pdwSkipProblem = SKIPPROBLEM_NONE;
 
-    for (pSetOpt = pTdnf->pArgs->pSetOpt; pSetOpt; pSetOpt = pSetOpt->pNext)
-    {
-        if (!strcasecmp(pSetOpt->pszOptName, "skipconflicts"))
-        {
+    for (cn = pTdnf->pArgs->cn_setopts->first_child; cn; cn = cn->next) {
+        if (strcasecmp(cn->name, "skipconflicts") == 0){
             *pdwSkipProblem |= SKIPPROBLEM_CONFLICTS;
         }
-
-        if (!strcasecmp(pSetOpt->pszOptName, "skipobsoletes"))
-        {
+        if (strcasecmp(cn->name, "skipobsoletes") == 0){
             *pdwSkipProblem |= SKIPPROBLEM_OBSOLETES;
         }
     }
@@ -589,7 +586,7 @@ TDNFOpenHandle(
     PSolvSack pSack = NULL;
     char *pszConfFile = NULL;
     char *pszConfFileInstallRoot = NULL;
-    PTDNF_CMD_OPT pOpt = NULL;
+    struct cnfnode *cn = NULL;
 
     if(!pArgs || !ppTdnf)
     {
@@ -657,18 +654,10 @@ TDNFOpenHandle(
 
     GlobalSetDnfCheckUpdateCompat(pTdnf->pConf->nCheckUpdateCompat);
 
-    for (pOpt = pTdnf->pArgs->pSetOpt; pOpt; pOpt = pOpt->pNext)
-    {
+    for (cn = pTdnf->pArgs->cn_setopts->first_child; cn; cn = cn->next) {
         /* set macros from command line */
-        if (strcmp(pOpt->pszOptName, "rpmdefine") == 0)
-        {
-            rpmDefineMacro(NULL, pOpt->pszOptValue, 0);
-        }
-        /* ultimately all --setopt= settings should override config values,
-           but for now make exceptions */
-        else if (strcmp(pOpt->pszOptName, TDNF_CONF_KEY_KEEP_CACHE) == 0)
-        {
-            pTdnf->pConf->nKeepCache = isTrue(pOpt->pszOptValue);
+        if (strcmp(cn->name, "rpmdefine") == 0) {
+            rpmDefineMacro(NULL, cn->value, 0);
         }
     }
 

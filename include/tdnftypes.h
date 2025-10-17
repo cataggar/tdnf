@@ -245,7 +245,6 @@ typedef struct _TDNF_CMD_ARGS
     //Commands and args that do not fall in options
     char** ppszCmds;
     int nCmdCount;
-    PTDNF_CMD_OPT pSetOpt;
     struct cnfnode *cn_setopts;
     struct cnfnode *cn_repoopts;
 
