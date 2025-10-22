@@ -249,9 +249,11 @@ TDNFConfigFromCnfTree(PTDNF_CONF pConf, struct cnfnode *cn_top)
             if (cn->value == NULL || strcmp(cn->value, "") == 0) {
                 pConf->rpmTransFlags = RPMTRANS_FLAG_NONE;
             } else {
-                char *value = strdup(cn->value);
+                char *value = NULL;
                 char *saveptr = NULL, *str, *token;
                 int i;
+
+                SET_STRING(value, cn->value);
 
                 for (str = value; ; str = NULL){
                     token = strtok_r(str, " ", &saveptr);
@@ -384,9 +386,9 @@ TDNFReadConfig(
     }
 
     if (pConf->pszRepoDir == NULL)
-        pConf->pszRepoDir = strdup(TDNF_DEFAULT_REPO_LOCATION);
+        SET_STRING(pConf->pszRepoDir, TDNF_DEFAULT_REPO_LOCATION);
     if (pConf->pszCacheDir == NULL)
-        pConf->pszCacheDir = strdup(TDNF_DEFAULT_CACHE_LOCATION);
+        SET_STRING(pConf->pszCacheDir, TDNF_DEFAULT_CACHE_LOCATION);
 
     if (!IsNullOrEmptyString(pTdnf->pArgs->pszInstallRoot) &&
         strcmp(pTdnf->pArgs->pszInstallRoot, "/"))
@@ -446,7 +448,7 @@ TDNFReadConfig(
     }
 
     if (pConf->pszPersistDir == NULL)
-        pConf->pszPersistDir = strdup(TDNF_DEFAULT_DB_LOCATION);
+        SET_STRING(pConf->pszPersistDir, TDNF_DEFAULT_DB_LOCATION);
 
     if (pConf->ppszVarsDirs == NULL) {
         dwError = TDNFSplitStringToArray(TDNF_DEFAULT_VARS_DIRS,
@@ -455,9 +457,9 @@ TDNFReadConfig(
     }
 
     if (pConf->pszPluginPath == NULL)
-        pConf->pszPluginPath = strdup(TDNF_DEFAULT_PLUGIN_PATH);
+        SET_STRING(pConf->pszPluginPath, TDNF_DEFAULT_PLUGIN_PATH);
     if (pConf->pszPluginConfPath == NULL)
-        pConf->pszPluginConfPath = strdup(TDNF_DEFAULT_PLUGIN_CONF_PATH);
+        SET_STRING(pConf->pszPluginConfPath, TDNF_DEFAULT_PLUGIN_CONF_PATH);
 
     dwError = TDNFDirName(pszConfFile, &pszConfDir);
     BAIL_ON_TDNF_ERROR(dwError);

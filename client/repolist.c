@@ -85,9 +85,9 @@ TDNFRepoConfigFromCnfTree(PTDNF pTdnf,
         else if (strcmp(cn->name, TDNF_REPO_KEY_SNAPSHOT_URL) == 0)
         {
             /* we do not support URLs yet, just filenames */
-            if (cn->value[0] == '/')
-                pRepo->pszSnapshotUrl = strdup(cn->value);
-            else {
+            if (cn->value[0] == '/') {
+                SET_STRING(pRepo->pszSnapshotUrl, cn->value);
+            } else {
                 /* path should be relative to repo dir */
                 dwError = TDNFJoinPath(
                               &pRepo->pszSnapshotUrl,
@@ -684,7 +684,7 @@ TDNFLoadReposFromFile(
 
         /* default to repo id if name isn't set */
         if (pRepo->pszName == NULL)
-            pRepo->pszName = strdup(pRepo->pszId);
+            SET_STRING(pRepo->pszName, pRepo->pszId);
 
         /* override from cmd line */
         if (pTdnf->pArgs->nNoGPGCheck) {

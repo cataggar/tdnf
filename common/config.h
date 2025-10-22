@@ -1,6 +1,13 @@
 #define STR_IS_TRUE(s) ((s) && (!strcmp((s), "1") || !strcasecmp((s), "true")))
 
-#define SET_STRING(s, v) {if (s) free(s); if(v) s = strdup(v); else s = NULL;}
+#define SET_STRING(s, v) { \
+    if (s) free(s); \
+    if (v) s = strdup(v); else s = NULL; \
+    if (v && s == NULL) { \
+        dwError = ERROR_TDNF_OUT_OF_MEMORY; \
+        BAIL_ON_TDNF_ERROR(dwError); \
+    } \
+}
 
 //Misc
 #define TDNF_RPM_EXT                      ".rpm"
