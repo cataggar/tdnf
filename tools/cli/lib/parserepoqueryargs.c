@@ -17,6 +17,7 @@
  */
 
 #include "includes.h"
+#include "../llconf/nodes.h"
 
 const char *depKeys[] = {
     "provides",
@@ -51,7 +52,7 @@ TDNFCliParseRepoQueryArgs(
 {
     uint32_t dwError = 0;
     PTDNF_REPOQUERY_ARGS pRepoqueryArgs = NULL;
-    PTDNF_CMD_OPT pSetOpt = NULL;
+    struct cnfnode *cn = NULL;
 
     if (!pArgs || !ppRepoqueryArgs)
     {
@@ -70,11 +71,8 @@ TDNFCliParseRepoQueryArgs(
         sizeof(char **),
         (void **) &pRepoqueryArgs->pppszWhatKeys);
 
-    for (pSetOpt = pArgs->pSetOpt;
-         pSetOpt;
-         pSetOpt = pSetOpt->pNext)
-    {
-        if (strcasecmp(pSetOpt->pszOptName, "arch") == 0)
+    for (cn = pArgs->cn_setopts->first_child; cn; cn = cn->next) {
+        if (strcasecmp(cn->name, "arch") == 0)
         {
             int i;
             if (pRepoqueryArgs->ppszArchs == NULL)
@@ -87,62 +85,62 @@ TDNFCliParseRepoQueryArgs(
             if (i < TDNF_REPOQUERY_MAXARCHS)
             {
                 dwError = TDNFAllocateString(
-                    pSetOpt->pszOptValue,
+                    cn->value,
                     &(pRepoqueryArgs->ppszArchs[i]));
                 BAIL_ON_CLI_ERROR(dwError);
             }
         }
-        else if (strcasecmp(pSetOpt->pszOptName, "file") == 0)
+        else if (strcasecmp(cn->name, "file") == 0)
         {
-            dwError = TDNFAllocateString(pSetOpt->pszOptValue,
+            dwError = TDNFAllocateString(cn->value,
                                          &pRepoqueryArgs->pszFile);
             BAIL_ON_CLI_ERROR(dwError);
         }
-        else if (strcasecmp(pSetOpt->pszOptName, "changelogs") == 0)
+        else if (strcasecmp(cn->name, "changelogs") == 0)
         {
             pRepoqueryArgs->nChangeLogs = 1;
         }
-        else if (strcasecmp(pSetOpt->pszOptName, "available") == 0)
+        else if (strcasecmp(cn->name, "available") == 0)
         {
             pRepoqueryArgs->nAvailable = 1;
         }
-        else if (strcasecmp(pSetOpt->pszOptName, "installed") == 0)
+        else if (strcasecmp(cn->name, "installed") == 0)
         {
             pRepoqueryArgs->nInstalled = 1;
         }
-        else if (strcasecmp(pSetOpt->pszOptName, "extras") == 0)
+        else if (strcasecmp(cn->name, "extras") == 0)
         {
             pRepoqueryArgs->nExtras = 1;
         }
-        else if (strcasecmp(pSetOpt->pszOptName, "duplicates") == 0)
+        else if (strcasecmp(cn->name, "duplicates") == 0)
         {
             pRepoqueryArgs->nDuplicates = 1;
         }
-        else if (strcasecmp(pSetOpt->pszOptName, "list") == 0)
+        else if (strcasecmp(cn->name, "list") == 0)
         {
             pRepoqueryArgs->nList = 1;
         }
-        else if (strcasecmp(pSetOpt->pszOptName, "qf") == 0)
+        else if (strcasecmp(cn->name, "qf") == 0)
         {
-            if (pSetOpt->pNext != NULL)
+            if (cn->next != NULL)
             {
                 dwError = ERROR_TDNF_CLI_INVALID_MIXED_QUERY_QUERYFORMAT;
                 BAIL_ON_CLI_ERROR(dwError);
             }
 
-            dwError = TDNFAllocateString(pSetOpt->pszOptValue,
+            dwError = TDNFAllocateString(cn->value,
                                          &pRepoqueryArgs->pszQueryFormat);
             BAIL_ON_CLI_ERROR(dwError);
         }
-        else if (strcasecmp(pSetOpt->pszOptName, "source") == 0)
+        else if (strcasecmp(cn->name, "source") == 0)
         {
             pRepoqueryArgs->nSource = 1;
         }
-        else if (strcasecmp(pSetOpt->pszOptName, "upgrades") == 0)
+        else if (strcasecmp(cn->name, "upgrades") == 0)
         {
             pRepoqueryArgs->nUpgrades = 1;
         }
-        else if (strcasecmp(pSetOpt->pszOptName, "userinstalled") == 0)
+        else if (strcasecmp(cn->name, "userinstalled") == 0)
         {
             pRepoqueryArgs->nUserInstalled = 1;
         }
@@ -152,11 +150,11 @@ TDNFCliParseRepoQueryArgs(
 
             for (depKey = 0; depKey < REPOQUERY_DEP_KEY_COUNT; depKey++)
             {
-                if (strcasecmp(pSetOpt->pszOptName, depKeys[depKey]) == 0)
+                if (strcasecmp(cn->name, depKeys[depKey]) == 0)
                 {
                     if (!(pRepoqueryArgs->depKeySet & (1 << depKey)))
                     {
-                        if (pSetOpt->pNext != NULL)
+                        if (cn->next != NULL)
                         {
                             dwError = ERROR_TDNF_CLI_INVALID_MIXED_QUERY_QUERYFORMAT;
                             BAIL_ON_CLI_ERROR(dwError);
@@ -178,9 +176,9 @@ TDNFCliParseRepoQueryArgs(
 
                 for (whatKey = 0; whatKey < REPOQUERY_WHAT_KEY_COUNT; whatKey++)
                 {
-                    if (strcasecmp(pSetOpt->pszOptName, whatKeys[whatKey]) == 0)
+                    if (strcasecmp(cn->name, whatKeys[whatKey]) == 0)
                     {
-                        dwError = TDNFSplitStringToArray(pSetOpt->pszOptValue,
+                        dwError = TDNFSplitStringToArray(cn->value,
                             (char *)",",
                             &pRepoqueryArgs->pppszWhatKeys[whatKey]);
                         BAIL_ON_CLI_ERROR(dwError);
@@ -188,8 +186,8 @@ TDNFCliParseRepoQueryArgs(
                     }
                 }
             } /* if (i == REPOQUERY_WHAT_KEY_COUNT) */
-        } /* if (strcasecmp(pSetOpt->pszOptName, ... */
-    } /* for (pSetOpt ... */
+        } /* if (strcasecmp(cn->name, ... */
+    } /* for (cn ... */
 
     if(pArgs->nCmdCount > 2)
     {

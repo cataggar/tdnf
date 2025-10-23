@@ -13,9 +13,10 @@
 #include "../llconf/entry.h"
 #include "../llconf/ini.h"
 
-#define USERAGENT_HEADER_MAX_LENGTH     256
+
+#define USERAGENT_HEADER_MAX_LENGTH 256
+#define OS_REL_FILE "/etc/os-release"
 #define KEY_MAX_LEN                     32
-#define OS_REL_FILE                     "/etc/os-release"
 
 int
 TDNFConfGetRpmVerbosity(
@@ -97,6 +98,42 @@ error:
     goto cleanup;
 }
 
+struct {
+    const char *name;
+    rpmtransFlags flag;
+} rpmtransflags_map[] = {
+    {"noscripts",       RPMTRANS_FLAG_NOSCRIPTS },
+    {"justdb",          RPMTRANS_FLAG_JUSTDB },
+    {"notriggers",      RPMTRANS_FLAG_NOTRIGGERS },
+    {"nodocs",          RPMTRANS_FLAG_NODOCS },
+    {"allfiles",        RPMTRANS_FLAG_ALLFILES },
+    {"noplugins",       RPMTRANS_FLAG_NOPLUGINS },
+    {"nocontexts",      RPMTRANS_FLAG_NOCONTEXTS },
+    {"nocaps",          RPMTRANS_FLAG_NOCAPS},
+    {"nodb",            RPMTRANS_FLAG_NODB},
+
+//    {"nopreuntrans",    RPMTRANS_FLAG_NOPREUNTRANS },
+//    {"nopostuntrans",   RPMTRANS_FLAG_NOPOSTUNTRANS },
+    {"notriggerprein",  RPMTRANS_FLAG_NOTRIGGERPREIN },
+    {"nopre",           RPMTRANS_FLAG_NOPRE },
+    {"nopost",          RPMTRANS_FLAG_NOPOST },
+    {"notriggerin",     RPMTRANS_FLAG_NOTRIGGERIN },
+    {"notriggerun",     RPMTRANS_FLAG_NOTRIGGERUN },
+    {"nopreun",         RPMTRANS_FLAG_NOPREUN },
+    {"nopostun",        RPMTRANS_FLAG_NOPOSTUN },
+    {"notriggerpostun", RPMTRANS_FLAG_NOTRIGGERPOSTUN },
+    {"nopretrans",      RPMTRANS_FLAG_NOPRETRANS },
+    {"noposttrans",     RPMTRANS_FLAG_NOPOSTTRANS},
+//    {"nosysusers",      RPMTRANS_FLAG_NOSYSUSERS},
+    {"nomd5",           RPMTRANS_FLAG_NOMD5},
+    {"nofiledigest",    RPMTRANS_FLAG_NOFILEDIGEST},
+
+    {"noartifacts",     RPMTRANS_FLAG_NOARTIFACTS},
+    {"noconfigs",       RPMTRANS_FLAG_NOCONFIGS},
+    {"deploops",        RPMTRANS_FLAG_DEPLOOPS},
+    {NULL,              RPMTRANS_FLAG_NONE}
+};
+
 static
 uint32_t
 TDNFConfigFromCnfTree(PTDNF_CONF pConf, struct cnfnode *cn_top)
@@ -152,14 +189,12 @@ TDNFConfigFromCnfTree(PTDNF_CONF pConf, struct cnfnode *cn_top)
         }
         else if (strcmp(cn->name, TDNF_CONF_KEY_EXCLUDE) == 0)
         {
-            dwError = TDNFSplitStringToArray(cn->value,
-                                             (char *)" ", &pConf->ppszExcludes);
+            dwError = TDNFAddStringArray(&pConf->ppszExcludes, cn->value);
             BAIL_ON_TDNF_ERROR(dwError);
         }
         else if (strcmp(cn->name, TDNF_CONF_KEY_MINVERSIONS) == 0)
         {
-            dwError = TDNFSplitStringToArray(cn->value,
-                                             (char *)" ", &pConf->ppszMinVersions);
+            dwError = TDNFAddStringArray(&pConf->ppszMinVersions, cn->value);
             BAIL_ON_TDNF_ERROR(dwError);
         }
         else if (strcmp(cn->name, TDNF_CONF_KEY_OPENMAX) == 0)
@@ -188,8 +223,7 @@ TDNFConfigFromCnfTree(PTDNF_CONF pConf, struct cnfnode *cn_top)
         }
         else if (strcmp(cn->name, TDNF_CONF_KEY_INSTALLONLYPKGS) == 0)
         {
-            dwError = TDNFSplitStringToArray(cn->value,
-                                             (char *)" ", &pConf->ppszInstallOnlyPkgs);
+            dwError = TDNFAddStringArray(&pConf->ppszInstallOnlyPkgs, cn->value);
             BAIL_ON_TDNF_ERROR(dwError);
         }
         else if (strcmp(cn->name, TDNF_CONF_KEY_VARS_DIRS) == 0)
@@ -210,10 +244,47 @@ TDNFConfigFromCnfTree(PTDNF_CONF pConf, struct cnfnode *cn_top)
         {
             SET_STRING(pConf->pszPluginPath, cn->value);
         }
+        else if  (strcmp(cn->name, TDNF_CONF_KEY_TSFLAGS) == 0)
+        {
+            if (cn->value == NULL || strcmp(cn->value, "") == 0) {
+                pConf->rpmTransFlags = RPMTRANS_FLAG_NONE;
+            } else {
+                char *value = NULL;
+                char *saveptr = NULL, *str, *token;
+                int i;
+
+                SET_STRING(value, cn->value);
+
+                for (str = value; ; str = NULL){
+                    token = strtok_r(str, " ", &saveptr);
+                    if (token == NULL)
+                        break;
+
+                    for (i = 0; rpmtransflags_map[i].name != NULL; i++) {
+                        if (strcmp(token, rpmtransflags_map[i].name) == 0){
+                            pConf->rpmTransFlags |= rpmtransflags_map[i].flag;
+                            break;
+                        }
+                    }
+                    if (rpmtransflags_map[i].name == NULL) {
+                        pr_err("unknown tsflag '%s'\n", token);
+                        free(value);
+                        dwError = ERROR_TDNF_INVALID_PARAMETER;
+                        BAIL_ON_TDNF_ERROR(dwError);
+                    }
+                    /* in rpmts.h, deprecated flags will be set to 0. Warn user about it. */
+                    if (rpmtransflags_map[i].flag == 0) {
+                        pr_info("flag tsflag '%s' is not supported and has no effect\n", token);
+                    }
+                }
+                free(value);
+            }
+        }
     }
 
     if (pszProxyUser && pszProxyPass)
     {
+        TDNF_SAFE_FREE_MEMORY(pConf->pszProxyUserPass);
         dwError = TDNFAllocateStringPrintf(
                       &pConf->pszProxyUserPass,
                       "%s:%s",
@@ -242,9 +313,9 @@ TDNFReadConfig(
     char *pszMinVersionsDir = NULL;
     char *pszPkgLocksDir = NULL;
     char *pszProtectedDir = NULL;
-
+    char *pszCacheDir = NULL;
+    char *pszRepoDir = NULL;
     const char *pszTdnfVersion = NULL;
-
     struct cnfnode *cn_conf = NULL;
     struct cnfmodule *mod_ini;
 
@@ -314,6 +385,51 @@ TDNFReadConfig(
         pConf->nSkipSignature = 1;
     }
 
+    if (pConf->pszRepoDir == NULL)
+        SET_STRING(pConf->pszRepoDir, TDNF_DEFAULT_REPO_LOCATION);
+    if (pConf->pszCacheDir == NULL)
+        SET_STRING(pConf->pszCacheDir, TDNF_DEFAULT_CACHE_LOCATION);
+
+    if (!IsNullOrEmptyString(pTdnf->pArgs->pszInstallRoot) &&
+        strcmp(pTdnf->pArgs->pszInstallRoot, "/"))
+    {
+        int nIsDir = 0;
+        dwError = TDNFJoinPath(&pszCacheDir,
+                               pTdnf->pArgs->pszInstallRoot,
+                               pConf->pszCacheDir,
+                               NULL);
+        BAIL_ON_TDNF_ERROR(dwError);
+
+        TDNF_SAFE_FREE_MEMORY(pConf->pszCacheDir);
+        pConf->pszCacheDir = pszCacheDir;
+        pszCacheDir = NULL;
+
+        dwError = TDNFJoinPath(&pszRepoDir,
+                               pTdnf->pArgs->pszInstallRoot,
+                               pConf->pszRepoDir,
+                               NULL);
+        BAIL_ON_TDNF_ERROR(dwError);
+
+        dwError = TDNFIsDir(pszRepoDir, &nIsDir);
+        if (dwError == ERROR_TDNF_FILE_NOT_FOUND)
+        {
+            nIsDir = 0;
+            dwError = 0;
+        }
+        BAIL_ON_TDNF_ERROR(dwError);
+        if (nIsDir)
+        {
+            TDNF_SAFE_FREE_MEMORY(pConf->pszRepoDir);
+            pConf->pszRepoDir = pszRepoDir;
+            pszRepoDir = NULL;
+        }
+    }
+
+    if (pTdnf->pArgs->cn_setopts) {
+        dwError = TDNFConfigFromCnfTree(pConf, pTdnf->pArgs->cn_setopts);
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
     pszTdnfVersion = TDNFGetVersion();
 
     if (pConf->pszOSName == NULL)
@@ -325,17 +441,14 @@ TDNFReadConfig(
     dwError = TDNFAllocateStringPrintf(&pConf->pszUserAgentHeader, "tdnf/%s %s/%s", pszTdnfVersion, pConf->pszOSName, pConf->pszOSVersion);
     BAIL_ON_TDNF_ERROR(dwError);
 
-    if (pConf->pszRepoDir == NULL)
-        pConf->pszRepoDir = strdup(TDNF_DEFAULT_REPO_LOCATION);
-    if (pConf->pszCacheDir == NULL)
-        pConf->pszCacheDir = strdup(TDNF_DEFAULT_CACHE_LOCATION);
     if (pConf->ppszDistroVerPkgs == NULL) {
         dwError = TDNFSplitStringToArray(TDNF_DEFAULT_DISTROVERPKGS,
                                          (char *)" ", &pConf->ppszDistroVerPkgs);
         BAIL_ON_TDNF_ERROR(dwError);
     }
+
     if (pConf->pszPersistDir == NULL)
-        pConf->pszPersistDir = strdup(TDNF_DEFAULT_DB_LOCATION);
+        SET_STRING(pConf->pszPersistDir, TDNF_DEFAULT_DB_LOCATION);
 
     if (pConf->ppszVarsDirs == NULL) {
         dwError = TDNFSplitStringToArray(TDNF_DEFAULT_VARS_DIRS,
@@ -344,9 +457,9 @@ TDNFReadConfig(
     }
 
     if (pConf->pszPluginPath == NULL)
-        pConf->pszPluginPath = strdup(TDNF_DEFAULT_PLUGIN_PATH);
+        SET_STRING(pConf->pszPluginPath, TDNF_DEFAULT_PLUGIN_PATH);
     if (pConf->pszPluginConfPath == NULL)
-        pConf->pszPluginConfPath = strdup(TDNF_DEFAULT_PLUGIN_CONF_PATH);
+        SET_STRING(pConf->pszPluginConfPath, TDNF_DEFAULT_PLUGIN_CONF_PATH);
 
     dwError = TDNFDirName(pszConfFile, &pszConfDir);
     BAIL_ON_TDNF_ERROR(dwError);
@@ -373,6 +486,8 @@ TDNFReadConfig(
 
 cleanup:
     destroy_cnftree(cn_conf);
+    TDNF_SAFE_FREE_MEMORY(pszCacheDir);
+    TDNF_SAFE_FREE_MEMORY(pszRepoDir);
     TDNF_SAFE_FREE_MEMORY(pszConfDir);
     TDNF_SAFE_FREE_MEMORY(pszMinVersionsDir);
     TDNF_SAFE_FREE_MEMORY(pszPkgLocksDir);

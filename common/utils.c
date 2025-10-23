@@ -420,10 +420,8 @@ TDNFFreeCmdArgs(
     TDNF_SAFE_FREE_MEMORY(pCmdArgs->pszConfFile);
     TDNF_SAFE_FREE_MEMORY(pCmdArgs->pszReleaseVer);
 
-    if(pCmdArgs->pSetOpt)
-    {
-        TDNFFreeCmdOpt(pCmdArgs->pSetOpt);
-    }
+    destroy_cnftree(pCmdArgs->cn_setopts);
+    destroy_cnftree(pCmdArgs->cn_repoopts);
     TDNF_SAFE_FREE_MEMORY(pCmdArgs);
 }
 
@@ -1272,4 +1270,17 @@ cleanup:
 
 error:
     goto cleanup;
+}
+
+/* return true if str is a valid reponame */
+int TDNFStrIsValidRepoName(const char *str)
+{
+    /* should start with alnum or '@' */
+    /* '@ as a first character to allow "@System" and "@cmdline" */
+    if (!str || !*str || !(isalnum(*str) || (*str == '@')))
+        return 0;
+    str++;
+    while(*str && (isalnum(*str) || *str == '-' || *str == '_' || *str == '.'))
+        str++;
+    return *str == 0;
 }

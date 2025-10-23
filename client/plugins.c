@@ -386,7 +386,7 @@ _TDNFApplyPluginOverrides(
     )
 {
     uint32_t dwError = 0;
-    PTDNF_CMD_OPT pSetOpt = NULL;
+    struct cnfnode *cn;
 
     if (!pTdnf || !pPlugins)
     {
@@ -395,16 +395,15 @@ _TDNFApplyPluginOverrides(
     }
 
     /* apply command line overrides to enable/deactivate specific plugins */
-    for (pSetOpt = pTdnf->pArgs->pSetOpt; pSetOpt; pSetOpt = pSetOpt->pNext)
-    {
-        if (strcmp(pSetOpt->pszOptName, "enableplugin") == 0)
+    for (cn = pTdnf->pArgs->cn_setopts->first_child; cn; cn = cn->next) {
+        if (strcmp(cn->name, "enableplugin") == 0)
         {
-            dwError = _TDNFAlterPluginState(pPlugins, 1, pSetOpt->pszOptValue);
+            dwError = _TDNFAlterPluginState(pPlugins, 1, cn->value);
             BAIL_ON_TDNF_ERROR(dwError);
         }
-        else if (strcmp(pSetOpt->pszOptName, "disableplugin") == 0)
+        else if (strcmp(cn->name, "disableplugin") == 0)
         {
-            dwError = _TDNFAlterPluginState(pPlugins, 0, pSetOpt->pszOptValue);
+            dwError = _TDNFAlterPluginState(pPlugins, 0, cn->value);
             BAIL_ON_TDNF_ERROR(dwError);
         }
     }
@@ -547,7 +546,6 @@ _TDNFLoadPlugins(
 {
     uint32_t dwError = 0;
     PTDNF_PLUGIN pPlugins = NULL;
-    int nHasOptNoPlugins = 0;
 
     if(!pTdnf || !ppPlugins)
     {
@@ -560,10 +558,7 @@ _TDNFLoadPlugins(
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    dwError = TDNFHasOpt(pTdnf->pArgs, TDNF_CONF_KEY_NO_PLUGINS, &nHasOptNoPlugins);
-    BAIL_ON_TDNF_ERROR(dwError);
-
-    if (nHasOptNoPlugins) {
+    if (find_child(pTdnf->pArgs->cn_setopts, TDNF_CONF_KEY_NO_PLUGINS) != NULL) {
         dwError = ERROR_TDNF_PLUGINS_DISABLED;
         BAIL_ON_TDNF_ERROR(dwError);
     }

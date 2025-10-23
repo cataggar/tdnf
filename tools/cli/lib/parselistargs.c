@@ -7,6 +7,7 @@
  */
 
 #include "includes.h"
+#include "../llconf/nodes.h"
 
 uint32_t
 TDNFCliParseInfoArgs(
@@ -79,7 +80,7 @@ TDNFCliParseListArgs(
 {
     uint32_t dwError = 0;
     PTDNF_LIST_ARGS pListArgs = NULL;
-    PTDNF_CMD_OPT pSetOpt = NULL;
+    struct cnfnode *cn = NULL;
     int nStartIndex = 1;
     int nPackageCount = 0;
     int nIndex = 0;
@@ -98,12 +99,9 @@ TDNFCliParseListArgs(
     pListArgs->nScope = SCOPE_ALL;
 
     /* scope can be given as an option */
-    for (pSetOpt = pCmdArgs->pSetOpt;
-         pSetOpt;
-         pSetOpt = pSetOpt->pNext)
-    {
+    for (cn = pCmdArgs->cn_setopts->first_child; cn; cn = cn->next) {
         dwError = TDNFCliParseScope(
-                      pSetOpt->pszOptName,
+                      cn->name,
                       &pListArgs->nScope);
         if(dwError == ERROR_TDNF_CLI_NO_MATCH)
         {

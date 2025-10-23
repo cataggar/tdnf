@@ -79,7 +79,7 @@ error:
 uint32_t
 TDNFStringSepCount(
     const char *pszBuf,
-    char *pszSep,
+    const char *pszSep,
     size_t *nSepCount
     )
 {
@@ -120,7 +120,7 @@ error:
 uint32_t
 TDNFSplitStringToArray(
     const char *pszBuf,
-    char *pszSep,
+    const char *pszSep,
     char ***pppszTokens
     )
 {
@@ -166,6 +166,85 @@ cleanup:
 error:
     TDNFFreeStringArrayWithCount(ppszToks, n);
     *pppszTokens = NULL;
+    goto cleanup;
+}
+
+uint32_t
+TDNFMergeStringArrays(
+    char ***pppszArray0,
+    char **ppszArray1
+)
+{
+    uint32_t dwError = 0;
+    int i, n, n0, n1;
+
+    if (!pppszArray0 || !ppszArray1) {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    dwError = TDNFStringArrayCount(*pppszArray0, &n0);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    dwError = TDNFStringArrayCount(ppszArray1, &n1);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    n = n0 + n1;
+
+    dwError = TDNFReAllocateMemory((n + 1) * sizeof(char *), (void **)pppszArray0);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    for (i = 0; i < n1; i++) {
+        (*pppszArray0)[n0 + i] = ppszArray1[i];
+    }
+    (*pppszArray0)[n] = NULL;
+
+    /* intentionally free only the pointer list,
+       and not the strings, because those have been moved to
+       pppszArray0 */
+    TDNF_SAFE_FREE_MEMORY(ppszArray1);
+
+cleanup:
+    return dwError;
+error:
+    goto cleanup;
+}
+
+/* adds a space separated list of strings to an existing string array */
+uint32_t
+TDNFAddStringArray(
+    char ***pppszArray,
+    char *pszValue)
+{
+    uint32_t dwError = 0;
+    char **ppszArrayToAdd = NULL;
+
+    if(!pppszArray) {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    if (IsNullOrEmptyString(pszValue)) {
+         /* setting to an empty value resets it (eg. "setopt=foo=") */
+        TDNF_SAFE_FREE_STRINGARRAY(*pppszArray);
+    } else {
+        dwError = TDNFSplitStringToArray(pszValue,
+                                         " ", &ppszArrayToAdd);
+        BAIL_ON_TDNF_ERROR(dwError);
+
+        if (*pppszArray != NULL) {
+            dwError = TDNFMergeStringArrays(pppszArray, ppszArrayToAdd);
+            BAIL_ON_TDNF_ERROR(dwError);
+        } else {
+            /* if first list is empty, just set to what we add */
+            *pppszArray = ppszArrayToAdd;
+        }
+    }
+
+cleanup:
+    return dwError;
+error:
+    TDNF_SAFE_FREE_STRINGARRAY(ppszArrayToAdd);
     goto cleanup;
 }
 
@@ -654,4 +733,3 @@ cleanup:
 error:
     goto cleanup;
 }
-

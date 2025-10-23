@@ -1,6 +1,13 @@
 #define STR_IS_TRUE(s) ((s) && (!strcmp((s), "1") || !strcasecmp((s), "true")))
 
-#define SET_STRING(s, v) {if (s) free(s); if(v) s = strdup(v); else s = NULL;}
+#define SET_STRING(s, v) { \
+    if (s) free(s); \
+    if (v) s = strdup(v); else s = NULL; \
+    if (v && s == NULL) { \
+        dwError = ERROR_TDNF_OUT_OF_MEMORY; \
+        BAIL_ON_TDNF_ERROR(dwError); \
+    } \
+}
 
 //Misc
 #define TDNF_RPM_EXT                      ".rpm"
@@ -41,12 +48,15 @@
 #define TDNF_CONF_KEY_PLUGIN_CONF_PATH    "pluginconfpath"
 #define TDNF_CONF_KEY_SSL_VERIFY          "sslverify"
 #define TDNF_PLUGIN_CONF_KEY_ENABLED      "enabled"
+#define TDNF_CONF_KEY_TSFLAGS             "tsflags"
 #define TDNF_CONF_KEY_EXCLUDE             "excludepkgs"
 #define TDNF_CONF_KEY_MINVERSIONS         "minversions"
 #define TDNF_CONF_KEY_OPENMAX             "openmax"
 #define TDNF_CONF_KEY_VARS_DIRS           "varsdir"
 #define TDNF_CONF_KEY_CHECK_UPDATE_COMPAT "dnf_check_update_compat"
 #define TDNF_CONF_KEY_DISTROSYNC_REINSTALL_CHANGED "distrosync_reinstall_changed"
+
+#define TDNF_PLUGIN_CONF_KEY_ENABLED      "enabled"
 
 //Repo file key names
 #define TDNF_REPO_KEY_BASEURL             "baseurl"

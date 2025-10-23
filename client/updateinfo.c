@@ -7,6 +7,7 @@
  */
 
 #include "includes.h"
+#include "../llconf/nodes.h"
 
 uint32_t
 TDNFUpdateInfoSummary(
@@ -412,7 +413,7 @@ TDNFGetSecuritySeverityOption(
     )
 {
     uint32_t dwError = 0;
-    PTDNF_CMD_OPT pSetOpt = NULL;
+    struct cnfnode *cn = NULL;
     uint32_t dwSecurity = 0;
     char* pszSeverity = NULL;
 
@@ -422,21 +423,14 @@ TDNFGetSecuritySeverityOption(
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    pSetOpt = pTdnf->pArgs->pSetOpt;
-
-    while(pSetOpt)
-    {
-        if(!strcasecmp(pSetOpt->pszOptName, "sec-severity"))
-        {
-            dwError = TDNFAllocateString(pSetOpt->pszOptValue, &pszSeverity);
+    for (cn = pTdnf->pArgs->cn_setopts->first_child; cn; cn = cn->next) {
+        if(strcasecmp(cn->name, "sec-severity") == 0) {
+            dwError = TDNFAllocateString(cn->value, &pszSeverity);
             BAIL_ON_TDNF_ERROR(dwError);
         }
-        if(!strcasecmp(pSetOpt->pszOptName, "security"))
-        {
+        if(strcasecmp(cn->name, "security") == 0) {
             dwSecurity = 1;
         }
-
-         pSetOpt = pSetOpt->pNext;
     }
 
     *pdwSecurity = dwSecurity;
@@ -575,7 +569,7 @@ TDNFGetRebootRequiredOption(
     )
 {
     uint32_t dwError = 0;
-    PTDNF_CMD_OPT pSetOpt = NULL;
+    struct cnfnode *cn = NULL;
     uint32_t dwRebootRequired = 0;
 
     if(!pTdnf || !pTdnf->pArgs)
@@ -584,16 +578,11 @@ TDNFGetRebootRequiredOption(
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    pSetOpt = pTdnf->pArgs->pSetOpt;
-
-    while(pSetOpt)
-    {
-        if(!strcasecmp(pSetOpt->pszOptName, "reboot-required"))
-        {
+    for (cn = pTdnf->pArgs->cn_setopts->first_child; cn; cn = cn->next) {
+        if(strcasecmp(cn->name, "reboot-required") == 0) {
             dwRebootRequired = 1;
             break;
         }
-        pSetOpt = pSetOpt->pNext;
     }
     *pdwRebootRequired = dwRebootRequired;
 cleanup:

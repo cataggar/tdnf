@@ -7,6 +7,7 @@
  */
 
 #include "includes.h"
+#include "../llconf/nodes.h"
 
 uid_t gEuid;
 
@@ -188,7 +189,7 @@ TDNFGetSkipProblemOption(
     )
 {
     uint32_t dwError = 0;
-    PTDNF_CMD_OPT pSetOpt = NULL;
+    struct cnfnode *cn = NULL;
 
     if (!pTdnf || !pTdnf->pArgs || !pdwSkipProblem)
     {
@@ -198,15 +199,11 @@ TDNFGetSkipProblemOption(
 
     *pdwSkipProblem = SKIPPROBLEM_NONE;
 
-    for (pSetOpt = pTdnf->pArgs->pSetOpt; pSetOpt; pSetOpt = pSetOpt->pNext)
-    {
-        if (!strcasecmp(pSetOpt->pszOptName, "skipconflicts"))
-        {
+    for (cn = pTdnf->pArgs->cn_setopts->first_child; cn; cn = cn->next) {
+        if (strcasecmp(cn->name, "skipconflicts") == 0){
             *pdwSkipProblem |= SKIPPROBLEM_CONFLICTS;
         }
-
-        if (!strcasecmp(pSetOpt->pszOptName, "skipobsoletes"))
-        {
+        if (strcasecmp(cn->name, "skipobsoletes") == 0){
             *pdwSkipProblem |= SKIPPROBLEM_OBSOLETES;
         }
     }
@@ -587,13 +584,9 @@ TDNFOpenHandle(
     uint32_t dwError = 0;
     PTDNF pTdnf = NULL;
     PSolvSack pSack = NULL;
-    char *pszCacheDir = NULL;
-    char *pszRepoDir = NULL;
     char *pszConfFile = NULL;
     char *pszConfFileInstallRoot = NULL;
-    int nHasOptReposDir = 0;
-    int nHasOptCacheDir = 0;
-    PTDNF_CMD_OPT pOpt = NULL;
+    struct cnfnode *cn = NULL;
 
     if(!pArgs || !ppTdnf)
     {
@@ -661,81 +654,10 @@ TDNFOpenHandle(
 
     GlobalSetDnfCheckUpdateCompat(pTdnf->pConf->nCheckUpdateCompat);
 
-    dwError = TDNFHasOpt(pTdnf->pArgs, TDNF_CONF_KEY_REPOSDIR, &nHasOptReposDir);
-    BAIL_ON_TDNF_ERROR(dwError);
-
-    dwError = TDNFHasOpt(pTdnf->pArgs, TDNF_CONF_KEY_CACHEDIR, &nHasOptCacheDir);
-    BAIL_ON_TDNF_ERROR(dwError);
-
-    if (!IsNullOrEmptyString(pTdnf->pArgs->pszInstallRoot) &&
-        strcmp(pTdnf->pArgs->pszInstallRoot, "/"))
-    {
-        int nIsDir = 0;
-
-        if(!nHasOptCacheDir)
-        {
-            dwError = TDNFJoinPath(&pszCacheDir,
-                                   pTdnf->pArgs->pszInstallRoot,
-                                   pTdnf->pConf->pszCacheDir,
-                                   NULL);
-            BAIL_ON_TDNF_ERROR(dwError);
-
-            TDNF_SAFE_FREE_MEMORY(pTdnf->pConf->pszCacheDir);
-            pTdnf->pConf->pszCacheDir = pszCacheDir;
-            pszCacheDir = NULL;
-        }
-
-        if (!nHasOptReposDir)
-        {
-            dwError = TDNFJoinPath(&pszRepoDir,
-                                   pTdnf->pArgs->pszInstallRoot,
-                                   pTdnf->pConf->pszRepoDir,
-                                   NULL);
-            BAIL_ON_TDNF_ERROR(dwError);
-
-            dwError = TDNFIsDir(pszRepoDir, &nIsDir);
-            if (dwError == ERROR_TDNF_FILE_NOT_FOUND)
-            {
-                nIsDir = 0;
-                dwError = 0;
-            }
-            BAIL_ON_TDNF_ERROR(dwError);
-            if (nIsDir)
-            {
-                TDNF_SAFE_FREE_MEMORY(pTdnf->pConf->pszRepoDir);
-                pTdnf->pConf->pszRepoDir = pszRepoDir;
-                pszRepoDir = NULL;
-            }
-        }
-    }
-
-    /* cachedir and reoposdir when set with setopt are always relative to host */
-    if (nHasOptReposDir)
-    {
-        TDNF_SAFE_FREE_MEMORY(pTdnf->pConf->pszRepoDir);
-        dwError = TDNFGetCmdOptValue(pTdnf->pArgs, TDNF_CONF_KEY_REPOSDIR, &pTdnf->pConf->pszRepoDir);
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    if (nHasOptCacheDir)
-    {
-        TDNF_SAFE_FREE_MEMORY(pTdnf->pConf->pszCacheDir);
-        dwError = TDNFGetCmdOptValue(pTdnf->pArgs, TDNF_CONF_KEY_CACHEDIR, &pTdnf->pConf->pszCacheDir);
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    for (pOpt = pTdnf->pArgs->pSetOpt; pOpt; pOpt = pOpt->pNext)
-    {
+    for (cn = pTdnf->pArgs->cn_setopts->first_child; cn; cn = cn->next) {
         /* set macros from command line */
-        if (strcmp(pOpt->pszOptName, "rpmdefine") == 0)
-        {
-            rpmDefineMacro(NULL, pOpt->pszOptValue, 0);
-        }
-        /* ultimately all --setopt= settings should override config values,
-           but for now make exceptions */
-        else if (strcmp(pOpt->pszOptName, TDNF_CONF_KEY_KEEP_CACHE) == 0)
-        {
-            pTdnf->pConf->nKeepCache = isTrue(pOpt->pszOptValue);
+        if (strcmp(cn->name, "rpmdefine") == 0) {
+            rpmDefineMacro(NULL, cn->value, 0);
         }
     }
 
@@ -751,7 +673,7 @@ TDNFOpenHandle(
 
     if(!pArgs->nAllDeps)
     {
-        dwError = SolvReadInstalledRpms(pSack->pPool->installed, pszCacheDir);
+        dwError = SolvReadInstalledRpms(pSack->pPool->installed, pTdnf->pConf->pszCacheDir);
         BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
     }
 
@@ -773,8 +695,6 @@ TDNFOpenHandle(
     *ppTdnf = pTdnf;
 
 cleanup:
-    TDNF_SAFE_FREE_MEMORY(pszCacheDir);
-    TDNF_SAFE_FREE_MEMORY(pszRepoDir);
     TDNF_SAFE_FREE_MEMORY(pszConfFile);
     TDNF_SAFE_FREE_MEMORY(pszConfFileInstallRoot);
     return dwError;

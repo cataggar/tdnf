@@ -17,6 +17,7 @@
  */
 
 #include "includes.h"
+#include "../llconf/nodes.h"
 
 uint32_t
 TDNFCliParseRepoSyncArgs(
@@ -26,7 +27,7 @@ TDNFCliParseRepoSyncArgs(
 {
     uint32_t dwError = 0;
     PTDNF_REPOSYNC_ARGS pReposyncArgs = NULL;
-    PTDNF_CMD_OPT pSetOpt = NULL;
+    struct cnfnode *cn = NULL;
     int i;
 
     if (!pArgs || !ppReposyncArgs)
@@ -41,11 +42,8 @@ TDNFCliParseRepoSyncArgs(
         (void**) &pReposyncArgs);
     BAIL_ON_CLI_ERROR(dwError);
 
-    for (pSetOpt = pArgs->pSetOpt;
-         pSetOpt;
-         pSetOpt = pSetOpt->pNext)
-    {
-        if (strcasecmp(pSetOpt->pszOptName, "arch") == 0)
+    for (cn = pArgs->cn_setopts->first_child; cn; cn = cn->next) {
+        if (strcasecmp(cn->name, "arch") == 0)
         {
             if (pReposyncArgs->ppszArchs == NULL)
             {
@@ -57,50 +55,50 @@ TDNFCliParseRepoSyncArgs(
             if (i < TDNF_REPOSYNC_MAXARCHS)
             {
                 dwError = TDNFAllocateString(
-                    pSetOpt->pszOptValue,
+                    cn->value,
                     &(pReposyncArgs->ppszArchs[i]));
                 BAIL_ON_CLI_ERROR(dwError);
             }
         }
-        else if (strcasecmp(pSetOpt->pszOptName, "delete") == 0)
+        else if (strcasecmp(cn->name, "delete") == 0)
         {
             pReposyncArgs->nDelete = 1;
         }
-        else if (strcasecmp(pSetOpt->pszOptName, "download-metadata") == 0)
+        else if (strcasecmp(cn->name, "download-metadata") == 0)
         {
             pReposyncArgs->nDownloadMetadata = 1;
         }
-        else if (strcasecmp(pSetOpt->pszOptName, "gpgcheck") == 0)
+        else if (strcasecmp(cn->name, "gpgcheck") == 0)
         {
             pReposyncArgs->nGPGCheck = 1;
         }
-        else if (strcasecmp(pSetOpt->pszOptName, "newest-only") == 0)
+        else if (strcasecmp(cn->name, "newest-only") == 0)
         {
             pReposyncArgs->nNewestOnly = 1;
         }
-        else if (strcasecmp(pSetOpt->pszOptName, "norepopath") == 0)
+        else if (strcasecmp(cn->name, "norepopath") == 0)
         {
             pReposyncArgs->nNoRepoPath = 1;
         }
-        else if (strcasecmp(pSetOpt->pszOptName, "source") == 0)
+        else if (strcasecmp(cn->name, "source") == 0)
         {
             pReposyncArgs->nSourceOnly = 1;
         }
-        else if (strcasecmp(pSetOpt->pszOptName, "urls") == 0)
+        else if (strcasecmp(cn->name, "urls") == 0)
         {
             pReposyncArgs->nPrintUrlsOnly = 1;
         }
-        else if (strcasecmp(pSetOpt->pszOptName, "download-path") == 0)
+        else if (strcasecmp(cn->name, "download-path") == 0)
         {
             dwError = TDNFAllocateString(
-                pSetOpt->pszOptValue,
+                cn->value,
                 &pReposyncArgs->pszDownloadPath);
             BAIL_ON_CLI_ERROR(dwError);
         }
-        else if (strcasecmp(pSetOpt->pszOptName, "metadata-path") == 0)
+        else if (strcasecmp(cn->name, "metadata-path") == 0)
         {
             dwError = TDNFAllocateString(
-                pSetOpt->pszOptValue,
+                cn->value,
                 &pReposyncArgs->pszMetaDataPath);
             BAIL_ON_CLI_ERROR(dwError);
         }

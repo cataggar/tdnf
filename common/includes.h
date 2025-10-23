@@ -26,6 +26,8 @@
 #include <ftw.h>
 
 #include <tdnf.h>
+#include "../llconf/nodes.h"
+
 #include <tdnftypes.h>
 #include <tdnferror.h>
 #include <tdnf-common-defines.h>

@@ -59,12 +59,6 @@ TDNFFetchRemoteGPGKey(
 
 //init.c
 uint32_t
-TDNFCloneSetOpts(
-    PTDNF_CMD_OPT pCmdOptIn,
-    PTDNF_CMD_OPT* ppCmdOpt
-    );
-
-uint32_t
 TDNFRefreshSack(
     PTDNF pTdnf,
     PSolvSack pSack,

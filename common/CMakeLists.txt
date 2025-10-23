@@ -10,7 +10,6 @@ include_directories(${CMAKE_SOURCE_DIR}/include)
 
 add_library(${LIB_TDNF_COMMON} STATIC
     memory.c
-    setopt.c
     strings.c
     utils.c
     log.c

@@ -74,6 +74,7 @@ extern "C" {
 #define ERROR_TDNF_CACHE_DIR_OUT_OF_DISK_SPACE 1036
 // There are duplicate repo id
 #define ERROR_TDNF_DUPLICATE_REPO_ID        1037
+#define ERROR_TDNF_INVALID_REPO_NAME        1038
 
 //curl errors
 #define ERROR_TDNF_CURL_INIT                  1200

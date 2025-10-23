@@ -7,6 +7,7 @@
  */
 
 #include "includes.h"
+#include "../llconf/nodes.h"
 
 uint32_t
 TDNFApplyScopeFilter(
@@ -55,7 +56,7 @@ TDNFPkgsToExclude(
     )
 {
     uint32_t dwError = 0;
-    PTDNF_CMD_OPT pSetOpt = NULL;
+    struct cnfnode *cn = NULL;
     uint32_t dwCount = 0;
     char**   ppszExcludes = NULL;
     int nIndex = 0;
@@ -78,14 +79,11 @@ TDNFPkgsToExclude(
         }
     }
 
-    pSetOpt = pTdnf->pArgs->pSetOpt;
-    while(pSetOpt)
-    {
-        if(!strcasecmp(pSetOpt->pszOptName, "exclude"))
+    for (cn = pTdnf->pArgs->cn_setopts->first_child; cn; cn = cn->next) {
+        if(!strcasecmp(cn->name, "exclude"))
         {
             dwCount++;
         }
-        pSetOpt = pSetOpt->pNext;
     }
 
     if(dwCount > 0)
@@ -109,17 +107,14 @@ TDNFPkgsToExclude(
             }
         }
 
-        pSetOpt = pTdnf->pArgs->pSetOpt;
-        while(pSetOpt)
-        {
-            if(!strcasecmp(pSetOpt->pszOptName, "exclude"))
+        for (cn = pTdnf->pArgs->cn_setopts->first_child; cn; cn = cn->next) {
+            if(!strcasecmp(cn->name, "exclude"))
             {
                 dwError = TDNFAllocateString(
-                      pSetOpt->pszOptValue,
+                      cn->value,
                       &ppszExcludes[nIndex++]);
                 BAIL_ON_TDNF_ERROR(dwError);
             }
-            pSetOpt = pSetOpt->pNext;
         }
     }
     *pppszExcludes = ppszExcludes;

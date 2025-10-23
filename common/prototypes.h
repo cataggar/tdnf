@@ -44,16 +44,27 @@ TDNFSafeAllocateString(
 uint32_t
 TDNFStringSepCount(
     const char *pszBuf,
-    char *pszSep,
+    const char *pszSep,
     size_t *nSepCount
     );
 
 uint32_t
 TDNFSplitStringToArray(
     const char *pszBuf,
-    char *pszSep,
+    const char *pszSep,
     char ***pppszTokens
     );
+
+uint32_t
+TDNFMergeStringArrays(
+    char ***pppszArray0,
+    char **ppszArray1
+);
+
+uint32_t
+TDNFAddStringArray(
+    char ***pppszArray,
+    char *pszValue);
 
 uint32_t
 TDNFJoinArrayToString(
@@ -219,54 +230,9 @@ TDNFDirName(
     char **ppszDirName
 );
 
-//setopt.c
-uint32_t
-AddSetOpt(
-    PTDNF_CMD_ARGS pCmdArgs,
-    const char* pszOptArg
-    );
-
-uint32_t
-AddSetOptWithValues(
-    PTDNF_CMD_ARGS pCmdArgs,
-    const char* pszOptArg,
-    const char* pszOptValue
-    );
-
-uint32_t
-GetOptionAndValue(
-    const char* pszOptArg,
-    PTDNF_CMD_OPT* ppCmdOpt
-    );
-
-uint32_t
-TDNFHasOpt(
-    PTDNF_CMD_ARGS pArgs,
-    const char *pszOptName,
-    int *pnHasOpt
-    );
-
-uint32_t
-TDNFSetOpt(
-    PTDNF_CMD_ARGS pArgs,
-    const char *pszOptName,
-    const char *pszOptValue
-    );
-
-uint32_t
-TDNFGetCmdOptValue(
-    PTDNF_CMD_ARGS pArgs,
-    const char *pszOptName,
-    char **ppszOptValue
-    );
-
-uint32_t
-TDNFGetOptWithDefault(
-    PTDNF_CMD_ARGS pArgs,
-    const char *pszOptName,
-    const char *pszDefault,
-    char **ppszOptValue
-    );
+int TDNFStrIsValidRepoName(
+    const char *str
+);
 
 //log.c
 void
