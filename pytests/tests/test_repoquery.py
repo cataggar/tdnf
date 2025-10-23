@@ -153,6 +153,17 @@ def test_extras(utils):
     assert 'glibc' in '\n'.join(ret['stdout'])
 
 
+def test_location(utils):
+    ret = utils.run(['tdnf',
+                     'repoquery',
+                     '--location',
+                     BASE_PKG])
+    assert ret['retval'] == 0
+
+    assert BASE_PKG in '\n'.join(ret['stdout'])
+    assert '\n'.join(ret['stdout']).startswith("http://localhost:8080/photon-test")
+
+
 def test_upgrades(utils):
     pkg_low = "{}-{}".format(utils.config["mulversion_pkgname"], utils.config["mulversion_lower"])
     pkg_high = "{}-{}".format(utils.config["mulversion_pkgname"], utils.config["mulversion_higher"])
@@ -247,7 +258,7 @@ def test_arch(utils):
 # Repoquery should list output for all the querys in the correct format
 def test_queryformat(utils):
     querytags = ['name', 'arch', 'version', 'reponame', 'release',
-                 'evr', 'sourcename', 'size', 'downloadsize', 'installsize',
+                 'evr', 'sourcename', 'size', 'downloadsize', 'installsize', 'location',
                  'sourcerpm', 'description', 'summary', 'license', 'url',
                  'conflicts', 'enhances', 'obsoletes', 'provides',
                  'recommends', 'requires', 'suggests', 'supplements']
@@ -311,3 +322,13 @@ def test_queryformat(utils):
     assert 'tdnf-test-cleanreq1-required' in '\n'.join(ret['stdout'])
     assert 'Conficts:' in '\n'.join(ret['stdout'])
     assert 'tdnf-test-conflicts-0' in '\n'.join(ret['stdout'])
+
+    ret = utils.run(['tdnf',
+                     'repoquery',
+                     '--qf',
+                     '%{location}',
+                     BASE_PKG])
+    assert ret['retval'] == 0
+
+    assert BASE_PKG in '\n'.join(ret['stdout'])
+    assert '\n'.join(ret['stdout']).startswith("http://localhost:8080/photon-test")
