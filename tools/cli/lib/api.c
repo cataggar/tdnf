@@ -702,6 +702,7 @@ static uint32_t tag_handler(const char *tag, void *data, char **pszRet)
         {"reponame", pPkgInfo->pszRepoName},
         {"release", pPkgInfo->pszRelease},
         {"evr", pPkgInfo->pszEVR},
+        {"location", pPkgInfo->pszLocation},
         {"sourcename", pPkgInfo->pszSourcePkg},
         {"size", pPkgInfo->pszFormattedDownloadSize},
         {"downloadsize", pPkgInfo->pszFormattedDownloadSize},
@@ -1100,6 +1101,10 @@ TDNFCliRepoQueryCommand(
             else if (pPkgInfo->pszSourcePkg)
             {
                 pr_crit("%s\n", pPkgInfo->pszSourcePkg);
+            }
+            else if (pPkgInfo->pszLocation)
+            {
+                pr_crit("%s\n", pPkgInfo->pszLocation);
             }
             else
             {

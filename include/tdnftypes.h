@@ -421,6 +421,7 @@ typedef struct _TDNF_REPOQUERY_ARGS
     int nAvailable;        /* list what's available (default) */
     int nDuplicates;
     int nExtras;           /* packages that are installed but not available */
+    int nLocation;
     int nInstalled;
     int nUpgrades;
     int nUserInstalled;
