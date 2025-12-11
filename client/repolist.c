@@ -726,33 +726,42 @@ TDNFRepoListFinalize(
     /* There could be overrides to enable/disable
        repo such as cmdline args, api overrides */
     for (cn = pTdnf->pArgs->cn_setopts->first_child; cn; cn = cn->next) {
-        if(strcmp(cn->name, "enablerepo") == 0) {
-            dwError = TDNFAlterRepoState(
-                          pTdnf->pRepos,
-                          1,
-                          cn->value);
-        }
-        else if(strcmp(cn->name, "disablerepo") == 0) {
-            dwError = TDNFAlterRepoState(
-                          pTdnf->pRepos,
-                          0,
-                          cn->value);
-        }
-        else if((strcmp(cn->name, "repo") == 0) ||
-                (strcmp(cn->name, "repoid") == 0)) {
-            if (!nRepoidSeen)
-            {
-                dwError = TDNFAlterRepoState(
-                              pTdnf->pRepos, 0, "*");
-                BAIL_ON_TDNF_ERROR(dwError);
-                nRepoidSeen = 1;
+        int isEnabled = -1;
+        char **ppszRepos = NULL;
+
+        if (!strcmp(cn->name, "enablerepo"))
+            isEnabled = 1;
+        else if (!strcmp(cn->name, "disablerepo"))
+            isEnabled = 0;
+
+        if (isEnabled != -1) {
+            dwError = TDNFSplitStringToArray(cn->value, ",", &ppszRepos);
+            BAIL_ON_TDNF_ERROR(dwError);
+
+            for (int i = 0; ppszRepos[i]; ++i) {
+              dwError = TDNFAlterRepoState(pTdnf->pRepos, isEnabled, ppszRepos[i]);
+              BAIL_ON_TDNF_ERROR(dwError);
             }
-            dwError = TDNFAlterRepoState(
-                          pTdnf->pRepos,
-                          1,
-                          cn->value);
+
+            TDNF_SAFE_FREE_STRINGARRAY(ppszRepos);
+        } else if (!strcmp(cn->name, "repo") || !strcmp(cn->name, "repoid")) {
+            if (!nRepoidSeen) {
+              dwError = TDNFAlterRepoState(pTdnf->pRepos, 0, "*");
+              BAIL_ON_TDNF_ERROR(dwError);
+              nRepoidSeen = 1;
+            }
+
+            ppszRepos = NULL;
+            dwError = TDNFSplitStringToArray(cn->value, ",", &ppszRepos);
+            BAIL_ON_TDNF_ERROR(dwError);
+
+            for (int i = 0; ppszRepos[i]; ++i) {
+              dwError = TDNFAlterRepoState(pTdnf->pRepos, 1, ppszRepos[i]);
+              BAIL_ON_TDNF_ERROR(dwError);
+            }
+
+            TDNF_SAFE_FREE_STRINGARRAY(ppszRepos);
         }
-        BAIL_ON_TDNF_ERROR(dwError);
     }
 
     /* Now that the overrides are applied, replace config vars
@@ -849,18 +858,20 @@ TDNFAlterRepoState(
 
     nIsGlob = TDNFIsGlob(pszId);
 
-    for (int nMatch = 0; pRepos; pRepos = pRepos->pNext)
+    for (; pRepos; pRepos = pRepos->pNext)
     {
+        bool nMatch = false;
+
         if(nIsGlob)
         {
             if(!fnmatch(pszId, pRepos->pszId, 0))
             {
-                nMatch = 1;
+                nMatch = true;
             }
         }
         else if(!strcmp(pRepos->pszId, pszId))
         {
-            nMatch = 1;
+            nMatch = true;
         }
         if(nMatch)
         {
