@@ -186,6 +186,9 @@ static const char *help_msg =
  "--upgrades                 Show only upgradeable packages\n"
  "                           Example: tdnf repoquery --upgrades\n"
 
+ "--downgrades               Show only downgradeable packages\n"
+ "                           Example: tdnf repoquery --downgrades\n"
+
  "--whatconflicts <cap>      Find packages that conflict with capability\n"
  "                           Example: tdnf repoquery --whatconflicts=package\n"
 
