@@ -359,8 +359,9 @@ static const char *help_msg =
  "help                       Display this help message\n"
  "                           Example: tdnf help\n"
 
- "history <cmd>              History commands (init|update|list|rollback|undo|redo)\n"
+ "history <cmd>              History commands (init|update|list|rollback|undo|redo|id)\n"
  "                           Example: tdnf history list\n"
+ "                           Example: tdnf history id\n"
 
  "info <pkg>                 Display details about a package or group of packages\n"
  "                           Example: tdnf info package\n"

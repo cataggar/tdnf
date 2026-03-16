@@ -158,6 +158,11 @@ TDNFGetPackageUrls(
     char ***pppszUrls,
     int *pnCount);
 
+uint32_t
+TDNFHistoryGetId(
+    PTDNF pTdnf,
+    int *pnId);
+
 //confidence check. displays current installed count.
 //should be same as rpm -qa | wc -l
 uint32_t
