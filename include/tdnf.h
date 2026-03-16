@@ -151,7 +151,12 @@ TDNFHistoryList(
     PTDNF_HISTORY_ARGS pHistoryArgs,
     PTDNF_HISTORY_INFO *ppHistoryInfo);
 
-
+uint32_t
+TDNFGetPackageUrls(
+    PTDNF pTdnf,
+    PTDNF_SOLVED_PKG_INFO pSolvedPkgInfo,
+    char ***pppszUrls,
+    int *pnCount);
 
 //confidence check. displays current installed count.
 //should be same as rpm -qa | wc -l
