@@ -17,7 +17,7 @@ static const char *help_msg =
  "--6, -6                    Resolve to IPv6 addresses only\n"
  "                           Example: tdnf -6 install package\n"
 
- "--alldeps                  Download all dependencies (requires --downloadonly)\n"
+ "--alldeps                  Download all dependencies (requires --downloadonly or --urls)\n"
  "                           Example: tdnf --downloadonly --alldeps install package\n"
 
  "--allowerasing             Allow erasing of installed packages to resolve dependencies\n"
@@ -61,6 +61,9 @@ static const char *help_msg =
 
  "--downloadonly             Download packages only, do not install\n"
  "                           Example: tdnf --downloadonly install pkg\n"
+ "\n"
+ "--urls                     Print package URLs only, do not download or install\n"
+ "                           Example: tdnf --urls install pkg\n"
 
  "--enablerepo <repoid>      Enable repositories by id\n"
  "                           Example: tdnf --enablerepo=updates install\n"
@@ -86,7 +89,7 @@ static const char *help_msg =
  "--noautoremove             Do not remove automatically installed dependencies\n"
  "                           Example: tdnf --noautoremove remove pkg\n"
 
- "--nodeps                   Skip dependency checks(requires --downloadonly)\n"
+ "--nodeps                   Skip dependency checks (requires --downloadonly or --urls)\n"
  "                           Example: tdnf --downloadonly --nodeps install package\n"
 
  "--nogpgcheck               Skip GPG signature checks\n"
