@@ -93,6 +93,7 @@ int main(int argc, char **argv)
         _context.pFnAlterHistory = TDNFCliInvokeAlterHistory;
         _context.pFnMark = TDNFCliInvokeMark;
         _context.pFnGetPackageUrls = TDNFCliInvokeGetPackageUrls;
+        _context.pFnHistoryGetId = TDNFCliInvokeHistoryGetId;
 
         pszCmd = pCmdArgs->ppszCmds[0];
 
@@ -496,6 +497,15 @@ TDNFCliInvokeGetPackageUrls(
 )
 {
     return TDNFGetPackageUrls(pContext->hTdnf, pSolvedPkgInfo, pppszUrls, pnCount);
+}
+
+uint32_t
+TDNFCliInvokeHistoryGetId(
+    PTDNF_CLI_CONTEXT pContext,
+    int *pnId
+)
+{
+    return TDNFHistoryGetId(pContext->hTdnf, pnId);
 }
 
 uint32_t
