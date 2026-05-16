@@ -10,6 +10,7 @@
 #ifndef _TDNF_RPMZIG_RPMDB_H_
 #define _TDNF_RPMZIG_RPMDB_H_
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -117,6 +118,54 @@ const char *tdnf_rpm_file_compressor(tdnf_rpm_file *fh);
  * underlying file.
  */
 int64_t tdnf_rpm_file_payload_offset(tdnf_rpm_file *fh);
+
+/**
+ * Decompress the payload (cpio archive) into a fresh malloc'd
+ * buffer. On success, writes the pointer to `*out` and the byte
+ * count to `*out_size`. Caller frees the buffer with
+ * tdnf_rpmdb_string_free.
+ *
+ * Returns 0 on success, -1 on error (use tdnf_rpmdb_last_error).
+ */
+int tdnf_rpm_file_decompress_payload(
+    tdnf_rpm_file *fh,
+    unsigned char **out,
+    size_t *out_size
+);
+
+/* --- files-in-package iterator --- */
+
+typedef struct tdnf_rpm_files_iter tdnf_rpm_files_iter;
+
+/**
+ * Open a files-in-package iterator. Decompresses the payload up
+ * front, so large packages briefly hold their full cpio archive in
+ * memory.
+ *
+ * Returns NULL on error (use tdnf_rpmdb_last_error).
+ */
+tdnf_rpm_files_iter *tdnf_rpm_file_files_open(tdnf_rpm_file *fh);
+
+/**
+ * Free a files iterator. Accepts NULL.
+ */
+void tdnf_rpm_file_files_close(tdnf_rpm_files_iter *it);
+
+/**
+ * Advance the iterator. On success writes the next entry's name
+ * into `*name_out` (stable pointer; do NOT free) and its mode bits
+ * into `*mode_out` (may be NULL if uninterested).
+ *
+ * Returns:
+ *    1 on success,
+ *    0 on end-of-archive,
+ *   -1 on error.
+ */
+int tdnf_rpm_file_files_next(
+    tdnf_rpm_files_iter *it,
+    const char **name_out,
+    uint32_t *mode_out
+);
 
 #ifdef __cplusplus
 }
