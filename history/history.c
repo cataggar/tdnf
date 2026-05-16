@@ -9,17 +9,15 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
-/* for O_RDONLY */
-#include <fcntl.h>
 
 #include <sqlite3.h>
 
-#include <rpm/rpmlib.h>
-#include <rpm/rpmdb.h>
-#include <rpm/rpmlog.h>
-#include <rpm/rpmps.h>
+/* Only `<rpm/rpmts.h>` is still needed — for the `rpmts` opaque type
+ * carried through function signatures and `rpmtsRootDir()` (the one
+ * librpm call still made from this file to extract the install root
+ * that gets passed to rpmzig). Everything else has been migrated to
+ * the rpmzig API. */
 #include <rpm/rpmts.h>
-#include <rpm/rpmdb.h>
 
 #include "rpmdb.h"
 #include "history.h"
@@ -1478,12 +1476,12 @@ int history_update_state(struct history_ctx *ctx, rpmts ts, const char *cmdline)
     check_ptr(ctx);
     check_ptr(ts);
 
-    cookie = rpmdbCookie(rpmtsGetRdb(ts));
+    cookie = tdnf_rpmdb_cookie(rpmtsRootDir(ts));
     check_ptr(cookie);
 
     if (strcmp(ctx->cookie, cookie) == 0) {
         /* nothing changed */
-        safe_free(cookie);
+        tdnf_rpmdb_string_free(cookie);
         return 0;
     }
 
@@ -1547,9 +1545,8 @@ int history_sync(struct history_ctx *ctx, rpmts ts)
     check_ptr(ctx);
     check_ptr(ts);
 
-    rpmtsOpenDB(ts, O_RDONLY);
-    cookie = rpmdbCookie(rpmtsGetRdb(ts));
-    /* this fails if the rpm db isn't opened */
+    cookie = tdnf_rpmdb_cookie(rpmtsRootDir(ts));
+    /* this fails if the rpm db isn't accessible */
     check_ptr(cookie);
 
     step = db_table_exists(ctx->db, "transactions");

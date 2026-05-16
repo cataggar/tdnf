@@ -108,6 +108,83 @@ export fn tdnf_rpmdb_last_error() [*:0]const u8 {
     return @ptrCast(&last_error_buf);
 }
 
+/// Returns an opaque "cookie" string that captures the rpmdb state.
+///
+/// Two calls return the same cookie iff the rpmdb has not changed
+/// between them (no install/remove/upgrade). Format is
+/// `<max_hnum>:<count>` over the Packages table — both axes change
+/// when packages are added or removed, and `max_hnum` advances even
+/// on reinstalls (rpm allocates a fresh `hnum` for each row write).
+///
+/// Replaces librpm's `rpmdbCookie()` — same role, different format.
+/// Existing history DBs from the librpm era will see one spurious
+/// "delta" transaction on first sync after upgrade because the
+/// format differs; subsequent syncs match.
+///
+/// Caller owns the returned string and must free it with
+/// `tdnf_rpmdb_string_free`. Returns NULL on error.
+export fn tdnf_rpmdb_cookie(root: ?[*:0]const u8) ?[*:0]u8 {
+    clearError();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_slice: []const u8 = if (root) |p| std.mem.span(p) else "";
+    const db_path = buildDbPath(&buf, root_slice) catch |err| {
+        setError("path build failed: {t}", .{err});
+        return null;
+    };
+
+    var db: ?*c.sqlite3 = null;
+    const open_rc = c.sqlite3_open_v2(
+        db_path.ptr,
+        &db,
+        c.SQLITE_OPEN_READONLY | c.SQLITE_OPEN_NOMUTEX,
+        null,
+    );
+    defer {
+        if (db != null) _ = c.sqlite3_close(db);
+    }
+    if (open_rc != c.SQLITE_OK) {
+        setError("sqlite3_open_v2({s}): {s}", .{
+            db_path,
+            std.mem.span(@as([*:0]const u8, c.sqlite3_errmsg(db))),
+        });
+        return null;
+    }
+
+    var stmt: ?*c.sqlite3_stmt = null;
+    const sql = "SELECT IFNULL(MAX(hnum), 0), COUNT(*) FROM " ++ PKG_TABLE;
+    const prepare_rc = c.sqlite3_prepare_v2(db, sql, sql.len, &stmt, null);
+    defer {
+        if (stmt != null) _ = c.sqlite3_finalize(stmt);
+    }
+    if (prepare_rc != c.SQLITE_OK) {
+        setError("sqlite3_prepare_v2: {s}", .{
+            std.mem.span(@as([*:0]const u8, c.sqlite3_errmsg(db))),
+        });
+        return null;
+    }
+    const step_rc = c.sqlite3_step(stmt);
+    if (step_rc != c.SQLITE_ROW) {
+        setError("sqlite3_step returned {d}, expected SQLITE_ROW", .{step_rc});
+        return null;
+    }
+    const max_hnum = c.sqlite3_column_int64(stmt, 0);
+    const count = c.sqlite3_column_int64(stmt, 1);
+
+    var local_buf: [64]u8 = undefined;
+    const text = std.fmt.bufPrint(&local_buf, "{d}:{d}", .{ max_hnum, count }) catch {
+        setError("cookie format buffer too small", .{});
+        return null;
+    };
+    const out = c.malloc(text.len + 1) orelse {
+        setError("out of memory", .{});
+        return null;
+    };
+    const out_bytes = @as([*]u8, @ptrCast(out));
+    @memcpy(out_bytes[0..text.len], text);
+    out_bytes[text.len] = 0;
+    return @ptrCast(out);
+}
+
 // -------------------------------------------------------------------
 // Iterator
 // -------------------------------------------------------------------
