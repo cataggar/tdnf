@@ -1,0 +1,164 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            name: linux-x64
+          - os: ubuntu-22.04-arm
+            name: linux-arm64
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install C build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            librpm-dev \
+            libsolv-dev \
+            libcurl4-openssl-dev \
+            libexpat1-dev \
+            libssl-dev \
+            libsqlite3-dev \
+            libgpgme-dev \
+            libpopt-dev \
+            pkg-config
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.16.0
+          use-cache: false
+
+      - name: Configure Zig caches
+        uses: ./.github/actions/zig-cache
+
+      - name: Get version
+        id: version
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: |
+          zig build \
+            -Doptimize=ReleaseSafe \
+            "-Dversion=${{ steps.version.outputs.version }}" \
+            install --prefix ./out
+
+      - name: Verify CLI version
+        shell: bash
+        run: |
+          VERSION_OUTPUT="$(LD_LIBRARY_PATH=./out/lib ./out/bin/tdnf --version 2>&1)"
+          EXPECTED="tdnf: ${{ steps.version.outputs.version }}"
+          if [ "$VERSION_OUTPUT" != "$EXPECTED" ]; then
+            echo "Expected: $EXPECTED"
+            echo "Actual:   $VERSION_OUTPUT"
+            exit 1
+          fi
+
+      - name: Package
+        shell: bash
+        run: |
+          PKGNAME="tdnf-${{ steps.version.outputs.version }}-${{ matrix.name }}"
+          mkdir -p "$PKGNAME"
+          cp -a ./out/. "$PKGNAME/"
+          cp COPYING README.md "$PKGNAME/"
+          tar czf "$PKGNAME.tar.gz" "$PKGNAME"
+          sha256sum "$PKGNAME.tar.gz" > "$PKGNAME.tar.gz.sha256"
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          path: ./out/
+          output-file: tdnf-${{ steps.version.outputs.version }}-${{ matrix.name }}.sbom.spdx.json
+          upload-artifact: false
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            tdnf-*.tar.gz
+            tdnf-*.sha256
+            tdnf-*.sbom.spdx.json
+
+  source:
+    name: Source tarball
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Get version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Package source
+        run: |
+          PKGNAME="tdnf-${{ steps.version.outputs.version }}"
+          git archive --format=tar --prefix="$PKGNAME/" HEAD | xz > "$PKGNAME.tar.xz"
+          sha256sum "$PKGNAME.tar.xz" > "$PKGNAME.tar.xz.sha256"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: source
+          path: |
+            tdnf-*.tar.xz
+            tdnf-*.sha256
+
+  release:
+    name: Create Release
+    needs: [build, source]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          merge-multiple: true
+
+      - name: Get version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
+        with:
+          subject-path: |
+            tdnf-*.tar.gz
+            tdnf-*.tar.xz
+
+      - name: Create release
+        uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
+        with:
+          name: tdnf ${{ steps.version.outputs.version }}
+          body: |
+            **Install:** download the appropriate tarball for your architecture, verify the SHA256, and extract.
+
+            Each archive contains the same install layout produced by
+            `zig build install --prefix ./out`:
+            `bin/`, `lib/`, `lib/tdnf-plugins/`, `libexec/`, `etc/`,
+            `include/`, plus the project `COPYING` and `README.md`.
+
+            See the source tarball (`tdnf-*.tar.xz`) for a reproducible source snapshot.
+          files: |
+            tdnf-*.tar.gz
+            tdnf-*.tar.xz
+            tdnf-*.sha256
+            tdnf-*.sbom.spdx.json
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, 'dev') || contains(steps.version.outputs.version, 'rc') }}
