@@ -70,11 +70,13 @@ static int slurp_key(const char *path, unsigned char **out, size_t *out_len)
 
 /*
  * Cross-check verification of `pkg_path` against `key_path` using
- * rpmzig. Returns one of TDNF_RPMZIG_VERIFY_*. Returns -1 on any
- * unexpected I/O error.
+ * rpmzig. Returns one of TDNF_RPMZIG_VERIFY_* (0 = OK). Returns
+ * a negative value on any unexpected I/O error.
  *
  * Logs to stderr if the rpmzig verdict differs from `librpm_ok`
- * (true when librpm just said "verified").
+ * (true when librpm just said "verified"). The caller decides
+ * what to do with the return value — under -Drpmzig-verify=true
+ * client/gpgcheck.c escalates non-OK to ERROR_TDNF_RPM_GPG_NO_MATCH.
  */
 int TDNFRpmzigCrossCheck(
     const char *pkg_path,

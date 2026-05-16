@@ -336,11 +336,26 @@ TDNFGPGCheckPackage(
             BAIL_ON_TDNF_ERROR(dwError);
 
 #ifdef TDNF_RPMZIG_VERIFY
-            /* Monitor-mode cross-check: rpmzig + gpgme verifies the
-             * same (rpm, key) pair. Disagreements log to stderr; the
-             * librpm verdict above remains authoritative. */
-            (void)TDNFRpmzigCrossCheck(pszFilePath, pszLocalGPGKey,
-                                       /*librpm_ok=*/1);
+            /* Cross-check the librpm verdict above with rpmzig +
+             * gpgme. Disagreements log to stderr (in
+             * TDNFRpmzigCrossCheck) and are promoted to a hard
+             * error here — a fresh-key path only reaches this
+             * point if librpm already said "verified", so a
+             * disagreement means rpmzig flagged something librpm
+             * missed (or, less likely, has a bug). Either way
+             * tdnf should refuse the install. */
+            {
+                int rpmzig_status = TDNFRpmzigCrossCheck(
+                    pszFilePath, pszLocalGPGKey, /*librpm_ok=*/1);
+                if (rpmzig_status != 0 /* TDNF_RPMZIG_VERIFY_OK */) {
+                    pr_err("rpmzig refused signature on %s "
+                           "(librpm accepted it, rpmzig status=%d). "
+                           "Refusing to install.\n",
+                           pszFilePath, rpmzig_status);
+                    dwError = ERROR_TDNF_RPM_GPG_NO_MATCH;
+                    BAIL_ON_TDNF_ERROR(dwError);
+                }
+            }
 #endif
 
             if (nRemote)
