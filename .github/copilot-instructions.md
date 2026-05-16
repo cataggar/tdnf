@@ -98,32 +98,50 @@ Pkg-config files and the `tdnf-automatic` script are produced via
 `b.addConfigHeader(.autoconf_at, ...)` into the build cache, then
 installed.
 
-## librpm replacement (in progress)
+## librpm replacement (T1+T2+T3 complete)
 
-`rpmzig/` is a Zig static library that incrementally takes over
-librpm's read-side responsibilities. See
-`plan-replace-librpm.md` in the session-state archive for the full
-plan. Today it exposes a single function via a C ABI:
+`rpmzig/` is a Zig static library that has taken over librpm's
+read-side responsibilities. See `plan-replace-librpm.md` in the
+session-state archive for the full plan. Today it exposes (via
+the C ABI in `rpmzig/rpmdb.h` and `rpmzig/verify.h`):
 
-```c
-int64_t tdnf_rpmdb_count_packages(const char *root);
-const char *tdnf_rpmdb_last_error(void);
-```
+- **rpmdb reader** (T1): `tdnf_rpmdb_count_packages`,
+  `tdnf_rpmdb_iter_*`, `tdnf_rpmdb_cookie`,
+  `tdnf_rpmdb_pubkeys_*` (walks `gpg-pubkey-*` entries — the
+  imported public-key keyring). `history/history.c` is fully
+  off librpm.
+- **`.rpm` file parser** (T2): `tdnf_rpm_file_*` — opens a
+  `.rpm`, parses lead + signature header + main header, walks
+  the cpio payload via `std.compress.{flate,zstd,xz}`.
+- **Signature verifier** (T3): `tdnf_rpmzig_verify`,
+  `tdnf_rpmzig_verify_with_keys`, plus a libtdnf-side wrapper
+  `TDNFRpmzigVerify` in `client/gpgcheck_zig.c`. Backed by
+  gpgme today; issue #14 tracks a pure-Zig follow-on.
 
-backed by `rpmzig/rpmdb.zig` which opens `/var/lib/rpm/rpmdb.sqlite`
-read-only via `sqlite3_open_v2`. The smoke-test consumer
-`tdnf-rpmdb-count` lives under `libexec/tdnf/` and should return the
-same row count as `rpm -qa | wc -l`. Future PRs will add an RPM
-header-blob decoder + a Packages iterator and migrate
-`history/history.c` off `librpm`'s `rpmdb*` calls.
+The verifier is **opt-in via `zig build -Drpmzig-verify=true`**.
+Under the flag, libtdnf links `libgpgme.so.11` and the rpmzig
+path replaces librpm's `rpmVerifySignatures` entirely
+(`rpmts` runs with `RPMVSF_MASK_NOSIGNATURES`). Default builds
+keep the librpm verify path and don't link gpgme.
 
-**Adding sqlite3-using Zig code:** don't put
-`mod.linkSystemLibrary("sqlite3", …)` on a static-library module —
-that embeds `libsqlite3.so` *inside* the resulting `.a` and tdnf-side
-consumers fail to link. Instead, leave the static lib symbol-naked and
-add `linkSystemLibrary("sqlite3", …)` on every executable / shared lib
-that links it. Same pattern is used elsewhere in `build.zig` for
-`history_lib`.
+Smoke-test consumers under `libexec/tdnf/`:
+`tdnf-rpmdb-count`, `tdnf-rpmdb-list`, `tdnf-rpmdb-pubkeys`,
+`tdnf-rpm-info`, `tdnf-rpm-files`, `tdnf-rpm-verify` (the last
+supports `--key`, `--rpmdb [root]`, and `--homedir`).
+
+After T3, librpm in libtdnf is purely the
+**transaction-execution backend** — the same role it plays in
+`dnf5`. T4 (transaction execution) is intentionally out of
+scope.
+
+**Adding sqlite3- or gpgme-using Zig code:** don't put
+`mod.linkSystemLibrary("sqlite3", …)` or
+`mod.linkSystemLibrary("gpgme", …)` on a static-library module —
+that embeds `libsqlite3.so` / `libgpgme.so` *inside* the
+resulting `.a` and tdnf-side consumers fail to link. Instead,
+leave the static lib symbol-naked and add `linkSystemLibrary` on
+every executable / shared lib that links it. Same pattern is
+used throughout `build.zig` for `history_lib` and `rpmzig_lib`.
 
 ## C code conventions
 
