@@ -183,6 +183,21 @@ int tdnf_rpm_file_files_next(
     uint32_t *mode_out
 );
 
+/**
+ * Returns the signature payload from the sig header and the byte
+ * range of the file that the signature covers. Both slices alias
+ * into the file handle's owned buffer.
+ *
+ * Returns 0 on success, -1 on failure (no signature, or NULL handle).
+ */
+int tdnf_rpm_file_signed_range(
+    tdnf_rpm_file *fh,
+    const unsigned char **sig_out,
+    size_t *sig_len_out,
+    const unsigned char **signed_out,
+    size_t *signed_len_out
+);
+
 #ifdef __cplusplus
 }
 #endif

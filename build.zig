@@ -364,6 +364,36 @@ pub fn build(b: *Build) void {
         b.getInstallStep().dependOn(&install.step);
     }
 
+    // tdnf-rpm-verify: smoke-test exe for the gpgme-backed
+    // signature verifier (T3 PR #1). verify.c uses the gpgme C API
+    // directly; it lives in the consuming binary rather than in
+    // rpmzig_lib so the gpgme dep is contained.
+    {
+        const mod = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .pic = true,
+        });
+        mod.addIncludePath(b.path("rpmzig"));
+        mod.addCSourceFiles(.{
+            .root = b.path("rpmzig"),
+            .files = &.{ "verify_main.c", "verify.c" },
+            .flags = &tdnf_cflags,
+        });
+        mod.linkLibrary(rpmzig_lib);
+        linkSystem(mod, &.{ "sqlite3", "gpgme" });
+        const exe = b.addExecutable(.{
+            .name = "tdnf-rpm-verify",
+            .root_module = mod,
+        });
+        hardenExe(exe);
+        const install = b.addInstallArtifact(exe, .{
+            .dest_dir = .{ .override = .{ .custom = "libexec/tdnf" } },
+        });
+        b.getInstallStep().dependOn(&install.step);
+    }
+
     // ----- libtdnf (shared) ----- //
 
     const tdnf_so_mod = b.createModule(.{

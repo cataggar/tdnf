@@ -87,9 +87,14 @@ pub const RpmFile = struct {
     bytes: []u8,
     /// Signature header (parsed at open time). Used by T3 to verify
     /// the package's GPG signature; for now we just expose presence
-    /// via `isSigned()`.
+    /// via `signatureKind()`.
     sig: header.Header,
     main: header.Header,
+    /// Offset of the main header (including its 8-byte standalone
+    /// magic) in `bytes`. RSA/DSA signatures cover the byte range
+    /// `[main_header_offset, payload_offset)`; PGP/GPG signatures
+    /// cover `[main_header_offset, end-of-file)`.
+    main_header_offset: usize,
     /// Offset of the payload in `bytes` (relative to bytes[0]).
     payload_offset: usize,
     /// Compressor declared by `RPMTAG_PAYLOADCOMPRESSOR` (defaults to
@@ -155,6 +160,7 @@ pub const RpmFile = struct {
             .bytes = buf,
             .sig = sig_info.header,
             .main = main_info.header,
+            .main_header_offset = main_start,
             .payload_offset = payload_offset,
             .compressor = compressor,
         };
@@ -198,10 +204,38 @@ pub const RpmFile = struct {
     }
 
     /// Returns true iff the signature header carries any of the known
-    /// GPG/RSA/DSA signature payloads. T3 will replace this stub with
-    /// real verification through gpgme.
+    /// GPG/RSA/DSA signature payloads.
     pub fn isSigned(self: RpmFile) bool {
         return self.signatureKind() != .none;
+    }
+
+    /// Returns the signature payload bytes from the sig header and
+    /// the byte range of the rpm file that those signature bytes
+    /// cover.
+    ///
+    /// Returns null if the rpm carries no signature.
+    pub fn signatureSlice(self: RpmFile) ?struct { sig: []const u8, signed: []const u8 } {
+        const kind = self.signatureKind();
+        const tag: u32 = switch (kind) {
+            .none => return null,
+            .rsa => @intFromEnum(header.SigTagId.rsa),
+            .dsa => @intFromEnum(header.SigTagId.dsa),
+            .pgp => @intFromEnum(header.SigTagId.pgp),
+            .gpg => @intFromEnum(header.SigTagId.gpg),
+            .openpgp => @intFromEnum(header.SigTagId.openpgp),
+        };
+        const sig_bytes = self.sig.getBinaryRaw(tag) orelse return null;
+        const signed_end: usize = switch (kind) {
+            // RSA / DSA: cover only the main header (with magic).
+            .rsa, .dsa => self.payload_offset,
+            // PGP / GPG / OpenPGP: cover main header + payload.
+            .pgp, .gpg, .openpgp => self.bytes.len,
+            .none => unreachable,
+        };
+        return .{
+            .sig = sig_bytes,
+            .signed = self.bytes[self.main_header_offset..signed_end],
+        };
     }
 
     /// Decompress the payload (cpio archive) into a freshly allocated
