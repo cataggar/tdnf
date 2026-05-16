@@ -346,7 +346,9 @@ TDNFGPGCheckPackage(
              * tdnf should refuse the install. */
             {
                 int rpmzig_status = TDNFRpmzigCrossCheck(
-                    pszFilePath, pszLocalGPGKey, /*librpm_ok=*/1);
+                    pszFilePath, pszLocalGPGKey,
+                    pTdnf->pArgs ? pTdnf->pArgs->pszInstallRoot : NULL,
+                    /*librpm_ok=*/1);
                 if (rpmzig_status != 0 /* TDNF_RPMZIG_VERIFY_OK */) {
                     pr_err("rpmzig refused signature on %s "
                            "(librpm accepted it, rpmzig status=%d). "
