@@ -441,6 +441,33 @@ export fn tdnf_rpm_file_signature_kind(fh: ?*FileHandle) [*:0]const u8 {
     };
 }
 
+/// Returns the signature payload + signed byte range. Both slices
+/// alias into the file's owned buffer (do NOT free them).
+///
+/// Returns 0 on success, -1 on NULL handle or no signature.
+export fn tdnf_rpm_file_signed_range(
+    fh: ?*FileHandle,
+    sig_out: ?*[*]const u8,
+    sig_len_out: ?*usize,
+    signed_out: ?*[*]const u8,
+    signed_len_out: ?*usize,
+) i32 {
+    clearError();
+    const f = fh orelse {
+        setError("null file handle", .{});
+        return -1;
+    };
+    const r = f.file.signatureSlice() orelse {
+        setError("rpm carries no signature", .{});
+        return -1;
+    };
+    if (sig_out) |p| p.* = r.sig.ptr;
+    if (sig_len_out) |p| p.* = r.sig.len;
+    if (signed_out) |p| p.* = r.signed.ptr;
+    if (signed_len_out) |p| p.* = r.signed.len;
+    return 0;
+}
+
 /// Decompress the payload (cpio archive) into a fresh malloc'd
 /// buffer. On success, writes the pointer to `*out` and the byte
 /// count to `*out_size`. Caller frees with tdnf_rpmdb_string_free
