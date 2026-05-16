@@ -32,6 +32,7 @@ pub const TagId = enum(u32) {
     release = 1002,
     epoch = 1003,
     summary = 1004,
+    description = 1005,
     arch = 1022,
     install_tid = 1128,
     install_time = 1008,

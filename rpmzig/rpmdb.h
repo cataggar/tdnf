@@ -85,6 +85,50 @@ int tdnf_rpmdb_iter_next_nevra(tdnf_rpmdb_iter *it, char **nevra_out);
  */
 void tdnf_rpmdb_string_free(char *s);
 
+/* --- pubkey iterator (rpmdb-resident gpg-pubkey-* entries) --- */
+
+typedef struct tdnf_rpmdb_pubkeys_iter tdnf_rpmdb_pubkeys_iter;
+
+/**
+ * Open a forward iterator over the rpmdb's `gpg-pubkey-*` entries.
+ *
+ * Each row stores an imported PGP public key as a fake installed
+ * package: NAME="gpg-pubkey", VERSION=8-character key id, RELEASE=
+ * creation timestamp, DESCRIPTION=armored key block. This iterator
+ * yields the description and key id for each one.
+ *
+ * Returns NULL on error (use tdnf_rpmdb_last_error for details).
+ */
+tdnf_rpmdb_pubkeys_iter *tdnf_rpmdb_pubkeys_open(const char *root);
+
+/**
+ * Close and free a pubkey iterator. Accepts NULL.
+ */
+void tdnf_rpmdb_pubkeys_close(tdnf_rpmdb_pubkeys_iter *it);
+
+/**
+ * Advance the pubkey iterator. On hit, writes the armored ASCII key
+ * block into `*key_out` (heap-allocated, free with
+ * tdnf_rpmdb_string_free) and optionally its length (excluding
+ * trailing NUL) into `*key_len_out`, plus the 8-character lowercase
+ * hex key id into `*keyid_out` (heap-allocated, free with
+ * tdnf_rpmdb_string_free).
+ *
+ * `key_len_out` and `keyid_out` may be NULL if the caller doesn't
+ * need them.
+ *
+ * Returns:
+ *    1 on success (key populated),
+ *    0 on end-of-iteration,
+ *   -1 on error (use tdnf_rpmdb_last_error).
+ */
+int tdnf_rpmdb_pubkeys_next(
+    tdnf_rpmdb_pubkeys_iter *it,
+    char **key_out,
+    size_t *key_len_out,
+    char **keyid_out
+);
+
 /* --- `.rpm` file reader (T2) --- */
 
 typedef struct tdnf_rpm_file tdnf_rpm_file;
