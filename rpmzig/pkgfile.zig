@@ -85,6 +85,10 @@ pub const RpmFile = struct {
     /// Heap-allocated copy of the entire file. Sig/main headers and
     /// payload all alias into this slice.
     bytes: []u8,
+    /// Signature header (parsed at open time). Used by T3 to verify
+    /// the package's GPG signature; for now we just expose presence
+    /// via `isSigned()`.
+    sig: header.Header,
     main: header.Header,
     /// Offset of the payload in `bytes` (relative to bytes[0]).
     payload_offset: usize,
@@ -149,6 +153,7 @@ pub const RpmFile = struct {
 
         return .{
             .bytes = buf,
+            .sig = sig_info.header,
             .main = main_info.header,
             .payload_offset = payload_offset,
             .compressor = compressor,
@@ -157,6 +162,17 @@ pub const RpmFile = struct {
 
     pub fn allocNevra(self: RpmFile, alloc: std.mem.Allocator) std.mem.Allocator.Error!?[]u8 {
         return self.main.allocNevra(alloc);
+    }
+
+    /// Returns true iff the signature header carries any of the known
+    /// GPG/RSA/DSA signature payloads. T3 will replace this stub with
+    /// real verification through gpgme.
+    pub fn isSigned(self: RpmFile) bool {
+        return self.sig.getBinary(.sig_sigpgp) != null or
+            self.sig.getBinary(.sig_siggpg) != null or
+            self.sig.getBinary(.sig_dsa) != null or
+            self.sig.getBinary(.sig_rsa) != null or
+            self.sig.getBinary(.sig_openpgp) != null;
     }
 
     /// Decompress the payload (cpio archive) into a freshly allocated

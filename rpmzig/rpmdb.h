@@ -120,6 +120,15 @@ const char *tdnf_rpm_file_compressor(tdnf_rpm_file *fh);
 int64_t tdnf_rpm_file_payload_offset(tdnf_rpm_file *fh);
 
 /**
+ * Returns 1 if the rpm has any of the known signature tags
+ * (RSA/DSA/PGP/GPG/OpenPGP) in its signature header, 0 otherwise.
+ * Returns -1 on a NULL handle.
+ *
+ * This is presence-only; real signature verification is T3.
+ */
+int tdnf_rpm_file_is_signed(tdnf_rpm_file *fh);
+
+/**
  * Decompress the payload (cpio archive) into a fresh malloc'd
  * buffer. On success, writes the pointer to `*out` and the byte
  * count to `*out_size`. Caller frees the buffer with
