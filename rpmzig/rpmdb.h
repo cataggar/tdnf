@@ -34,6 +34,17 @@ int64_t tdnf_rpmdb_count_packages(const char *root);
  */
 const char *tdnf_rpmdb_last_error(void);
 
+/**
+ * Returns an opaque "cookie" string that captures the rpmdb state.
+ * Two calls return the same cookie iff the rpmdb has not changed
+ * between them. Replaces librpm's rpmdbCookie() — same role,
+ * different format.
+ *
+ * Caller owns the returned string and must free it with
+ * tdnf_rpmdb_string_free. Returns NULL on error.
+ */
+char *tdnf_rpmdb_cookie(const char *root);
+
 /* --- forward iterator over the Packages table --- */
 
 typedef struct tdnf_rpmdb_iter tdnf_rpmdb_iter;
