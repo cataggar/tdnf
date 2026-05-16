@@ -8,6 +8,10 @@
 
 #include "includes.h"
 
+#ifdef TDNF_RPMZIG_VERIFY
+#include "gpgcheck_zig.h"
+#endif
+
 static uint32_t
 TDNFGPGCheck(
     rpmts pTS,
@@ -330,6 +334,14 @@ TDNFGPGCheckPackage(
                 dwError = 0;
             }
             BAIL_ON_TDNF_ERROR(dwError);
+
+#ifdef TDNF_RPMZIG_VERIFY
+            /* Monitor-mode cross-check: rpmzig + gpgme verifies the
+             * same (rpm, key) pair. Disagreements log to stderr; the
+             * librpm verdict above remains authoritative. */
+            (void)TDNFRpmzigCrossCheck(pszFilePath, pszLocalGPGKey,
+                                       /*librpm_ok=*/1);
+#endif
 
             if (nRemote)
             {
