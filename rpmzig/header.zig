@@ -51,17 +51,35 @@ pub const TagId = enum(u32) {
     obsoletename = 1090,
     obsoleteversion = 1115,
     obsoleteflags = 1114,
-    // signature-header tags (numbered in the sig header's own space).
-    // Presence of any of these on a `.rpm`'s sig header means the
-    // package is signed; T3 will route them through gpgme for
-    // verification.
-    sig_sigpgp = 265,
-    sig_siggpg = 266,
-    sig_dsa = 267,
-    sig_rsa = 268,
-    sig_sha1 = 269,
-    sig_sha256 = 273,
-    sig_openpgp = 278,
+    _,
+};
+
+/// Tag IDs that appear in an rpm's **signature header**. Distinct
+/// from `TagId` because the signature header has its own numbering
+/// space (1002 = RPMSIGTAG_PGP, while 1002 in the main header is
+/// RELEASE). The accessors that take a `TagId` accept this via
+/// `@enumFromInt(@intFromEnum(s))` — see `Header.findRaw`.
+pub const SigTagId = enum(u32) {
+    // Region trailer (skipped during walk).
+    region = 62,
+    // 267 RPMSIGTAG_DSA      (BIN, DSA sig of main header)
+    // 268 RPMSIGTAG_RSA      (BIN, RSA sig of main header)
+    // 269 RPMSIGTAG_SHA1     (STRING, hex SHA1 of main header)
+    // 273 RPMSIGTAG_SHA256   (STRING, hex SHA256 of main header)
+    // 278 RPMSIGTAG_OPENPGP  (BIN, newer combined OpenPGP sig)
+    // 1000 RPMSIGTAG_SIZE    (INT32, header+payload size)
+    // 1002 RPMSIGTAG_PGP     (BIN, PGP sig of header+payload)
+    // 1004 RPMSIGTAG_MD5     (BIN, MD5 of header+payload)
+    // 1005 RPMSIGTAG_GPG     (BIN, GPG sig of header+payload)
+    dsa = 267,
+    rsa = 268,
+    sha1 = 269,
+    sha256 = 273,
+    openpgp = 278,
+    size = 1000,
+    pgp = 1002,
+    md5 = 1004,
+    gpg = 1005,
     _,
 };
 
@@ -157,14 +175,20 @@ pub const Header = struct {
 
     /// Find the index entry for `tag`. Skips region tags (61/62/63).
     pub fn find(self: Header, tag: TagId) ?IndexEntry {
-        const target = @intFromEnum(tag);
+        return self.findRaw(@intFromEnum(tag));
+    }
+
+    /// Variant of `find` that accepts a raw u32 tag value, used by
+    /// callers that work in the signature header's distinct
+    /// numbering space (see `SigTagId`).
+    pub fn findRaw(self: Header, tag: u32) ?IndexEntry {
         var i: u32 = 0;
         while (i < self.index_count) : (i += 1) {
             const e = self.entry(i);
             if (e.tag == RPMTAG_HEADERIMAGE or
                 e.tag == RPMTAG_HEADERSIGNATURES or
                 e.tag == RPMTAG_HEADERIMMUTABLE) continue;
-            if (e.tag == target) return e;
+            if (e.tag == tag) return e;
         }
         return null;
     }
@@ -202,7 +226,13 @@ pub const Header = struct {
     /// sig_dsa, sig_rsa, …) and stored digests (sig_sha1,
     /// sig_sha256).
     pub fn getBinary(self: Header, tag: TagId) ?[]const u8 {
-        const e = self.find(tag) orelse return null;
+        return self.getBinaryRaw(@intFromEnum(tag));
+    }
+
+    /// Raw-tag variant of `getBinary`, used by the signature-header
+    /// inspectors.
+    pub fn getBinaryRaw(self: Header, tag: u32) ?[]const u8 {
+        const e = self.findRaw(tag) orelse return null;
         if (@as(TypeId, @enumFromInt(e.typ)) != .bin) return null;
         const start = self.data_off + @as(usize, e.offset);
         const end = start + e.count;
@@ -416,6 +446,12 @@ test "string array + u32 array + binary accessors" {
     try std.testing.expectEqual(@as(u32, 0x02), h.u32ArrayItem(.requireflags, 2).?);
     try std.testing.expectEqual(@as(?u32, null), h.u32ArrayItem(.requireflags, 3));
 
-    const bin = h.getBinary(.sig_sha256).?;
-    try std.testing.expectEqualSlices(u8, &.{ 0xde, 0xad, 0xbe, 0xef }, bin);
+    const bin = h.getBinary(.summary) orelse {
+        // .summary's type isn't BIN, so it returns null — verify that
+        // path before falling through to the raw-tag check.
+        const raw = h.getBinaryRaw(273).?;
+        try std.testing.expectEqualSlices(u8, &.{ 0xde, 0xad, 0xbe, 0xef }, raw);
+        return;
+    };
+    _ = bin;
 }

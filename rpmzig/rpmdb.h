@@ -129,6 +129,13 @@ int64_t tdnf_rpm_file_payload_offset(tdnf_rpm_file *fh);
 int tdnf_rpm_file_is_signed(tdnf_rpm_file *fh);
 
 /**
+ * Returns a static C string naming the kind of signature on this
+ * rpm: "none", "rsa", "dsa", "pgp", "gpg", or "openpgp". Lifetime:
+ * static; do not free.
+ */
+const char *tdnf_rpm_file_signature_kind(tdnf_rpm_file *fh);
+
+/**
  * Decompress the payload (cpio archive) into a fresh malloc'd
  * buffer. On success, writes the pointer to `*out` and the byte
  * count to `*out_size`. Caller frees the buffer with
