@@ -100,6 +100,17 @@ pub fn build(b: *Build) void {
         "Plugin install directory (relative to prefix, default: lib/tdnf-plugins)",
     ) orelse "lib/tdnf-plugins";
 
+    // Opt-in cross-check: compile gpgcheck_zig.c into libtdnf and
+    // run rpmzig + gpgme alongside the librpm verifier for every
+    // freshly downloaded gpgkey URL. Disagreements log to stderr;
+    // librpm's verdict remains authoritative. Default false — does
+    // not change observable behavior. See T3 PR #3.
+    const rpmzig_verify = b.option(
+        bool,
+        "rpmzig-verify",
+        "Enable rpmzig+gpgme cross-check of librpm signature verification (default false)",
+    ) orelse false;
+
     const prefix = b.install_prefix;
     const libdir = "lib";
     const full_libdir = b.fmt("{s}/{s}", .{ prefix, libdir });
@@ -405,6 +416,10 @@ pub fn build(b: *Build) void {
     tdnf_so_mod.addIncludePath(b.path("include"));
     tdnf_so_mod.addIncludePath(b.path("client"));
     if (build_with_rpm_6x) tdnf_so_mod.addCMacro("BUILD_WITH_RPM_6X", "1");
+    if (rpmzig_verify) {
+        tdnf_so_mod.addCMacro("TDNF_RPMZIG_VERIFY", "1");
+        tdnf_so_mod.addIncludePath(b.path("rpmzig"));
+    }
     tdnf_so_mod.addCSourceFiles(.{
         .root = b.path("client"),
         .files = &.{
@@ -416,12 +431,30 @@ pub fn build(b: *Build) void {
         },
         .flags = &tdnf_cflags,
     });
+    if (rpmzig_verify) {
+        // Cross-check shim + the verify.c verifier itself. Pulled
+        // into libtdnf only on this build flag so the gpgme runtime
+        // dep stays opt-in.
+        tdnf_so_mod.addCSourceFiles(.{
+            .root = b.path("client"),
+            .files = &.{"gpgcheck_zig.c"},
+            .flags = &tdnf_cflags,
+        });
+        tdnf_so_mod.addCSourceFiles(.{
+            .root = b.path("rpmzig"),
+            .files = &.{"verify.c"},
+            .flags = &tdnf_cflags,
+        });
+    }
     tdnf_so_mod.linkLibrary(common_lib);
     tdnf_so_mod.linkLibrary(solv_lib);
     tdnf_so_mod.linkLibrary(history_lib);
     tdnf_so_mod.linkLibrary(llconf_lib);
     tdnf_so_mod.linkLibrary(rpmzig_lib);
     linkSystem(tdnf_so_mod, &.{ "rpm", "libsolv", "libsolvext", "libcurl", "openssl", "sqlite3" });
+    if (rpmzig_verify) {
+        linkSystem(tdnf_so_mod, &.{"gpgme"});
+    }
 
     const libtdnf = b.addLibrary(.{
         .name = "tdnf",
