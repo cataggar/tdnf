@@ -158,7 +158,7 @@ TDNFRunTransactionWithHistory(
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    rc = history_sync(pHistoryCtx, pTS->pTS);
+    rc = history_sync(pHistoryCtx, pTdnf->pArgs->pszInstallRoot);
     if (rc != 0)
     {
         dwError = ERROR_TDNF_HISTORY_ERROR;
@@ -168,7 +168,7 @@ TDNFRunTransactionWithHistory(
     dwError = TDNFRunTransaction(pTS, pTdnf);
     BAIL_ON_TDNF_ERROR(dwError);
 
-    rc = history_update_state(pHistoryCtx, pTS->pTS, pszCmdLine);
+    rc = history_update_state(pHistoryCtx, pTdnf->pArgs->pszInstallRoot, pszCmdLine);
     if (rc != 0)
     {
         dwError = ERROR_TDNF_HISTORY_ERROR;

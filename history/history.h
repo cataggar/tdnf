@@ -9,7 +9,6 @@
 #pragma once
 
 #include <sqlite3.h>
-#include <rpm/rpmlib.h>
 
 #include "config.h"
 
@@ -64,7 +63,10 @@ struct history_nevra_map
 struct history_ctx *create_history_ctx(const char *db_filename);
 void destroy_history_ctx(struct history_ctx *ctx);
 
-int history_sync(struct history_ctx *ctx, rpmts ts);
+/* `root` is the install-root prefix (matches rpm's --root); pass NULL
+ * or "" for "/". The rpmdb is read from <root>/var/lib/rpm/rpmdb.sqlite
+ * via the rpmzig API — librpm is no longer involved on the history side. */
+int history_sync(struct history_ctx *ctx, const char *root);
 
 char *history_nevra_from_id(struct history_ctx *ctx, int id);
 struct history_nevra_map *history_nevra_map(struct history_ctx *ctx);
@@ -77,7 +79,7 @@ struct history_delta *history_get_delta_range(struct history_ctx *ctx, int trans
 
 int history_add_transaction(struct history_ctx *ctx, const char *cmdline);
 int history_record_state(struct history_ctx *ctx);
-int history_update_state(struct history_ctx *ctx, rpmts ts, const char *cmdline);
+int history_update_state(struct history_ctx *ctx, const char *root, const char *cmdline);
 
 int history_get_transactions(struct history_ctx *ctx,
                              struct history_transaction **ptas,
