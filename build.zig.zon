@@ -17,6 +17,7 @@
         "jsondump",
         "llconf",
         "plugins",
+        "rpmzig",
         "tools",
         "bin",
         "etc",

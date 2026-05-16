@@ -98,6 +98,33 @@ Pkg-config files and the `tdnf-automatic` script are produced via
 `b.addConfigHeader(.autoconf_at, ...)` into the build cache, then
 installed.
 
+## librpm replacement (in progress)
+
+`rpmzig/` is a Zig static library that incrementally takes over
+librpm's read-side responsibilities. See
+`plan-replace-librpm.md` in the session-state archive for the full
+plan. Today it exposes a single function via a C ABI:
+
+```c
+int64_t tdnf_rpmdb_count_packages(const char *root);
+const char *tdnf_rpmdb_last_error(void);
+```
+
+backed by `rpmzig/rpmdb.zig` which opens `/var/lib/rpm/rpmdb.sqlite`
+read-only via `sqlite3_open_v2`. The smoke-test consumer
+`tdnf-rpmdb-count` lives under `libexec/tdnf/` and should return the
+same row count as `rpm -qa | wc -l`. Future PRs will add an RPM
+header-blob decoder + a Packages iterator and migrate
+`history/history.c` off `librpm`'s `rpmdb*` calls.
+
+**Adding sqlite3-using Zig code:** don't put
+`mod.linkSystemLibrary("sqlite3", …)` on a static-library module —
+that embeds `libsqlite3.so` *inside* the resulting `.a` and tdnf-side
+consumers fail to link. Instead, leave the static lib symbol-naked and
+add `linkSystemLibrary("sqlite3", …)` on every executable / shared lib
+that links it. Same pattern is used elsewhere in `build.zig` for
+`history_lib`.
+
 ## C code conventions
 
 These are enforced by convention (and reviewed for); deviating from them
