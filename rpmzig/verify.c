@@ -24,6 +24,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <dirent.h>
+#include <sys/stat.h>
 
 #include <gpgme.h>
 
@@ -139,4 +142,130 @@ out:
     if (sig_data) gpgme_data_release(sig_data);
     if (ctx) gpgme_release(ctx);
     return verify_rc;
+}
+
+/*
+ * Build a temporary GPG home directory, mkdtemp-style, under
+ * $TMPDIR (or /tmp). Returns the malloc'd path on success; caller
+ * frees and rm -rf's it. On error, returns NULL.
+ */
+static char *mk_tmp_homedir(void)
+{
+    const char *tmpdir = NULL;
+    size_t n = 0;
+    char *p = NULL;
+    tmpdir = getenv("TMPDIR");
+    if (!tmpdir || !*tmpdir) tmpdir = "/tmp";
+    n = strlen(tmpdir) + sizeof("/tdnf-rpmzig-XXXXXX");
+    p = malloc(n);
+    if (!p) return NULL;
+    snprintf(p, n, "%s/tdnf-rpmzig-XXXXXX", tmpdir);
+    if (!mkdtemp(p)) {
+        free(p);
+        return NULL;
+    }
+    return p;
+}
+
+static void rm_rf(const char *path)
+{
+    DIR *d = NULL;
+    struct dirent *ent = NULL;
+    char child[4096];
+    struct stat st;
+
+    if (!path) return;
+    d = opendir(path);
+    if (!d) {
+        (void)unlink(path);
+        (void)rmdir(path);
+        return;
+    }
+    while ((ent = readdir(d)) != NULL) {
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+        snprintf(child, sizeof(child), "%s/%s", path, ent->d_name);
+        if (lstat(child, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode))
+            rm_rf(child);
+        else
+            (void)unlink(child);
+    }
+    closedir(d);
+    (void)rmdir(path);
+}
+
+int tdnf_rpmzig_verify_with_keys(
+    tdnf_rpm_file *fh,
+    const void *const *key_blobs,
+    const size_t *key_lens,
+    size_t key_count,
+    int *out_status)
+{
+    char *tmp = NULL;
+    gpgme_ctx_t ctx = NULL;
+    gpgme_data_t kd = NULL;
+    gpgme_error_t err = 0;
+    int rc = -1;
+    size_t i = 0;
+
+    if (!fh || !out_status) return -1;
+    *out_status = TDNF_RPMZIG_VERIFY_GPGME_ERROR;
+
+    tmp = mk_tmp_homedir();
+    if (!tmp) {
+        fprintf(stderr, "rpmzig-verify: mkdtemp failed\n");
+        return -1;
+    }
+
+    gpgme_check_version(NULL);
+
+    err = gpgme_new(&ctx);
+    if (err) {
+        fprintf(stderr, "rpmzig-verify: gpgme_new: %s\n", gpgme_strerror(err));
+        goto out;
+    }
+    err = gpgme_set_protocol(ctx, GPGME_PROTOCOL_OpenPGP);
+    if (err) {
+        fprintf(stderr, "rpmzig-verify: set_protocol: %s\n", gpgme_strerror(err));
+        goto out;
+    }
+    err = gpgme_ctx_set_engine_info(ctx, GPGME_PROTOCOL_OpenPGP, NULL, tmp);
+    if (err) {
+        fprintf(stderr, "rpmzig-verify: set_engine_info: %s\n", gpgme_strerror(err));
+        goto out;
+    }
+
+    for (i = 0; i < key_count; i++) {
+        err = gpgme_data_new_from_mem(&kd,
+            (const char *)key_blobs[i], key_lens[i], /*copy=*/0);
+        if (err) {
+            fprintf(stderr, "rpmzig-verify: data_new(key %zu): %s\n",
+                i, gpgme_strerror(err));
+            goto out;
+        }
+        err = gpgme_op_import(ctx, kd);
+        if (err) {
+            fprintf(stderr, "rpmzig-verify: op_import(key %zu): %s\n",
+                i, gpgme_strerror(err));
+            gpgme_data_release(kd);
+            kd = NULL;
+            goto out;
+        }
+        gpgme_data_release(kd);
+        kd = NULL;
+    }
+
+    /* Reuse the verify path against this freshly-keyed homedir. */
+    gpgme_release(ctx);
+    ctx = NULL;
+    rc = tdnf_rpmzig_verify(fh, tmp, out_status);
+
+out:
+    if (kd) gpgme_data_release(kd);
+    if (ctx) gpgme_release(ctx);
+    if (tmp) {
+        rm_rf(tmp);
+        free(tmp);
+    }
+    return rc;
 }
