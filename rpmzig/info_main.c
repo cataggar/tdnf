@@ -41,6 +41,8 @@ int main(int argc, char **argv)
     printf("NEVRA:       %s\n", nevra);
     printf("Compressor:  %s\n", tdnf_rpm_file_compressor(fh));
     printf("Payload at:  %lld\n", (long long)tdnf_rpm_file_payload_offset(fh));
+    printf("Signed:      %s\n",
+        tdnf_rpm_file_is_signed(fh) ? "yes" : "no");
 
 out:
     tdnf_rpmdb_string_free(nevra);

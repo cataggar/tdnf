@@ -417,6 +417,15 @@ export fn tdnf_rpm_file_payload_offset(fh: ?*FileHandle) i64 {
     return @intCast(f.file.payload_offset);
 }
 
+/// Returns 1 if the rpm has any of the known signature tags
+/// (RSA/DSA/PGP/GPG/OpenPGP) in its signature header, 0 otherwise.
+/// Returns -1 on a NULL handle. This is *presence* only — real
+/// verification is T3.
+export fn tdnf_rpm_file_is_signed(fh: ?*FileHandle) i32 {
+    const f = fh orelse return -1;
+    return if (f.file.isSigned()) 1 else 0;
+}
+
 /// Decompress the payload (cpio archive) into a fresh malloc'd
 /// buffer. On success, writes the pointer to `*out` and the byte
 /// count to `*out_size`. Caller frees with tdnf_rpmdb_string_free

@@ -38,6 +38,30 @@ pub const TagId = enum(u32) {
     payload_format = 1124,
     payload_compressor = 1125,
     payload_flags = 1126,
+    // STRING_ARRAY / INT32_ARRAY dep tags
+    requirename = 1049,
+    requireversion = 1050,
+    requireflags = 1048,
+    providename = 1047,
+    provideversion = 1113,
+    provideflags = 1112,
+    conflictname = 1054,
+    conflictversion = 1055,
+    conflictflags = 1053,
+    obsoletename = 1090,
+    obsoleteversion = 1115,
+    obsoleteflags = 1114,
+    // signature-header tags (numbered in the sig header's own space).
+    // Presence of any of these on a `.rpm`'s sig header means the
+    // package is signed; T3 will route them through gpgme for
+    // verification.
+    sig_sigpgp = 265,
+    sig_siggpg = 266,
+    sig_dsa = 267,
+    sig_rsa = 268,
+    sig_sha1 = 269,
+    sig_sha256 = 273,
+    sig_openpgp = 278,
     _,
 };
 
@@ -173,6 +197,60 @@ pub const Header = struct {
         return readU32(self.bytes, start);
     }
 
+    /// Get a BIN-typed tag as a slice into the blob. Used for raw
+    /// binary payloads such as signature packets (sig_sigpgp,
+    /// sig_dsa, sig_rsa, …) and stored digests (sig_sha1,
+    /// sig_sha256).
+    pub fn getBinary(self: Header, tag: TagId) ?[]const u8 {
+        const e = self.find(tag) orelse return null;
+        if (@as(TypeId, @enumFromInt(e.typ)) != .bin) return null;
+        const start = self.data_off + @as(usize, e.offset);
+        const end = start + e.count;
+        if (end > self.bytes.len) return null;
+        return self.bytes[start..end];
+    }
+
+    /// Count of entries in a STRING_ARRAY / I18N_STRING tag. Returns
+    /// 0 when the tag is absent or of a different type.
+    pub fn stringArrayCount(self: Header, tag: TagId) usize {
+        const e = self.find(tag) orelse return 0;
+        switch (@as(TypeId, @enumFromInt(e.typ))) {
+            .string_array, .i18n_string => return e.count,
+            else => return 0,
+        }
+    }
+
+    /// Look up the `i`th entry of a STRING_ARRAY / I18N_STRING tag.
+    /// O(i) — scans NULs from the start. Suitable for one-shot
+    /// access; callers that iterate the whole array should keep a
+    /// running offset themselves.
+    pub fn stringArrayItem(self: Header, tag: TagId, i: usize) ?[]const u8 {
+        const e = self.find(tag) orelse return null;
+        switch (@as(TypeId, @enumFromInt(e.typ))) {
+            .string_array, .i18n_string => {},
+            else => return null,
+        }
+        if (i >= e.count) return null;
+        var off = self.data_off + @as(usize, e.offset);
+        var skipped: usize = 0;
+        while (skipped < i) : (skipped += 1) {
+            const next_nul = std.mem.indexOfScalarPos(u8, self.bytes, off, 0) orelse return null;
+            off = next_nul + 1;
+        }
+        const end = std.mem.indexOfScalarPos(u8, self.bytes, off, 0) orelse return null;
+        return self.bytes[off..end];
+    }
+
+    /// Look up the `i`th entry of an INT32 array tag.
+    pub fn u32ArrayItem(self: Header, tag: TagId, i: usize) ?u32 {
+        const e = self.find(tag) orelse return null;
+        if (@as(TypeId, @enumFromInt(e.typ)) != .int32) return null;
+        if (i >= e.count) return null;
+        const start = self.data_off + @as(usize, e.offset) + i * 4;
+        if (start + 4 > self.bytes.len) return null;
+        return readU32(self.bytes, start);
+    }
+
     /// Build the canonical NEVRA string `name-[epoch:]version-release[.arch]`.
     /// Epoch is included iff RPMTAG_EPOCH is present in the header.
     /// Arch is included iff RPMTAG_ARCH is present (which is not the
@@ -293,4 +371,51 @@ test "nevra without arch (gpg-pubkey style)" {
     const nevra = (try h.allocNevra(std.testing.allocator)).?;
     defer std.testing.allocator.free(nevra);
     try std.testing.expectEqualStrings("gpg-pubkey-3135ce90-5e6fda74", nevra);
+}
+
+test "string array + u32 array + binary accessors" {
+    // Build a header with one STRING_ARRAY tag (REQUIRENAME, 1049,
+    // count=3), one INT32 array tag (REQUIREFLAGS, 1048, count=3),
+    // one BIN tag (SIG_SHA256, 273, count=4).
+    //
+    // Data layout (relative to data_off, byte counts below):
+    //   "libc\0glibc\0openssl\0"   (5+6+8 = 19 bytes)
+    //   padding to next 4-byte boundary               (19 -> 20)
+    //   INT32_be 0x08000000 0x04000008 0x02000000     (12 bytes)
+    //   4 bytes of opaque SHA256 (truncated digest)   (4 bytes)
+    //   total data = 36
+    const blob = [_]u8{
+        0, 0, 0, 3, // nindex = 3
+        0, 0, 0, 36, // hsize = 36
+        // REQUIRENAME tag=1049 type=8 (string_array) offset=0 count=3
+        0, 0, 0x04, 0x19, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 3,
+        // REQUIREFLAGS tag=1048 type=4 (int32) offset=20 count=3
+        0, 0, 0x04, 0x18, 0, 0, 0, 4, 0, 0, 0, 20, 0, 0, 0, 3,
+        // SIG_SHA256 tag=273 type=7 (bin) offset=32 count=4
+        0, 0, 0x01, 0x11, 0, 0, 0, 7, 0, 0, 0, 32, 0, 0, 0, 4,
+        // data starts here
+        'l', 'i', 'b', 'c', 0,
+        'g', 'l', 'i', 'b', 'c', 0,
+        'o', 'p', 'e', 'n', 's', 's', 'l', 0,
+        0, // padding to 4-byte alignment for the int32 array
+        0, 0, 0, 0x08,
+        0, 0, 0, 0x10,
+        0, 0, 0, 0x02,
+        0xde, 0xad, 0xbe, 0xef, // SIG_SHA256 (truncated)
+    };
+    const h = try Header.parse(&blob);
+
+    try std.testing.expectEqual(@as(usize, 3), h.stringArrayCount(.requirename));
+    try std.testing.expectEqualStrings("libc", h.stringArrayItem(.requirename, 0).?);
+    try std.testing.expectEqualStrings("glibc", h.stringArrayItem(.requirename, 1).?);
+    try std.testing.expectEqualStrings("openssl", h.stringArrayItem(.requirename, 2).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), h.stringArrayItem(.requirename, 3));
+
+    try std.testing.expectEqual(@as(u32, 0x08), h.u32ArrayItem(.requireflags, 0).?);
+    try std.testing.expectEqual(@as(u32, 0x10), h.u32ArrayItem(.requireflags, 1).?);
+    try std.testing.expectEqual(@as(u32, 0x02), h.u32ArrayItem(.requireflags, 2).?);
+    try std.testing.expectEqual(@as(?u32, null), h.u32ArrayItem(.requireflags, 3));
+
+    const bin = h.getBinary(.sig_sha256).?;
+    try std.testing.expectEqualSlices(u8, &.{ 0xde, 0xad, 0xbe, 0xef }, bin);
 }
