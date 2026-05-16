@@ -231,6 +231,11 @@ pub fn build(b: *Build) void {
         break :blk lib;
     };
 
+    // history/history.c now calls into rpmzig's iterator instead of
+    // librpm's rpmdb iterator; expose the C header on history_lib's
+    // include path.
+    history_lib.root_module.addIncludePath(b.path("rpmzig"));
+
     // `zig build test` runs the rpmzig Zig unit tests (currently just
     // path-building; the FFI surface is smoke-tested via
     // tdnf-rpmdb-count against a live rpmdb).
@@ -330,6 +335,7 @@ pub fn build(b: *Build) void {
     tdnf_so_mod.linkLibrary(solv_lib);
     tdnf_so_mod.linkLibrary(history_lib);
     tdnf_so_mod.linkLibrary(llconf_lib);
+    tdnf_so_mod.linkLibrary(rpmzig_lib);
     linkSystem(tdnf_so_mod, &.{ "rpm", "libsolv", "libsolvext", "libcurl", "openssl", "sqlite3" });
 
     const libtdnf = b.addLibrary(.{
@@ -436,6 +442,7 @@ pub fn build(b: *Build) void {
         .flags = &tdnf_cflags,
     });
     history_util_mod.linkLibrary(history_lib);
+    history_util_mod.linkLibrary(rpmzig_lib);
     linkSystem(history_util_mod, &.{ "rpm", "sqlite3" });
     const history_util_exe = b.addExecutable(.{
         .name = "tdnf-history-util",

@@ -21,6 +21,7 @@
 #include <rpm/rpmts.h>
 #include <rpm/rpmdb.h>
 
+#include "rpmdb.h"
 #include "history.h"
 
 #define check_cond(COND) if(!(COND)) { \
@@ -610,6 +611,11 @@ error:
 /* Update db with currently installed RPMs.
  * All ids will be saved to array pointed to by pids
  * (if not NULL), the array will be allocated.
+ *
+ * Reads the rpmdb via the Zig rpmzig iterator
+ * (tdnf_rpmdb_iter_*), not librpm. The `ts` parameter is now only
+ * used to extract the install-root path via rpmtsRootDir(); the
+ * actual database walk is independent of librpm.
  */
 static
 int db_update_rpms(rpmts ts, sqlite3 *db, int **pids, int *pcount)
@@ -617,31 +623,53 @@ int db_update_rpms(rpmts ts, sqlite3 *db, int **pids, int *pcount)
     int rc = 0;
     int count = 0, i = 0;
     int *ids = NULL;
-    Header h;
-    rpmdbMatchIterator mi = NULL;
     char *nevra = NULL;
+    tdnf_rpmdb_iter *it = NULL;
+    int iter_rc = 0;
+    const char *root = rpmtsRootDir(ts);
 
     if (pids) {
         /* count installed packages */
-        mi = rpmtsInitIterator(ts, RPMDBI_PACKAGES, NULL, 0);
-        while ((h = rpmdbNextIterator(mi))) {
+        it = tdnf_rpmdb_iter_open(root);
+        check_ptr(it);
+        while ((iter_rc = tdnf_rpmdb_iter_next_nevra(it, &nevra)) == 1) {
             count++;
+            tdnf_rpmdb_string_free(nevra);
+            nevra = NULL;
         }
-        rpmdbFreeIterator(mi);
+        if (iter_rc < 0) {
+            fprintf(stderr,
+                "rpmzig iter (count phase): %s\n",
+                tdnf_rpmdb_last_error());
+            rc = -1;
+            goto error;
+        }
+        tdnf_rpmdb_iter_close(it);
+        it = NULL;
         ids = (int *)calloc(count, sizeof(int));
+        check_ptr(ids);
     }
 
     rc = sqlite3_exec(db, SQL_CREATE_TABLE_RPMS, 0, 0, NULL);
     check_db_rc(db, rc);
 
-    mi = rpmtsInitIterator(ts, RPMDBI_PACKAGES, NULL, 0);
-    while ((h = rpmdbNextIterator(mi))) {
-        nevra = headerGetAsString(h, RPMTAG_NEVRA);
+    it = tdnf_rpmdb_iter_open(root);
+    check_ptr(it);
+    while ((iter_rc = tdnf_rpmdb_iter_next_nevra(it, &nevra)) == 1) {
         rc = db_add_nevra(db, nevra, ids ? &ids[i++] : NULL);
         check_db_rc(db, rc);
-        safe_free(nevra);
+        tdnf_rpmdb_string_free(nevra);
+        nevra = NULL;
     }
-    rpmdbFreeIterator(mi); mi = NULL;
+    if (iter_rc < 0) {
+        fprintf(stderr,
+            "rpmzig iter (collect phase): %s\n",
+            tdnf_rpmdb_last_error());
+        rc = -1;
+        goto error;
+    }
+    tdnf_rpmdb_iter_close(it);
+    it = NULL;
 
     if (pids && pcount) {
         sort_array(ids, count);
@@ -651,9 +679,10 @@ int db_update_rpms(rpmts ts, sqlite3 *db, int **pids, int *pcount)
     }
 
 error:
-    safe_free(nevra);
-    if (mi)
-        rpmdbFreeIterator(mi);
+    if (nevra)
+        tdnf_rpmdb_string_free(nevra);
+    if (it)
+        tdnf_rpmdb_iter_close(it);
     if (rc && ids)
         free(ids);
     return rc;
