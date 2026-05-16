@@ -13,6 +13,7 @@ extern "C" {
 int TDNFRpmzigCrossCheck(
     const char *pkg_path,
     const char *key_path,
+    const char *install_root,
     int librpm_ok
 );
 

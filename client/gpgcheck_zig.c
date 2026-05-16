@@ -69,27 +69,45 @@ static int slurp_key(const char *path, unsigned char **out, size_t *out_len)
 }
 
 /*
- * Cross-check verification of `pkg_path` against `key_path` using
- * rpmzig. Returns one of TDNF_RPMZIG_VERIFY_* (0 = OK). Returns
- * a negative value on any unexpected I/O error.
+ * Cross-check verification of `pkg_path` against:
+ *   - every gpg-pubkey-* in the rpmdb under `install_root`, and
+ *   - the armored ASCII key in `key_path` (the fresh key tdnf
+ *     just fetched for `pRepo->pszUrlGPGKey`).
+ *
+ * Returns one of TDNF_RPMZIG_VERIFY_* (0 = OK). Returns a negative
+ * value on any unexpected I/O error.
  *
  * Logs to stderr if the rpmzig verdict differs from `librpm_ok`
  * (true when librpm just said "verified"). The caller decides
  * what to do with the return value — under -Drpmzig-verify=true
  * client/gpgcheck.c escalates non-OK to ERROR_TDNF_RPM_GPG_NO_MATCH.
+ *
+ * `install_root` may be NULL or "" to mean "/".
  */
 int TDNFRpmzigCrossCheck(
     const char *pkg_path,
     const char *key_path,
+    const char *install_root,
     int librpm_ok)
 {
     tdnf_rpm_file *fh = NULL;
-    unsigned char *blob = NULL;
-    size_t blob_len = 0;
-    const void *blobs[1];
-    size_t lens[1];
+    unsigned char *fresh_key = NULL;
+    size_t fresh_key_len = 0;
+    tdnf_rpmdb_pubkeys_iter *it = NULL;
+    /* Owned heap blobs harvested from the rpmdb; freed on every exit
+     * path. Capped at MAX_RPMDB_KEYS so a corrupt rpmdb can't push
+     * us into unbounded allocation. */
+#define MAX_RPMDB_KEYS 128
+    char *rpmdb_keys[MAX_RPMDB_KEYS];
+    size_t rpmdb_key_lens[MAX_RPMDB_KEYS];
+    size_t rpmdb_count = 0;
+    const void *blobs[MAX_RPMDB_KEYS + 1];
+    size_t lens[MAX_RPMDB_KEYS + 1];
+    size_t total_keys = 0;
     int status = TDNF_RPMZIG_VERIFY_GPGME_ERROR;
     int rpmzig_ok = 0;
+    int rc = -1;
+    size_t i = 0;
 
     if (!pkg_path || !key_path) return -1;
 
@@ -101,28 +119,68 @@ int TDNFRpmzigCrossCheck(
         return -1;
     }
 
-    if (slurp_key(key_path, &blob, &blob_len) != 0) {
-        fprintf(stderr, "rpmzig-crosscheck: read key %s failed\n", key_path);
+    if (slurp_key(key_path, &fresh_key, &fresh_key_len) != 0) {
+        fprintf(stderr,
+            "rpmzig-crosscheck: read key %s failed\n", key_path);
         tdnf_rpm_file_close(fh);
         return -1;
     }
 
-    blobs[0] = blob;
-    lens[0] = blob_len;
-    (void)tdnf_rpmzig_verify_with_keys(fh, blobs, lens, 1, &status);
+    /* Walk gpg-pubkey-* entries in the rpmdb. If this fails for any
+     * reason we keep going with just the fresh key — a missing rpmdb
+     * keyring shouldn't break the verify path. */
+    it = tdnf_rpmdb_pubkeys_open(install_root);
+    if (it) {
+        while (rpmdb_count < MAX_RPMDB_KEYS) {
+            char *kbuf = NULL;
+            size_t klen = 0;
+            int n = tdnf_rpmdb_pubkeys_next(it, &kbuf, &klen, NULL);
+            if (n == 0) break;
+            if (n < 0) {
+                fprintf(stderr,
+                    "rpmzig-crosscheck: rpmdb pubkey walk: %s\n",
+                    tdnf_rpmdb_last_error());
+                break;
+            }
+            rpmdb_keys[rpmdb_count] = kbuf;
+            rpmdb_key_lens[rpmdb_count] = klen;
+            rpmdb_count++;
+        }
+        tdnf_rpmdb_pubkeys_close(it);
+    } else {
+        /* Common in test/chroot setups where the rpmdb is empty;
+         * not an error. */
+    }
+
+    for (i = 0; i < rpmdb_count; i++) {
+        blobs[total_keys] = rpmdb_keys[i];
+        lens[total_keys] = rpmdb_key_lens[i];
+        total_keys++;
+    }
+    blobs[total_keys] = fresh_key;
+    lens[total_keys] = fresh_key_len;
+    total_keys++;
+
+    (void)tdnf_rpmzig_verify_with_keys(fh, blobs, lens, total_keys, &status);
 
     rpmzig_ok = (status == TDNF_RPMZIG_VERIFY_OK);
     if (rpmzig_ok != librpm_ok) {
         fprintf(stderr,
             "rpmzig-crosscheck: DISAGREEMENT for %s:"
-            " librpm=%s rpmzig=%s (status=%d). Using librpm verdict.\n",
+            " librpm=%s rpmzig=%s (status=%d, rpmdb_keys=%zu, fresh_key=1)."
+            " Using librpm verdict.\n",
             pkg_path,
             librpm_ok ? "OK" : "FAIL",
             rpmzig_ok ? "OK" : "FAIL",
-            status);
+            status, rpmdb_count);
     }
 
-    free(blob);
+    rc = status;
+    for (i = 0; i < rpmdb_count; i++) {
+        tdnf_rpmdb_string_free(rpmdb_keys[i]);
+    }
+    free(fresh_key);
     tdnf_rpm_file_close(fh);
-    return status;
+    return rc;
+#undef MAX_RPMDB_KEYS
 }

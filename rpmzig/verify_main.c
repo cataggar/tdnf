@@ -2,7 +2,7 @@
  * tdnf-rpm-verify — smoke-test for the Zig + gpgme signature
  * verifier.
  *
- * Two modes:
+ * Three sources of keys (combinable in the --rpmdb + --key case):
  *
  *   tdnf-rpm-verify <file.rpm> [--homedir <dir>]
  *       Verify against an existing GPG home directory.
@@ -10,7 +10,13 @@
  *   tdnf-rpm-verify <file.rpm> --key <key.asc> [--key <key2.asc> ...]
  *       Load each .asc into a fresh in-memory keyring (a temp
  *       homedir under $TMPDIR, removed before exit) and verify.
- *       This is the mode T3 PR #3 will route through.
+ *
+ *   tdnf-rpm-verify <file.rpm> --rpmdb [root]
+ *       Load every gpg-pubkey-* entry from the rpmdb under [root]
+ *       (default "/") into a fresh in-memory keyring and verify.
+ *       Combine with --key to also include locally-staged keys.
+ *
+ *   (--homedir is mutually exclusive with --key/--rpmdb.)
  *
  * Exits with:
  *   0 — signature verified OK
@@ -26,7 +32,7 @@
 #include "rpmdb.h"
 #include "verify.h"
 
-#define MAX_KEYS 16
+#define MAX_KEYS 128
 
 static int slurp(const char *path, unsigned char **out, size_t *out_len)
 {
@@ -73,16 +79,24 @@ int main(int argc, char **argv)
     const char *homedir = NULL;
     const char *key_paths[MAX_KEYS] = { 0 };
     unsigned char *key_blobs[MAX_KEYS] = { 0 };
+    /* parallel array: 1 = blob was allocated by tdnf_rpmdb_pubkeys_*
+     * (free with tdnf_rpmdb_string_free); 0 = allocated by slurp()
+     * (free with free()). */
+    int key_is_rpmdb[MAX_KEYS] = { 0 };
     size_t key_lens[MAX_KEYS] = { 0 };
     size_t key_count = 0;
+    int use_rpmdb = 0;
+    const char *rpmdb_root = "/";
     int status = 0;
     int rc = 0;
     int exit_code = 4;
     int i = 0;
+    tdnf_rpmdb_pubkeys_iter *it = NULL;
 
     if (argc < 2) {
         fprintf(stderr,
-            "usage: %s <file.rpm> [--homedir <dir>] [--key <key.asc> ...]\n",
+            "usage: %s <file.rpm> [--homedir <dir>] "
+            "[--key <key.asc> ...] [--rpmdb [root]]\n",
             argv[0]);
         return 4;
     }
@@ -96,6 +110,11 @@ int main(int argc, char **argv)
                 return 4;
             }
             key_paths[key_count++] = argv[++i];
+        } else if (strcmp(argv[i], "--rpmdb") == 0) {
+            use_rpmdb = 1;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                rpmdb_root = argv[++i];
+            }
         } else if (i == 2 && argv[i][0] != '-') {
             /* Legacy: bare 2nd arg = homedir, for back-compat with PR #13. */
             homedir = argv[i];
@@ -104,8 +123,9 @@ int main(int argc, char **argv)
             return 4;
         }
     }
-    if (homedir && key_count > 0) {
-        fprintf(stderr, "--homedir and --key are mutually exclusive\n");
+    if (homedir && (key_count > 0 || use_rpmdb)) {
+        fprintf(stderr,
+            "--homedir is mutually exclusive with --key and --rpmdb\n");
         return 4;
     }
 
@@ -118,13 +138,44 @@ int main(int argc, char **argv)
     printf("Signature: %s\n", tdnf_rpm_file_signature_kind(fh));
     fflush(stdout);
 
-    if (key_count > 0) {
-        for (i = 0; i < (int)key_count; i++) {
-            if (slurp(key_paths[i], &key_blobs[i], &key_lens[i]) != 0) {
+    for (i = 0; i < (int)key_count; i++) {
+        if (slurp(key_paths[i], &key_blobs[i], &key_lens[i]) != 0) {
+            exit_code = 4;
+            goto out;
+        }
+    }
+
+    if (use_rpmdb) {
+        size_t loaded = 0;
+        it = tdnf_rpmdb_pubkeys_open(rpmdb_root);
+        if (!it) {
+            fprintf(stderr,
+                "tdnf-rpm-verify: rpmdb open %s: %s\n",
+                rpmdb_root, tdnf_rpmdb_last_error());
+            exit_code = 4;
+            goto out;
+        }
+        while (key_count < MAX_KEYS) {
+            char *kbuf = NULL;
+            size_t klen = 0;
+            int n = tdnf_rpmdb_pubkeys_next(it, &kbuf, &klen, NULL);
+            if (n == 0) break;
+            if (n < 0) {
+                fprintf(stderr, "tdnf-rpm-verify: rpmdb walk: %s\n",
+                        tdnf_rpmdb_last_error());
                 exit_code = 4;
                 goto out;
             }
+            key_blobs[key_count] = (unsigned char *)kbuf;
+            key_lens[key_count] = klen;
+            key_is_rpmdb[key_count] = 1;
+            key_count++;
+            loaded++;
         }
+        printf("RpmDB:     %zu key(s) under %s\n", loaded, rpmdb_root);
+    }
+
+    if (key_count > 0) {
         rc = tdnf_rpmzig_verify_with_keys(fh,
             (const void *const *)key_blobs, key_lens, key_count, &status);
     } else {
@@ -157,7 +208,14 @@ int main(int argc, char **argv)
     (void)rc;
 
 out:
-    for (i = 0; i < (int)key_count; i++) free(key_blobs[i]);
+    if (it) tdnf_rpmdb_pubkeys_close(it);
+    for (i = 0; i < (int)key_count; i++) {
+        if (key_is_rpmdb[i]) {
+            tdnf_rpmdb_string_free((char *)key_blobs[i]);
+        } else {
+            free(key_blobs[i]);
+        }
+    }
     tdnf_rpm_file_close(fh);
     return exit_code;
 }
