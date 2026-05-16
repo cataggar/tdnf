@@ -77,6 +77,8 @@ pub const Error = error{
     BadLeadMagic,
     HeaderParseFailed,
     OutOfMemory,
+    UnsupportedCompressor,
+    DecompressFailed,
 };
 
 pub const RpmFile = struct {
@@ -156,7 +158,58 @@ pub const RpmFile = struct {
     pub fn allocNevra(self: RpmFile, alloc: std.mem.Allocator) std.mem.Allocator.Error!?[]u8 {
         return self.main.allocNevra(alloc);
     }
+
+    /// Decompress the payload (cpio archive) into a freshly allocated
+    /// slice. Caller frees with `alloc.free`.
+    ///
+    /// Supports gzip, xz, zstd, and lzma. bzip2 and lz4 are returned
+    /// as `error.UnsupportedCompressor` — neither is part of Zig
+    /// std's decompressor set, and neither is the default on any rpm
+    /// distro tdnf targets.
+    pub fn decompressPayload(self: RpmFile, alloc: std.mem.Allocator) Error![]u8 {
+        const payload = self.bytes[self.payload_offset..];
+        return decompressSlice(alloc, payload, self.compressor);
+    }
 };
+
+fn decompressSlice(
+    alloc: std.mem.Allocator,
+    payload: []const u8,
+    compressor: Compressor,
+) Error![]u8 {
+    var input = std.Io.Reader.fixed(payload);
+
+    switch (compressor) {
+        .none => {
+            const out = alloc.alloc(u8, payload.len) catch return error.OutOfMemory;
+            @memcpy(out, payload);
+            return out;
+        },
+        .gzip => {
+            var decoder: std.compress.flate.Decompress = .init(&input, .gzip, &.{});
+            return decoder.reader.allocRemaining(alloc, .unlimited) catch error.DecompressFailed;
+        },
+        .zstd => {
+            var decoder: std.compress.zstd.Decompress = .init(&input, &.{}, .{});
+            return decoder.reader.allocRemaining(alloc, .unlimited) catch error.DecompressFailed;
+        },
+        .xz => {
+            // xz Decompress takes ownership of an initially-empty
+            // heap buffer that it grows as the LZMA2 dictionary
+            // size requires (block-by-block; up to 4 GB worst case).
+            const start_buf = alloc.alloc(u8, 0) catch return error.OutOfMemory;
+            var decoder = std.compress.xz.Decompress.init(&input, alloc, start_buf) catch
+                return error.DecompressFailed;
+            // Decompress will realloc start_buf as needed; we don't free it ourselves.
+            return decoder.reader.allocRemaining(alloc, .unlimited) catch error.DecompressFailed;
+        },
+        .lzma,
+        .bzip2,
+        .lz4,
+        .unknown,
+        => return error.UnsupportedCompressor,
+    }
+}
 
 fn roundUp8(x: usize) usize {
     return (x + 7) & ~@as(usize, 7);

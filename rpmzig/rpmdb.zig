@@ -322,6 +322,7 @@ export fn tdnf_rpmdb_string_free(s: ?[*:0]u8) void {
 // -------------------------------------------------------------------
 
 const pkgfile = @import("pkgfile.zig");
+const cpio = @import("cpio.zig");
 
 /// Opaque handle wrapping a parsed RpmFile and its allocator.
 pub const FileHandle = struct {
@@ -416,6 +417,138 @@ export fn tdnf_rpm_file_payload_offset(fh: ?*FileHandle) i64 {
     return @intCast(f.file.payload_offset);
 }
 
+/// Decompress the payload (cpio archive) into a fresh malloc'd
+/// buffer. On success, writes the pointer to `*out` and the byte
+/// count to `*out_size`. Caller frees with tdnf_rpmdb_string_free
+/// (it wraps `free(3)`).
+///
+/// Returns 0 on success, -1 on error (use tdnf_rpmdb_last_error).
+export fn tdnf_rpm_file_decompress_payload(
+    fh: ?*FileHandle,
+    out: ?*[*]u8,
+    out_size: ?*usize,
+) i32 {
+    clearError();
+    const f = fh orelse {
+        setError("null file handle", .{});
+        return -1;
+    };
+    const out_p = out orelse {
+        setError("null out pointer", .{});
+        return -1;
+    };
+    const out_sz = out_size orelse {
+        setError("null out_size pointer", .{});
+        return -1;
+    };
+
+    const bytes = f.file.decompressPayload(std.heap.c_allocator) catch |err| {
+        setError("decompressPayload: {t}", .{err});
+        return -1;
+    };
+    defer std.heap.c_allocator.free(bytes);
+
+    const buf = c.malloc(bytes.len) orelse {
+        setError("out of memory", .{});
+        return -1;
+    };
+    @memcpy(@as([*]u8, @ptrCast(buf))[0..bytes.len], bytes);
+    out_p.* = @ptrCast(buf);
+    out_sz.* = bytes.len;
+    return 0;
+}
+
+/// Files-in-package iterator state. Each call to
+/// `tdnf_rpm_file_next_filename` returns the next file path or 0 at
+/// end-of-archive.
+pub const FilesIter = struct {
+    /// Decompressed cpio payload owned by this iterator.
+    cpio_bytes: []u8,
+    walker: cpio.Walker,
+    /// Stable scratch for returning a NUL-terminated copy of the
+    /// current entry's name. Reused between calls.
+    name_scratch: ?[*:0]u8 = null,
+    name_scratch_cap: usize = 0,
+};
+
+/// Open a files-in-package iterator. Decompresses the payload up
+/// front; large packages briefly hold the full cpio archive in
+/// memory.
+export fn tdnf_rpm_file_files_open(fh: ?*FileHandle) ?*FilesIter {
+    clearError();
+    const f = fh orelse {
+        setError("null file handle", .{});
+        return null;
+    };
+    const bytes = f.file.decompressPayload(std.heap.c_allocator) catch |err| {
+        setError("decompressPayload: {t}", .{err});
+        return null;
+    };
+    const it = std.heap.c_allocator.create(FilesIter) catch {
+        std.heap.c_allocator.free(bytes);
+        setError("out of memory", .{});
+        return null;
+    };
+    it.* = .{
+        .cpio_bytes = bytes,
+        .walker = cpio.Walker.init(bytes),
+    };
+    return it;
+}
+
+/// Free a files iterator. Accepts NULL.
+export fn tdnf_rpm_file_files_close(it: ?*FilesIter) void {
+    const i = it orelse return;
+    std.heap.c_allocator.free(i.cpio_bytes);
+    if (i.name_scratch) |p| c.free(@ptrCast(p));
+    std.heap.c_allocator.destroy(i);
+}
+
+/// Advance the iterator and write the next entry's name into
+/// `*name_out` (stable until the next call; do NOT free) and its
+/// mode into `*mode_out`. Returns 1 on hit, 0 on end, -1 on error.
+export fn tdnf_rpm_file_files_next(
+    it: ?*FilesIter,
+    name_out: ?*[*:0]const u8,
+    mode_out: ?*u32,
+) i32 {
+    clearError();
+    const i = it orelse {
+        setError("null files iterator", .{});
+        return -1;
+    };
+    const np = name_out orelse {
+        setError("null name out pointer", .{});
+        return -1;
+    };
+
+    const maybe_entry = i.walker.next() catch |err| {
+        setError("cpio walker: {t}", .{err});
+        return -1;
+    };
+    const entry = maybe_entry orelse return 0;
+
+    // Stash a NUL-terminated copy in the iterator's scratch.
+    const needed = entry.name.len + 1;
+    if (i.name_scratch == null or i.name_scratch_cap < needed) {
+        if (i.name_scratch) |p| c.free(@ptrCast(p));
+        const buf = c.malloc(needed) orelse {
+            i.name_scratch = null;
+            i.name_scratch_cap = 0;
+            setError("out of memory", .{});
+            return -1;
+        };
+        i.name_scratch = @ptrCast(@as([*]u8, @ptrCast(buf)));
+        i.name_scratch_cap = needed;
+    }
+    const scratch_bytes = @as([*]u8, @ptrCast(i.name_scratch.?));
+    @memcpy(scratch_bytes[0..entry.name.len], entry.name);
+    scratch_bytes[entry.name.len] = 0;
+    np.* = i.name_scratch.?;
+    if (mode_out) |mo| mo.* = entry.mode;
+    return 1;
+}
+
 // -------------------------------------------------------------------
 // Helpers
 // -------------------------------------------------------------------
@@ -448,8 +581,9 @@ test "buildDbPath strips trailing slash" {
 }
 
 test {
-    // pull in header.zig + pkgfile.zig tests
+    // pull in header.zig + pkgfile.zig + cpio.zig tests
     _ = header;
     _ = pkgfile;
+    _ = cpio;
 }
 
