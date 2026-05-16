@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2023 VMware, Inc. All Rights Reserved.
+ * Copyright (C) 2022-2026 VMware, Inc. All Rights Reserved.
  *
  * Licensed under the GNU Lesser General Public License v2.1 (the "License");
  * you may not use this file except in compliance with the License. The terms
@@ -7,26 +7,14 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-#include <time.h>
-/* for O_RDONLY */
-#include <fcntl.h>
 #include <getopt.h>
-
-#include <sqlite3.h>
-
-#include <rpm/rpmlib.h>
-#include <rpm/rpmdb.h>
-#include <rpm/rpmlog.h>
-#include <rpm/rpmps.h>
-#include <rpm/rpmts.h>
-#include <rpm/rpmdb.h>
 
 #include "history.h"
 
 #define ERR_CMDLINE     1
 #define ERR_SYSTEM      2
-#define ERR_RPMTS       3
 
 #define pr_err(fmt, ...) \
     fprintf(stderr, fmt, ##__VA_ARGS__)
@@ -34,14 +22,6 @@
 #define fail(_rc, fmt, ...) { \
     rc = _rc; \
     pr_err(fmt, ##__VA_ARGS__); \
-    goto error; \
-}
-
-#define check_cond(COND) if(!(COND)) { \
-    pr_err("check_cond failed in %s line %d\n", \
-        __FUNCTION__, __LINE__); \
-    rc = -1; \
-    ((void)(rc)); /* suppress "set but not used" warning */ \
     goto error; \
 }
 
@@ -58,8 +38,6 @@
         __FUNCTION__, __LINE__); \
     goto error; \
 }
-
-#define safe_free(ptr) { if ((ptr) != NULL) { free(ptr); ptr = NULL; }}
 
 
 static void usage(const char *cmdname)
@@ -80,7 +58,6 @@ int main(int argc, char *argv[])
 {
     const char *db_file = HISTORY_DB_DIR"/"HISTORY_DB_FILE;
     const char *rpm_root_dir = "/";
-    rpmts ts = NULL;
     struct history_ctx *ctx = NULL;
     int rc = 0;
 
@@ -114,15 +91,6 @@ int main(int argc, char *argv[])
         }
     }
 
-    rpmReadConfigFiles(NULL, NULL);
-
-    ts = rpmtsCreate();
-    check_ptr(ts);
-
-    if(rpmtsSetRootDir(ts, rpm_root_dir)) {
-        fail(ERR_RPMTS, "could not set rpm root dir\n");
-    }
-
     ctx = create_history_ctx(db_file);
     check_ptr(ctx);
 
@@ -141,7 +109,7 @@ int main(int argc, char *argv[])
        */
        action = argv[optind];
        if(strcmp(action, "init") == 0 || strcmp(action, "update") == 0) {
-           rc = history_sync(ctx, ts);
+           rc = history_sync(ctx, rpm_root_dir);
            check_rc(rc);
        } else if(strcmp(action, "mark") == 0) {
            char *subaction = NULL;
@@ -176,9 +144,5 @@ int main(int argc, char *argv[])
 error:
     if (ctx)
         destroy_history_ctx(ctx);
-    if (ts) {
-        rpmtsCloseDB(ts);
-        rpmtsFree(ts);
-    }
     exit(rc);
 }

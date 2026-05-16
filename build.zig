@@ -426,7 +426,8 @@ pub fn build(b: *Build) void {
     hardenExe(tdnf_config_exe);
     b.installArtifact(tdnf_config_exe);
 
-    // tdnf-history-util
+    // tdnf-history-util — librpm-free as of T1 PR #5; only links the
+    // rpmzig static lib + sqlite3 + the history static lib.
     const history_util_mod = b.createModule(.{
         .target = target,
         .optimize = optimize,
@@ -435,7 +436,6 @@ pub fn build(b: *Build) void {
     });
     history_util_mod.addIncludePath(b.path("include"));
     history_util_mod.addIncludePath(b.path("history"));
-    if (build_with_rpm_6x) history_util_mod.addCMacro("BUILD_WITH_RPM_6X", "1");
     history_util_mod.addCSourceFiles(.{
         .root = b.path("history"),
         .files = &.{"main.c"},
@@ -443,7 +443,7 @@ pub fn build(b: *Build) void {
     });
     history_util_mod.linkLibrary(history_lib);
     history_util_mod.linkLibrary(rpmzig_lib);
-    linkSystem(history_util_mod, &.{ "rpm", "sqlite3" });
+    linkSystem(history_util_mod, &.{"sqlite3"});
     const history_util_exe = b.addExecutable(.{
         .name = "tdnf-history-util",
         .root_module = history_util_mod,

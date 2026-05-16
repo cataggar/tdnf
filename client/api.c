@@ -2094,7 +2094,7 @@ TDNFHistoryResolve(
                                 pHistoryArgs->nCommand != HISTORY_CMD_INIT);
     BAIL_ON_TDNF_ERROR(dwError);
 
-    rc = history_sync(ctx, ts);
+    rc = history_sync(ctx, pTdnf->pArgs->pszInstallRoot);
     if (rc != 0)
     {
         dwError = ERROR_TDNF_HISTORY_ERROR;

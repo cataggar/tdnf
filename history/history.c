@@ -7,17 +7,11 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
 #include <sqlite3.h>
-
-/* Only `<rpm/rpmts.h>` is still needed — for the `rpmts` opaque type
- * carried through function signatures and `rpmtsRootDir()` (the one
- * librpm call still made from this file to extract the install root
- * that gets passed to rpmzig). Everything else has been migrated to
- * the rpmzig API. */
-#include <rpm/rpmts.h>
 
 #include "rpmdb.h"
 #include "history.h"
@@ -611,12 +605,11 @@ error:
  * (if not NULL), the array will be allocated.
  *
  * Reads the rpmdb via the Zig rpmzig iterator
- * (tdnf_rpmdb_iter_*), not librpm. The `ts` parameter is now only
- * used to extract the install-root path via rpmtsRootDir(); the
- * actual database walk is independent of librpm.
+ * (tdnf_rpmdb_iter_*), not librpm. `root` is the install-root
+ * prefix; pass NULL or "" for "/".
  */
 static
-int db_update_rpms(rpmts ts, sqlite3 *db, int **pids, int *pcount)
+int db_update_rpms(const char *root, sqlite3 *db, int **pids, int *pcount)
 {
     int rc = 0;
     int count = 0, i = 0;
@@ -624,7 +617,6 @@ int db_update_rpms(rpmts ts, sqlite3 *db, int **pids, int *pcount)
     char *nevra = NULL;
     tdnf_rpmdb_iter *it = NULL;
     int iter_rc = 0;
-    const char *root = rpmtsRootDir(ts);
 
     if (pids) {
         /* count installed packages */
@@ -1464,7 +1456,7 @@ error:
    Update state in ctx and db to actual RPM state on system if it has changed
    by adding a delta transaction.
 */
-int history_update_state(struct history_ctx *ctx, rpmts ts, const char *cmdline)
+int history_update_state(struct history_ctx *ctx, const char *root, const char *cmdline)
 {
     int rc = 0;
     int trans_id;
@@ -1474,9 +1466,8 @@ int history_update_state(struct history_ctx *ctx, rpmts ts, const char *cmdline)
     char *cookie = NULL;
 
     check_ptr(ctx);
-    check_ptr(ts);
 
-    cookie = tdnf_rpmdb_cookie(rpmtsRootDir(ts));
+    cookie = tdnf_rpmdb_cookie(root);
     check_ptr(cookie);
 
     if (strcmp(ctx->cookie, cookie) == 0) {
@@ -1485,7 +1476,7 @@ int history_update_state(struct history_ctx *ctx, rpmts ts, const char *cmdline)
         return 0;
     }
 
-    rc = db_update_rpms(ts, ctx->db, &current_ids, &current_count);
+    rc = db_update_rpms(root, ctx->db, &current_ids, &current_count);
     check_rc(rc);
 
     rc = diff_arrays(ctx->installed_ids, ctx->installed_count,
@@ -1534,8 +1525,8 @@ error:
     return rc;
 }
 
-/* sync history context to current state from ts */
-int history_sync(struct history_ctx *ctx, rpmts ts)
+/* sync history context to current state from rpmdb at `root` */
+int history_sync(struct history_ctx *ctx, const char *root)
 {
     sqlite3_stmt *res = NULL;
     int step, rc = 0;
@@ -1543,9 +1534,8 @@ int history_sync(struct history_ctx *ctx, rpmts ts)
     int db_isfresh = 1;
 
     check_ptr(ctx);
-    check_ptr(ts);
 
-    cookie = tdnf_rpmdb_cookie(rpmtsRootDir(ts));
+    cookie = tdnf_rpmdb_cookie(root);
     /* this fails if the rpm db isn't accessible */
     check_ptr(cookie);
 
@@ -1571,14 +1561,14 @@ int history_sync(struct history_ctx *ctx, rpmts ts)
                 rc = history_set_state(ctx, id);
                 check_rc(rc);
                 history_set_cookie(ctx, cookie_db);
-                rc = history_update_state(ctx, ts, "(unknown)");
+                rc = history_update_state(ctx, root, "(unknown)");
                 check_rc(rc);
             } else {
                 /*
                  * No change, we can either update from db or read rpms.
                  * The former may need replaying history, the latter may be faster
                  */
-                rc = db_update_rpms(ts, ctx->db,
+                rc = db_update_rpms(root, ctx->db,
                                     &(ctx->installed_ids), &ctx->installed_count);
                 check_rc(rc);
                 history_set_cookie(ctx, cookie_db);
@@ -1595,7 +1585,7 @@ int history_sync(struct history_ctx *ctx, rpmts ts)
         /* we are starting from scratch */
         history_set_cookie(ctx, cookie);
 
-        rc = db_update_rpms(ts, ctx->db,
+        rc = db_update_rpms(root, ctx->db,
                             &(ctx->installed_ids), &ctx->installed_count);
         check_rc(rc);
 
