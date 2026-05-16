@@ -208,6 +208,75 @@ pub fn build(b: *Build) void {
         .files = &.{"history.c"},
     });
 
+    // ----- rpmzig (Zig-side librpm replacement, see plan-replace-librpm.md) //
+
+    const rpmzig_lib = blk: {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("rpmzig/rpmdb.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .pic = true,
+        });
+        // No linkSystemLibrary on the static lib itself — that would
+        // embed sqlite3.so into the .a. Headers are reachable via
+        // link_libc = true (sqlite3.h lives on libc's include path on
+        // every distro tdnf cares about). Actual -lsqlite3 link
+        // happens at each consumer (libtdnf, tdnf-rpmdb-count, …).
+        const lib = b.addLibrary(.{
+            .name = "tdnfrpmzig",
+            .linkage = .static,
+            .root_module = mod,
+        });
+        break :blk lib;
+    };
+
+    // `zig build test` runs the rpmzig Zig unit tests (currently just
+    // path-building; the FFI surface is smoke-tested via
+    // tdnf-rpmdb-count against a live rpmdb).
+    {
+        const test_mod = b.createModule(.{
+            .root_source_file = b.path("rpmzig/rpmdb.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        // The test binary is the consumer, so the sqlite3 link goes
+        // here (cf. the same .a-embedding caveat for rpmzig_lib above).
+        test_mod.linkSystemLibrary("sqlite3", .{ .use_pkg_config = .yes });
+        const tests = b.addTest(.{ .root_module = test_mod });
+        const run_tests = b.addRunArtifact(tests);
+        const test_step = b.step("test", "Run rpmzig Zig unit tests");
+        test_step.dependOn(&run_tests.step);
+    }
+
+    // tdnf-rpmdb-count: smoke-test exe for the rpmzig C ABI.
+    {
+        const mod = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .pic = true,
+        });
+        mod.addIncludePath(b.path("rpmzig"));
+        mod.addCSourceFiles(.{
+            .root = b.path("rpmzig"),
+            .files = &.{"main.c"},
+            .flags = &tdnf_cflags,
+        });
+        mod.linkLibrary(rpmzig_lib);
+        linkSystem(mod, &.{"sqlite3"});
+        const exe = b.addExecutable(.{
+            .name = "tdnf-rpmdb-count",
+            .root_module = mod,
+        });
+        hardenExe(exe);
+        const install = b.addInstallArtifact(exe, .{
+            .dest_dir = .{ .override = .{ .custom = "libexec/tdnf" } },
+        });
+        b.getInstallStep().dependOn(&install.step);
+    }
+
     // ----- libtdnf (shared) ----- //
 
     const tdnf_so_mod = b.createModule(.{
