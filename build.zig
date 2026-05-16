@@ -347,6 +347,34 @@ pub fn build(b: *Build) void {
         b.getInstallStep().dependOn(&install.step);
     }
 
+    // tdnf-rpmdb-pubkeys: smoke-test exe for the rpmdb gpg-pubkey
+    // iterator. Lists every rpm-imported public key.
+    {
+        const mod = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .pic = true,
+        });
+        mod.addIncludePath(b.path("rpmzig"));
+        mod.addCSourceFiles(.{
+            .root = b.path("rpmzig"),
+            .files = &.{"pubkeys_main.c"},
+            .flags = &tdnf_cflags,
+        });
+        mod.linkLibrary(rpmzig_lib);
+        linkSystem(mod, &.{"sqlite3"});
+        const exe = b.addExecutable(.{
+            .name = "tdnf-rpmdb-pubkeys",
+            .root_module = mod,
+        });
+        hardenExe(exe);
+        const install = b.addInstallArtifact(exe, .{
+            .dest_dir = .{ .override = .{ .custom = "libexec/tdnf" } },
+        });
+        b.getInstallStep().dependOn(&install.step);
+    }
+
     // tdnf-rpm-files: smoke-test exe for the cpio walker + payload
     // decompressor.
     {

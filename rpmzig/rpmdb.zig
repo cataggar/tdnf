@@ -318,6 +318,166 @@ export fn tdnf_rpmdb_string_free(s: ?[*:0]u8) void {
 }
 
 // -------------------------------------------------------------------
+// Pubkey iterator (gpg-pubkey-* installed packages)
+// -------------------------------------------------------------------
+//
+// `rpm --import` stores each imported public key as an installed
+// package whose NAME is "gpg-pubkey", VERSION is the key id, RELEASE
+// is the key's creation timestamp, and DESCRIPTION is the armored
+// ASCII key block. We walk the rpmdb the same way the NEVRA iterator
+// does and yield the description for each gpg-pubkey row.
+//
+// This is the read-only side of the T3 PR #5 verifier flip: the
+// rpmzig verifier can preload the rpmdb's existing trust set rather
+// than re-prompting users for keys that librpm already has.
+
+const PubkeyIter = struct {
+    db: ?*c.sqlite3,
+    stmt: ?*c.sqlite3_stmt,
+};
+
+/// Open a forward iterator over rpmdb rows whose RPMTAG_NAME is
+/// "gpg-pubkey".
+export fn tdnf_rpmdb_pubkeys_open(root: ?[*:0]const u8) ?*PubkeyIter {
+    clearError();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_slice: []const u8 = if (root) |p| std.mem.span(p) else "";
+    const db_path = buildDbPath(&buf, root_slice) catch |err| {
+        setError("path build failed: {t}", .{err});
+        return null;
+    };
+
+    var db: ?*c.sqlite3 = null;
+    const open_rc = c.sqlite3_open_v2(
+        db_path.ptr,
+        &db,
+        c.SQLITE_OPEN_READONLY | c.SQLITE_OPEN_NOMUTEX,
+        null,
+    );
+    if (open_rc != c.SQLITE_OK) {
+        setError("sqlite3_open_v2({s}): {s}", .{
+            db_path,
+            std.mem.span(@as([*:0]const u8, c.sqlite3_errmsg(db))),
+        });
+        if (db != null) _ = c.sqlite3_close(db);
+        return null;
+    }
+
+    var stmt: ?*c.sqlite3_stmt = null;
+    // Same query as iter_open; we filter the gpg-pubkey rows in Zig
+    // because the NAME tag is buried inside the binary blob.
+    const sql = "SELECT blob FROM " ++ PKG_TABLE ++ " ORDER BY hnum";
+    const prepare_rc = c.sqlite3_prepare_v2(db, sql, sql.len, &stmt, null);
+    if (prepare_rc != c.SQLITE_OK) {
+        setError("sqlite3_prepare_v2: {s}", .{
+            std.mem.span(@as([*:0]const u8, c.sqlite3_errmsg(db))),
+        });
+        _ = c.sqlite3_close(db);
+        return null;
+    }
+
+    const iter = std.heap.c_allocator.create(PubkeyIter) catch {
+        setError("out of memory", .{});
+        _ = c.sqlite3_finalize(stmt);
+        _ = c.sqlite3_close(db);
+        return null;
+    };
+    iter.* = .{ .db = db, .stmt = stmt };
+    return iter;
+}
+
+/// Close and free a pubkey iterator.
+export fn tdnf_rpmdb_pubkeys_close(it: ?*PubkeyIter) void {
+    const iter = it orelse return;
+    if (iter.stmt) |s| _ = c.sqlite3_finalize(s);
+    if (iter.db) |d| _ = c.sqlite3_close(d);
+    std.heap.c_allocator.destroy(iter);
+}
+
+/// Advance to the next `gpg-pubkey-*` row and write the armored key
+/// block (RPMTAG_DESCRIPTION) into a heap buffer.
+///
+/// On hit, writes:
+///   *key_out      → malloc'd NUL-terminated C string with the
+///                   armored key (free with tdnf_rpmdb_string_free)
+///   *key_len_out  → byte length of the armored key, not counting
+///                   the trailing NUL (may be NULL if uninterested)
+///   *keyid_out    → malloc'd lowercase hex 8-character key id
+///                   (= RPMTAG_VERSION); free with
+///                   tdnf_rpmdb_string_free (may be NULL)
+///
+/// Returns 1 on hit, 0 on end-of-iteration, -1 on error.
+export fn tdnf_rpmdb_pubkeys_next(
+    it: ?*PubkeyIter,
+    key_out: ?*[*:0]u8,
+    key_len_out: ?*usize,
+    keyid_out: ?*[*:0]u8,
+) i32 {
+    clearError();
+    const iter = it orelse {
+        setError("null iterator", .{});
+        return -1;
+    };
+    const out = key_out orelse {
+        setError("null key_out", .{});
+        return -1;
+    };
+
+    while (true) {
+        const step_rc = c.sqlite3_step(iter.stmt);
+        if (step_rc == c.SQLITE_DONE) return 0;
+        if (step_rc != c.SQLITE_ROW) {
+            setError("sqlite3_step: {s}", .{
+                std.mem.span(@as([*:0]const u8, c.sqlite3_errmsg(iter.db))),
+            });
+            return -1;
+        }
+        const blob_ptr = c.sqlite3_column_blob(iter.stmt, 0);
+        const blob_len: usize = @intCast(c.sqlite3_column_bytes(iter.stmt, 0));
+        if (blob_ptr == null or blob_len == 0) continue;
+        const blob: []const u8 = @as([*]const u8, @ptrCast(blob_ptr))[0..blob_len];
+
+        const h = header.Header.parse(blob) catch |err| {
+            setError("header.parse: {t}", .{err});
+            return -1;
+        };
+        const name = h.getString(.name) orelse continue;
+        if (!std.mem.eql(u8, name, "gpg-pubkey")) continue;
+
+        const desc = h.getString(.description) orelse {
+            // gpg-pubkey package with no DESCRIPTION — should not
+            // happen, but skip rather than fail the walk.
+            continue;
+        };
+        const keyid = h.getString(.version) orelse continue;
+
+        out.* = dupZ(desc) orelse return -1;
+        if (key_len_out) |p| p.* = desc.len;
+        if (keyid_out) |p| {
+            const id_z = dupZ(keyid) orelse {
+                c.free(@ptrCast(out.*));
+                return -1;
+            };
+            p.* = id_z;
+        }
+        return 1;
+    }
+}
+
+/// Helper: malloc + copy + NUL-terminate. Returns null and sets
+/// last-error on allocation failure.
+fn dupZ(src: []const u8) ?[*:0]u8 {
+    const ptr = c.malloc(src.len + 1) orelse {
+        setError("out of memory", .{});
+        return null;
+    };
+    const bytes = @as([*]u8, @ptrCast(ptr));
+    @memcpy(bytes[0..src.len], src);
+    bytes[src.len] = 0;
+    return @ptrCast(bytes);
+}
+
+// -------------------------------------------------------------------
 // `.rpm` file reader (T2)
 // -------------------------------------------------------------------
 
