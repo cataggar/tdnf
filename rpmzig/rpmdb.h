@@ -1,14 +1,11 @@
 /*
  * tdnf rpmdb (Zig) — C ABI for the read-only Zig rpmdb reader.
  *
- * This is T1 of the librpm-replacement plan (see
- * plan-replace-librpm.md in the session-state archive). The
- * implementation lives in rpmzig/rpmdb.zig and is linked into
- * libtdnf and tdnf-rpmdb-count.
- *
- * The first iteration exposes only a row count over the Packages
- * table. PR #2 will add an iterator over decoded RPM headers and
- * replace the rpmdb walk in history/history.c.
+ * T1 of the librpm-replacement plan (see plan-replace-librpm.md in
+ * the session-state archive). The implementation lives in
+ * rpmzig/rpmdb.zig (+ rpmzig/header.zig for the RPM header v3
+ * decoder) and is linked into libtdnf, tdnf-rpmdb-count, and
+ * tdnf-rpmdb-list.
  */
 #ifndef _TDNF_RPMZIG_RPMDB_H_
 #define _TDNF_RPMZIG_RPMDB_H_
@@ -37,8 +34,48 @@ int64_t tdnf_rpmdb_count_packages(const char *root);
  */
 const char *tdnf_rpmdb_last_error(void);
 
+/* --- forward iterator over the Packages table --- */
+
+typedef struct tdnf_rpmdb_iter tdnf_rpmdb_iter;
+
+/**
+ * Open a forward iterator over the rpmdb Packages table for the
+ * sqlite database under `root`.
+ *
+ * Returns NULL on error (use tdnf_rpmdb_last_error for details).
+ */
+tdnf_rpmdb_iter *tdnf_rpmdb_iter_open(const char *root);
+
+/**
+ * Close and free an iterator opened by tdnf_rpmdb_iter_open.
+ * Accepts NULL.
+ */
+void tdnf_rpmdb_iter_close(tdnf_rpmdb_iter *it);
+
+/**
+ * Advance the iterator and write the next package's NEVRA string into
+ * `*nevra_out`. The string is heap-allocated; free with
+ * tdnf_rpmdb_string_free.
+ *
+ * The NEVRA format is `name-[epoch:]version-release.arch` — matching
+ * librpm's `headerGetAsString(h, RPMTAG_NEVRA)` output exactly so
+ * existing history-DB rows stay comparable.
+ *
+ * Returns:
+ *    1 on success (NEVRA populated),
+ *    0 on end-of-iteration,
+ *   -1 on error (use tdnf_rpmdb_last_error).
+ */
+int tdnf_rpmdb_iter_next_nevra(tdnf_rpmdb_iter *it, char **nevra_out);
+
+/**
+ * Free a string returned by tdnf_rpmdb_iter_next_nevra. Accepts NULL.
+ */
+void tdnf_rpmdb_string_free(char *s);
+
 #ifdef __cplusplus
 }
 #endif
 
 #endif /* _TDNF_RPMZIG_RPMDB_H_ */
+

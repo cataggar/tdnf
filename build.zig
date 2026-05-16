@@ -261,13 +261,40 @@ pub fn build(b: *Build) void {
         mod.addIncludePath(b.path("rpmzig"));
         mod.addCSourceFiles(.{
             .root = b.path("rpmzig"),
-            .files = &.{"main.c"},
+            .files = &.{"count_main.c"},
             .flags = &tdnf_cflags,
         });
         mod.linkLibrary(rpmzig_lib);
         linkSystem(mod, &.{"sqlite3"});
         const exe = b.addExecutable(.{
             .name = "tdnf-rpmdb-count",
+            .root_module = mod,
+        });
+        hardenExe(exe);
+        const install = b.addInstallArtifact(exe, .{
+            .dest_dir = .{ .override = .{ .custom = "libexec/tdnf" } },
+        });
+        b.getInstallStep().dependOn(&install.step);
+    }
+
+    // tdnf-rpmdb-list: smoke-test exe for the rpmzig iterator.
+    {
+        const mod = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .pic = true,
+        });
+        mod.addIncludePath(b.path("rpmzig"));
+        mod.addCSourceFiles(.{
+            .root = b.path("rpmzig"),
+            .files = &.{"list_main.c"},
+            .flags = &tdnf_cflags,
+        });
+        mod.linkLibrary(rpmzig_lib);
+        linkSystem(mod, &.{"sqlite3"});
+        const exe = b.addExecutable(.{
+            .name = "tdnf-rpmdb-list",
             .root_module = mod,
         });
         hardenExe(exe);
