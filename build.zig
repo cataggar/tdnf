@@ -17,9 +17,8 @@ const ResolvedTarget = Build.ResolvedTarget;
 const OptimizeMode = std.builtin.OptimizeMode;
 
 const project_name = "tdnf";
-const project_version = "4.0.0";
-const project_version_major: u32 = 4;
-const project_semver: std.SemanticVersion = .{ .major = 4, .minor = 0, .patch = 0 };
+const default_project_version = "4.0.0";
+const default_project_semver: std.SemanticVersion = .{ .major = 4, .minor = 0, .patch = 0 };
 
 /// Warnings + hardening flags from the former cmake/CFlags.cmake, filtered
 /// to the strict set clang accepts. GCC-only warnings have been removed.
@@ -59,6 +58,21 @@ const tdnf_cflags = [_][]const u8{
 pub fn build(b: *Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+
+    // -Dversion overrides the version baked into the artifacts (libtdnf.so
+    // SOVERSION, tdnf --version output, generated config.h). Used by the
+    // release workflow to pin the binary's version to the git tag.
+    const version_override = b.option(
+        []const u8,
+        "version",
+        "Override project version (default: " ++ default_project_version ++ ")",
+    );
+    const project_version: []const u8 = version_override orelse default_project_version;
+    const project_semver: std.SemanticVersion = if (version_override) |v|
+        std.SemanticVersion.parse(v) catch
+            std.debug.panic("invalid -Dversion='{s}' (expected semantic version)", .{v})
+    else
+        default_project_semver;
 
     const history_db_dir = b.option(
         []const u8,
@@ -681,5 +695,4 @@ fn lookup(key: []const u8, vars: []const TemplateVar) ?[]const u8 {
 
 comptime {
     _ = LazyPath;
-    _ = project_version_major;
 }
