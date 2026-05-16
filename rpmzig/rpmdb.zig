@@ -426,6 +426,21 @@ export fn tdnf_rpm_file_is_signed(fh: ?*FileHandle) i32 {
     return if (f.file.isSigned()) 1 else 0;
 }
 
+/// Returns a static C string naming the kind of signature on this
+/// rpm: "none", "rsa", "dsa", "pgp", "gpg", or "openpgp". Returns
+/// "none" on a NULL handle.
+export fn tdnf_rpm_file_signature_kind(fh: ?*FileHandle) [*:0]const u8 {
+    const f = fh orelse return "none";
+    return switch (f.file.signatureKind()) {
+        .none => "none",
+        .rsa => "rsa",
+        .dsa => "dsa",
+        .pgp => "pgp",
+        .gpg => "gpg",
+        .openpgp => "openpgp",
+    };
+}
+
 /// Decompress the payload (cpio archive) into a fresh malloc'd
 /// buffer. On success, writes the pointer to `*out` and the byte
 /// count to `*out_size`. Caller frees with tdnf_rpmdb_string_free

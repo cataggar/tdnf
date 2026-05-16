@@ -164,15 +164,44 @@ pub const RpmFile = struct {
         return self.main.allocNevra(alloc);
     }
 
+    /// The kind of signature carried on this rpm's sig header.
+    pub const SignatureKind = enum {
+        none,
+        rsa,
+        dsa,
+        pgp,
+        gpg,
+        openpgp,
+
+        pub fn name(self: SignatureKind) []const u8 {
+            return switch (self) {
+                .none => "none",
+                .rsa => "rsa",
+                .dsa => "dsa",
+                .pgp => "pgp",
+                .gpg => "gpg",
+                .openpgp => "openpgp",
+            };
+        }
+    };
+
+    /// Returns the kind of signature carried in the sig header.
+    /// Checks tags in priority order: RSA → DSA → PGP → GPG →
+    /// OpenPGP. Returns `.none` if no signature tag is present.
+    pub fn signatureKind(self: RpmFile) SignatureKind {
+        if (self.sig.getBinaryRaw(@intFromEnum(header.SigTagId.rsa)) != null) return .rsa;
+        if (self.sig.getBinaryRaw(@intFromEnum(header.SigTagId.dsa)) != null) return .dsa;
+        if (self.sig.getBinaryRaw(@intFromEnum(header.SigTagId.pgp)) != null) return .pgp;
+        if (self.sig.getBinaryRaw(@intFromEnum(header.SigTagId.gpg)) != null) return .gpg;
+        if (self.sig.getBinaryRaw(@intFromEnum(header.SigTagId.openpgp)) != null) return .openpgp;
+        return .none;
+    }
+
     /// Returns true iff the signature header carries any of the known
     /// GPG/RSA/DSA signature payloads. T3 will replace this stub with
     /// real verification through gpgme.
     pub fn isSigned(self: RpmFile) bool {
-        return self.sig.getBinary(.sig_sigpgp) != null or
-            self.sig.getBinary(.sig_siggpg) != null or
-            self.sig.getBinary(.sig_dsa) != null or
-            self.sig.getBinary(.sig_rsa) != null or
-            self.sig.getBinary(.sig_openpgp) != null;
+        return self.signatureKind() != .none;
     }
 
     /// Decompress the payload (cpio archive) into a freshly allocated
