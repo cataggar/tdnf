@@ -35,6 +35,9 @@ pub const TagId = enum(u32) {
     arch = 1022,
     install_tid = 1128,
     install_time = 1008,
+    payload_format = 1124,
+    payload_compressor = 1125,
+    payload_flags = 1126,
     _,
 };
 
@@ -60,6 +63,7 @@ const RPMTAG_HEADERIMMUTABLE: u32 = 61;
 pub const Error = error{
     Truncated,
     BadIndexCount,
+    BadMagic,
     OffsetOutOfRange,
     InvalidUtf8, // we don't enforce UTF-8 strictly; reserved
 };
@@ -97,6 +101,23 @@ pub const Header = struct {
             .index_off = index_off,
             .data_off = data_off,
             .data_size = hsize,
+        };
+    }
+
+    /// Parses a header with the 8-byte "standalone" magic prefix
+    /// (`8e ad e8 01 00 00 00 00`), as used in `.rpm` files for the
+    /// signature header and main header. Returns the parsed header
+    /// plus its **total on-disk size** (magic + counts + index + data),
+    /// without any trailing pad-to-8 alignment — the caller applies
+    /// alignment when seeking from one header to the next.
+    pub fn parseStandalone(blob: []const u8) Error!struct { header: Header, on_disk_size: usize } {
+        const magic = [_]u8{ 0x8e, 0xad, 0xe8, 0x01, 0x00, 0x00, 0x00, 0x00 };
+        if (blob.len < magic.len) return error.Truncated;
+        if (!std.mem.eql(u8, blob[0..magic.len], &magic)) return error.BadMagic;
+        const h = try Header.parse(blob[magic.len..]);
+        return .{
+            .header = h,
+            .on_disk_size = magic.len + 8 + 16 * @as(usize, h.index_count) + h.data_size,
         };
     }
 

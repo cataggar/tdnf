@@ -318,6 +318,105 @@ export fn tdnf_rpmdb_string_free(s: ?[*:0]u8) void {
 }
 
 // -------------------------------------------------------------------
+// `.rpm` file reader (T2)
+// -------------------------------------------------------------------
+
+const pkgfile = @import("pkgfile.zig");
+
+/// Opaque handle wrapping a parsed RpmFile and its allocator.
+pub const FileHandle = struct {
+    file: pkgfile.RpmFile,
+};
+
+/// Open and parse a `.rpm` file. Returns NULL on error (consult
+/// tdnf_rpmdb_last_error()).
+export fn tdnf_rpm_file_open(path: ?[*:0]const u8) ?*FileHandle {
+    clearError();
+    const p = path orelse {
+        setError("null path", .{});
+        return null;
+    };
+    const path_slice = std.mem.span(p);
+    // Convert to sentinel-terminated for libc.
+    const path_z = std.heap.c_allocator.dupeZ(u8, path_slice) catch {
+        setError("out of memory", .{});
+        return null;
+    };
+    defer std.heap.c_allocator.free(path_z);
+
+    const fh = std.heap.c_allocator.create(FileHandle) catch {
+        setError("out of memory", .{});
+        return null;
+    };
+    fh.file = pkgfile.RpmFile.open(std.heap.c_allocator, path_z) catch |err| {
+        setError("rpm_file_open({s}): {t}", .{ path_slice, err });
+        std.heap.c_allocator.destroy(fh);
+        return null;
+    };
+    return fh;
+}
+
+/// Free a file handle. Accepts NULL.
+export fn tdnf_rpm_file_close(fh: ?*FileHandle) void {
+    const f = fh orelse return;
+    f.file.close(std.heap.c_allocator);
+    std.heap.c_allocator.destroy(f);
+}
+
+/// Returns a heap-allocated NEVRA string for this rpm file. Caller
+/// frees with tdnf_rpmdb_string_free.
+export fn tdnf_rpm_file_nevra(fh: ?*FileHandle) ?[*:0]u8 {
+    clearError();
+    const f = fh orelse {
+        setError("null file handle", .{});
+        return null;
+    };
+    const nevra_opt = f.file.allocNevra(std.heap.c_allocator) catch {
+        setError("out of memory", .{});
+        return null;
+    };
+    const nevra = nevra_opt orelse {
+        setError("file header missing required tag for NEVRA", .{});
+        return null;
+    };
+    defer std.heap.c_allocator.free(nevra);
+
+    const out = c.malloc(nevra.len + 1) orelse {
+        setError("out of memory", .{});
+        return null;
+    };
+    const out_bytes = @as([*]u8, @ptrCast(out));
+    @memcpy(out_bytes[0..nevra.len], nevra);
+    out_bytes[nevra.len] = 0;
+    return @ptrCast(out_bytes);
+}
+
+/// Returns the payload compressor name as a static C string.
+/// One of: "none", "gzip", "bzip2", "xz", "lzma", "zstd", "lz4",
+/// "unknown".
+export fn tdnf_rpm_file_compressor(fh: ?*FileHandle) [*:0]const u8 {
+    const f = fh orelse return "unknown";
+    return switch (f.file.compressor) {
+        .none => "none",
+        .gzip => "gzip",
+        .bzip2 => "bzip2",
+        .xz => "xz",
+        .lzma => "lzma",
+        .zstd => "zstd",
+        .lz4 => "lz4",
+        .unknown => "unknown",
+    };
+}
+
+/// Returns the byte offset of the payload (cpio archive) within the
+/// underlying file. Useful for callers that want to stream the
+/// payload through a decompressor.
+export fn tdnf_rpm_file_payload_offset(fh: ?*FileHandle) i64 {
+    const f = fh orelse return -1;
+    return @intCast(f.file.payload_offset);
+}
+
+// -------------------------------------------------------------------
 // Helpers
 // -------------------------------------------------------------------
 
@@ -349,7 +448,8 @@ test "buildDbPath strips trailing slash" {
 }
 
 test {
-    // pull in header.zig tests
+    // pull in header.zig + pkgfile.zig tests
     _ = header;
+    _ = pkgfile;
 }
 

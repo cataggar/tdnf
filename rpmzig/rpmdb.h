@@ -84,6 +84,40 @@ int tdnf_rpmdb_iter_next_nevra(tdnf_rpmdb_iter *it, char **nevra_out);
  */
 void tdnf_rpmdb_string_free(char *s);
 
+/* --- `.rpm` file reader (T2) --- */
+
+typedef struct tdnf_rpm_file tdnf_rpm_file;
+
+/**
+ * Open and parse a `.rpm` file. Returns NULL on error (consult
+ * tdnf_rpmdb_last_error()).
+ */
+tdnf_rpm_file *tdnf_rpm_file_open(const char *path);
+
+/**
+ * Free a file handle. Accepts NULL.
+ */
+void tdnf_rpm_file_close(tdnf_rpm_file *fh);
+
+/**
+ * Returns a heap-allocated NEVRA string for this rpm file. Caller
+ * frees with tdnf_rpmdb_string_free.
+ */
+char *tdnf_rpm_file_nevra(tdnf_rpm_file *fh);
+
+/**
+ * Returns the payload compressor name as a static C string
+ * ("none", "gzip", "bzip2", "xz", "lzma", "zstd", "lz4", or
+ * "unknown"). Lifetime: static; do not free.
+ */
+const char *tdnf_rpm_file_compressor(tdnf_rpm_file *fh);
+
+/**
+ * Returns the byte offset of the payload (cpio archive) within the
+ * underlying file.
+ */
+int64_t tdnf_rpm_file_payload_offset(tdnf_rpm_file *fh);
+
 #ifdef __cplusplus
 }
 #endif

@@ -57,6 +57,7 @@ jobs:
           file ./out/lib/tdnf-plugins/libtdnfrepogpgcheck.so
           file ./out/libexec/tdnf/tdnf-rpmdb-count
           file ./out/libexec/tdnf/tdnf-rpmdb-list
+          file ./out/libexec/tdnf/tdnf-rpm-info
 
       - name: Zig unit tests
         run: zig build test
