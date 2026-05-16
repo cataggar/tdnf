@@ -31,16 +31,20 @@ On the push, you should see a URL to create a pull request (PR) on github. You c
 
 ### Testing Changes
 
-tdnf comes with an extensive test suite. Before creating a PR or making any changes, please test with these commands:
+tdnf comes with an extensive test suite. Before opening a PR, build and
+exercise it locally:
+
 ```
-export DIST=photon
-cd ci
-docker build -t photon/tdnf-build -f Dockerfile.photon .
-cd ..
-docker run --security-opt seccomp:unconfined --rm -it -e DIST -v$(pwd):/build -w/build ${DIST}/tdnf-build ./ci/docker-entrypoint.sh
+zig build install --prefix ./out
+cd pytests && LD_LIBRARY_PATH=../out/lib pytest -v
 ```
 
-The repo contains workflows in the `.github` directory. These will be executed whenever the PR changes. If you never contributed before, this needs to be approved by the maintainers (if that doesn't happen within a reasonable time, feel free to ping them). Please observe the results of these tests, and address errors in your PR.
+The integration tests need an rpm-aware host (`rpm`, `rpmbuild`,
+`createrepo_c`, plus the python `pytest` / `requests` / `pyOpenSSL`
+stack). See README.md for the apt package list.
+
+CI runs a plain `zig build` plus `flake8 pytests` on every PR; the
+integration tests above are expected to be run by the developer locally.
 
 ### Staying In Sync With Upstream
 
