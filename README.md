@@ -1,26 +1,34 @@
 # tdnf - tiny dandified yum
 
-In order to compile, from the checkout directory, run the following
+A C implementation of a dnf/yum-compatible package manager built on
+`libsolv`, `librpm`, and `libcurl`.
+
+## Build
+
+Requires Zig 0.16+ and the following C development packages (Debian/Ubuntu
+names; equivalent `*-devel` packages on rpm distros):
+
+```
+librpm-dev libsolv-dev libcurl4-openssl-dev libexpat1-dev \
+libssl-dev libsqlite3-dev libgpgme-dev libpopt-dev pkg-config
+```
+
+Then:
 
 ```sh
-mkdir build && cd build
-cmake ..
-make
+zig build install --prefix ./out
 ```
 
-Do enable debugging symbols (useful for use with `gdb`), use:
-```
-cmake -DCMAKE_BUILD_TYPE=Debug ..
-```
+This produces `./out/bin/tdnf`, `./out/lib/libtdnf.so.4.0.0` and friends.
 
-You can also build tdnf using docker using the following commands:
-
+Debug build:
 ```sh
-docker build -t photon/tdnf-build -f ci/Dockerfile.photon .
-docker run --rm -it -v $(pwd):/build -w /build photon/tdnf-build
+zig build -Doptimize=Debug install --prefix ./out
 ```
 
-create a conf file named `tdnf.conf` under `/etc/tdnf/` with the following content
+## Configuration
+
+Create `tdnf.conf` under `/etc/tdnf/`:
 
 ```text
 [main]
@@ -31,43 +39,32 @@ repodir=/etc/yum.repos.d
 cachedir=/var/cache/tdnf
 ```
 
-Now configure repo files under `/etc/yum.repos.d` or your repodir following
-`.repo` format of dnf/yum.
-
-You should now have a client executable named tdnf under `bin/`. To test
-run:
+Place `.repo` files under `/etc/yum.repos.d` (or your `repodir`).
 
 ```sh
-./bin/tdnf list installed
+./out/bin/tdnf list installed
 ```
-
-You should see a list of installed packages and their related info
 
 ## Testing
 
-To build and run the test scripts within a container, do:
+The pytest suite under `pytests/` exercises the binaries against a
+locally-served rpm repo. It requires an rpm-aware host: `rpm`,
+`rpmbuild`, `createrepo_c`, and the `python3-pytest`/`python3-requests`/
+`python3-pyOpenSSL` stack. With those in place:
 
-```text
-export DIST=photon
-docker run --security-opt seccomp:unconfined --rm -it -e DIST -v$(pwd):/build -w/build ${DIST}/tdnf-build ./ci/docker-entrypoint.sh
-```
-Same for
-```text
-export DIST=fedora
-```
-
-## Coverity
-
-Assuming you have coverity installed on `/pathto/coverity`, you can run:
-
-```text
-docker run --rm -it -v $(pwd):/build -v /pathto/coverity/:/coverity/ -w /build photon/tdnf-build ./ci/coverity.sh
+```sh
+zig build install --prefix ./out
+cd pytests && LD_LIBRARY_PATH=../out/lib pytest -v
 ```
 
-This will put the output to `./build-coverity`. You can then commit the results to the coverity database from that directory, or view the results in `./build-coverity/html`. For example, you can start an nginx container:
+Or use the convenience step:
 
-```text
-docker run -it --rm -p 8080:80 --name web -v $(pwd)/build-coverity/html:/usr/share/nginx/html nginx
+```sh
+zig build check
 ```
-and then view results in your browser at `http://<host>:8080/`.
+
+## Static analysis (Coverity)
+
+`ci/coverity.sh` wraps `zig build` with `cov-build`. It generates an
+HTML report under `build-coverity/html/`.
 
