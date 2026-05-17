@@ -1,21 +1,24 @@
-//! Top-level OpenPGP signature verifier — PR #5 of plan-pure-zig-pgp.md.
+//! Top-level OpenPGP signature verifier — PRs #5 + #6 of
+//! plan-pure-zig-pgp.md.
 //!
-//! Combines `armor` (PR #1), `packet` (PR #2), `pubkey` (PR #3) and
-//! `signature` (PR #4) with `std.crypto.Certificate.rsa` to implement
-//! RSA-PKCS#1v1.5 verification of v4 OpenPGP detached signatures.
+//! Combines `armor` (PR #1), `packet` (PR #2), `pubkey` (PR #3),
+//! `signature` (PR #4) and `keyring` (PR #6) with
+//! `std.crypto.Certificate.rsa` to implement RSA-PKCS#1v1.5
+//! verification of v4 OpenPGP detached signatures.
 //!
-//! Scope, narrow by design (per plan section 5 "PR #5"):
+//! Scope, narrow by design (per plan section 5 "PR #5" + "PR #6"):
 //!
 //!   * RSA only. ECDSA / Ed25519 / EdDSALegacy land in PRs #8 / #9.
 //!   * SHA-256 + SHA-512 only. SHA-1 stays disabled until a policy
 //!     knob lands (legacy keys only — Sequoia rejects SHA-1 since
 //!     Feb 2023). SHA-384 is unused in practice.
-//!   * Binary signature type (0x00) only. PR #6 adds subkey-binding
-//!     (0x18) and back-sig (0x19) verification.
-//!   * Subkey trust without binding-sig verification — i.e. a Tag 14
-//!     subkey is accepted as a fingerprint match candidate, but the
-//!     0x18 signature that ties it to its primary key is NOT yet
-//!     validated. PR #6 closes this gap.
+//!   * Binary signature type (0x00) only. Subkey-binding (0x18)
+//!     and back-sig (0x19) verification live in `keyring.zig`.
+//!   * Subkey trust is now gated on `keyring.parse` having
+//!     verified the type-0x18 binding signature from the primary
+//!     plus the embedded type-0x19 back-sig from the subkey. A
+//!     subkey grafted onto a legitimate primary blob without a
+//!     valid binding chain is rejected as `.no_key`.
 //!
 //! Out-of-scope cases coerce to `.internal`. PR #7 wires this
 //! verifier alongside the gpgme path for a log-only cross-check;
@@ -23,10 +26,10 @@
 
 const std = @import("std");
 
-const armor = @import("armor.zig");
 const packet = @import("packet.zig");
 const pubkey = @import("pubkey.zig");
 const signature = @import("signature.zig");
+const keyring = @import("keyring.zig");
 
 /// Verification verdict. Numeric values must stay in lock-step with
 /// the C `TDNF_RPMZIG_VERIFY_*` constants in `rpmzig/verify.h` —
@@ -101,32 +104,36 @@ pub fn verifyDetached(
 
     // --- 4. Walk the keyring; find a matching public key. -----------
     //
-    // Each iteration owns a freshly-dearmored buffer; the parsed
-    // `PublicKey` slices into that buffer (RSA MPI payloads, the
-    // packet body, etc.). When we find a match we hand ownership of
-    // the buffer to `matched_owner` so the slices stay valid past
-    // the end of the loop. Non-matching buffers are freed eagerly.
+    // Each blob is parsed via `keyring.parse`, which dearmors it
+    // and verifies each subkey's type-0x18 binding signature plus
+    // the embedded type-0x19 back-sig. Entries whose binding
+    // failed remain in the list with `binding_ok = false`; we
+    // reject those as candidate signers — a malicious subkey
+    // grafted onto a legitimate primary blob would never have a
+    // valid binding chain so this closes the trust gap PR #5
+    // left.
+    //
+    // The matching keyring owns the dearmored blob that backs the
+    // selected `pubkey.PublicKey`'s slices, so we move it into
+    // `matched_keyring` to keep the data alive past the loop.
     var matched: ?pubkey.PublicKey = null;
-    var matched_owner: ?armor.DecodedKey = null;
-    defer if (matched_owner) |*m| m.deinit();
+    var matched_keyring: ?keyring.Keyring = null;
+    defer if (matched_keyring) |*k| k.deinit();
 
     outer: for (key_blobs) |raw| {
-        var dec = armor.decodeAny(allocator, raw) catch return .internal;
+        var kr = keyring.parse(allocator, raw) catch continue;
         var consumed = false;
-        defer if (!consumed) dec.deinit();
+        defer if (!consumed) kr.deinit();
 
-        var it = packet.iterate(dec.bytes);
-        while (it.next() catch break) |pkt| {
-            if (pkt.tag != .public_key and pkt.tag != .public_subkey) continue;
-            const pk = pubkey.parseBody(pkt.body) catch continue;
-            const fpr = pubkey.fingerprintV4(pkt.body);
+        for (kr.entries) |entry| {
+            if (entry.kind == .subkey and !entry.binding_ok) continue;
             const is_match = switch (issuer_kind) {
-                .fpr => std.crypto.timing_safe.eql([20]u8, fpr.bytes, issuer_fpr_buf),
-                .kid => std.crypto.timing_safe.eql([8]u8, fpr.keyId(), issuer_keyid),
+                .fpr => std.crypto.timing_safe.eql([20]u8, entry.fingerprint.bytes, issuer_fpr_buf),
+                .kid => std.crypto.timing_safe.eql([8]u8, entry.fingerprint.keyId(), issuer_keyid),
             };
             if (is_match) {
-                matched = pk;
-                matched_owner = dec;
+                matched = entry.key;
+                matched_keyring = kr;
                 consumed = true;
                 break :outer;
             }
@@ -298,6 +305,83 @@ test "malformed signature packet → bad/no_sig" {
     // Either bad (parse failure) or no_sig (iterator returned null)
     // is acceptable here; both mean "no usable signature".
     try testing.expect(status == .bad or status == .no_sig);
+}
+
+// ---------------------------------------------------------------------
+// PR #6: subkey-issued signature with binding-chain enforcement.
+// ---------------------------------------------------------------------
+
+const subkey_fixture_keyring = @embedFile("testdata/rsa-primary-subkey-keyring.bin");
+const subkey_fixture_data = @embedFile("testdata/rsa-primary-subkey-data.bin");
+const subkey_fixture_sig = @embedFile("testdata/rsa-primary-subkey-sig.bin");
+
+test "subkey signer with valid binding chain → ok" {
+    const keys = [_][]const u8{subkey_fixture_keyring};
+    const status = verifyDetached(
+        testing.allocator,
+        subkey_fixture_sig,
+        subkey_fixture_data,
+        &keys,
+    );
+    try testing.expectEqual(Status.ok, status);
+}
+
+test "subkey signer with tampered binding sig → no_key" {
+    // Flip the last byte of the keyring — that lives inside the
+    // RSA signature MPI of the type-0x18 binding sig, so the
+    // subkey's `binding_ok` flips to false. The subkey is then no
+    // longer considered a candidate signer; with the primary as
+    // the only remaining trusted key (and it's not the issuer of
+    // our detached sig) we should see `.no_key`.
+    var tampered = try testing.allocator.dupe(u8, subkey_fixture_keyring);
+    defer testing.allocator.free(tampered);
+    tampered[tampered.len - 1] ^= 0xFF;
+
+    const keys = [_][]const u8{tampered};
+    const status = verifyDetached(
+        testing.allocator,
+        subkey_fixture_sig,
+        subkey_fixture_data,
+        &keys,
+    );
+    try testing.expectEqual(Status.no_key, status);
+}
+
+test "subkey signer when binding sig packet removed → no_key" {
+    // Strip the trailing Tag 2 (binding sig) packet off the
+    // keyring. The subkey is still in the entries list but
+    // without a binding sig binding_ok stays false. The verify
+    // path must reject it as a candidate signer → no_key (not
+    // bad — there could in principle have been another usable
+    // key in the keyring).
+    //
+    // The fixture packets are old-format with 2-octet length
+    // (`0x99` primary, `0xB9` subkey, `0x89` sig). Find the
+    // 0x89 byte that opens the third packet by walking headers
+    // from the start.
+    var idx: usize = 0;
+    // primary: 0x99 || BE16(len) || body
+    try testing.expectEqual(@as(u8, 0x99), subkey_fixture_keyring[idx]);
+    const p_len = (@as(usize, subkey_fixture_keyring[idx + 1]) << 8) |
+        @as(usize, subkey_fixture_keyring[idx + 2]);
+    idx += 3 + p_len;
+    // subkey: 0xB9 || BE16(len) || body
+    try testing.expectEqual(@as(u8, 0xB9), subkey_fixture_keyring[idx]);
+    const s_len = (@as(usize, subkey_fixture_keyring[idx + 1]) << 8) |
+        @as(usize, subkey_fixture_keyring[idx + 2]);
+    idx += 3 + s_len;
+    // We're now at the start of the binding sig packet. Truncate
+    // the blob here to drop it.
+    const trimmed = subkey_fixture_keyring[0..idx];
+
+    const keys = [_][]const u8{trimmed};
+    const status = verifyDetached(
+        testing.allocator,
+        subkey_fixture_sig,
+        subkey_fixture_data,
+        &keys,
+    );
+    try testing.expectEqual(Status.no_key, status);
 }
 
 // =====================================================================
