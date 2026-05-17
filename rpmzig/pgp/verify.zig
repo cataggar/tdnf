@@ -1,24 +1,30 @@
-//! Top-level OpenPGP signature verifier — PRs #5 + #6 of
+//! Top-level OpenPGP signature verifier — PRs #5 + #6 + #9 of
 //! plan-pure-zig-pgp.md.
 //!
 //! Combines `armor` (PR #1), `packet` (PR #2), `pubkey` (PR #3),
 //! `signature` (PR #4) and `keyring` (PR #6) with
-//! `std.crypto.Certificate.rsa` to implement RSA-PKCS#1v1.5
-//! verification of v4 OpenPGP detached signatures.
+//! `std.crypto.Certificate.rsa` and `std.crypto.sign.Ed25519` to
+//! verify v4 OpenPGP detached signatures.
 //!
-//! Scope, narrow by design (per plan section 5 "PR #5" + "PR #6"):
+//! Algorithms wired in so far:
 //!
-//!   * RSA only. ECDSA / Ed25519 / EdDSALegacy land in PRs #8 / #9.
-//!   * SHA-256 + SHA-512 only. SHA-1 stays disabled until a policy
-//!     knob lands (legacy keys only — Sequoia rejects SHA-1 since
-//!     Feb 2023). SHA-384 is unused in practice.
+//!   * RSA-PKCS#1v1.5 + SHA-256 / SHA-512  (PR #5).
+//!   * Ed25519 — both native (algo 27, RFC 9580) and EdDSALegacy
+//!     (algo 22, GnuPG `--openpgp` default) wire formats — with
+//!     SHA-256 or SHA-512 (PR #9).
+//!
+//! Scope notes:
+//!
+//!   * SHA-1 stays disabled until a policy knob lands (legacy keys
+//!     only — Sequoia rejects SHA-1 since Feb 2023). SHA-384 is
+//!     unused in practice.
 //!   * Binary signature type (0x00) only. Subkey-binding (0x18)
 //!     and back-sig (0x19) verification live in `keyring.zig`.
-//!   * Subkey trust is now gated on `keyring.parse` having
-//!     verified the type-0x18 binding signature from the primary
-//!     plus the embedded type-0x19 back-sig from the subkey. A
-//!     subkey grafted onto a legitimate primary blob without a
-//!     valid binding chain is rejected as `.no_key`.
+//!   * Subkey trust is gated on `keyring.parse` having verified
+//!     the type-0x18 binding signature from the primary plus the
+//!     embedded type-0x19 back-sig from the subkey. A subkey
+//!     grafted onto a legitimate primary blob without a valid
+//!     binding chain is rejected as `.no_key`.
 //!
 //! Out-of-scope cases coerce to `.internal`. PR #7 wires this
 //! verifier alongside the gpgme path for a log-only cross-check;
@@ -47,6 +53,20 @@ pub const Status = enum(c_int) {
     internal = 4,
 };
 
+const HashKind = enum { sha256, sha512 };
+
+/// Verify a single OpenPGP detached signature blob over `signed_data`,
+/// against the supplied keyring. Returns a verdict; never raises.
+///
+/// * `sig_pkt_bytes` — the binary OpenPGP Signature packet (Tag 2),
+///   header included. ASCII armor is NOT accepted here (sig packets
+///   embedded in `.rpm` files are always binary). Wrap with
+///   `armor.decodeAny` first if the caller has armored input.
+/// * `signed_data` — the bytes the signature covers, verbatim.
+/// * `key_blobs` — each entry is an OpenPGP public-key blob, armored
+///   or binary; armor is auto-detected. A single blob may contain a
+///   primary key and any number of subkeys; all of them are
+///   considered when looking for the issuer.
 /// Verify a single OpenPGP detached signature blob over `signed_data`,
 /// against the supplied keyring. Returns a verdict; never raises.
 ///
@@ -72,18 +92,17 @@ pub fn verifyDetached(
     const sig = signature.parseBody(first.body) catch return .bad;
     // signature.parseBody enforces v4 already.
 
-    // --- 2. PR #5 scope filter. -------------------------------------
+    // --- 2. Scope filter. -------------------------------------------
     if (sig.sig_type != .binary_document) return .internal;
-    const HashKind = enum { sha256, sha512 };
     const hash_kind: HashKind = switch (sig.hash_algo) {
         .sha256 => .sha256,
         .sha512 => .sha512,
         else => return .internal,
     };
-    const sig_rsa_mpi = switch (sig.material) {
-        .rsa => |m| m,
+    switch (sig.material) {
+        .rsa, .ed25519, .eddsa_legacy => {},
         else => return .internal,
-    };
+    }
 
     // --- 3. Locate the issuer identity. -----------------------------
     const IssuerKind = enum { fpr, kid };
@@ -140,22 +159,22 @@ pub fn verifyDetached(
         }
     }
     const matched_pk = matched orelse return .no_key;
-    const rsa_key = switch (matched_pk.material) {
-        .rsa => |k| k,
-        else => return .internal,
-    };
 
-    // --- 5. Compute the hash hint + digest fast-path. ---------------
+    // --- 5. Compute the hash trailer + digest. ----------------------
     // Hash input (RFC 4880 §5.2.4 v4 detached, sig_type 0x00):
     //   HASH( signed_data || sig.hashed_prefix || 0x04 || 0xFF ||
     //         BE32(sig.hashed_prefix.len) )
     //
-    // We compute the digest twice — once here for the 2-byte hash
-    // hint short-circuit, and once again inside `concatVerify`. The
-    // hint check is cheap (two hash ops are negligible next to a
-    // single modexp) and lets us reject obvious mismatches before
-    // ever touching the RSA core, which is the path attackers care
-    // about.
+    // For Ed25519 / EdDSALegacy we feed the *digest* bytes to
+    // Ed25519's `verify` (per RFC 9580 §5.2.3 / RFC 4880bis: the
+    // OpenPGP-declared hash algo digests the data, then the digest
+    // is fed to the EdDSA primitive — Ed25519 itself then hashes
+    // that with SHA-512 internally). Confirmed against a real gpg
+    // detached sig fixture before commit.
+    //
+    // For RSA-PKCS#1v1.5 we still want the digest available for
+    // the 2-byte hash-hint short-circuit; the heavier
+    // `concatVerify` recomputes the digest internally.
     const prefix_len: u32 = @intCast(sig.hashed_prefix.len);
     const trailer: [6]u8 = .{
         0x04,
@@ -166,29 +185,53 @@ pub fn verifyDetached(
         @intCast(prefix_len & 0xFF),
     };
 
-    const hint_ok = switch (hash_kind) {
+    var digest_buf: [64]u8 = undefined;
+    const digest: []const u8 = switch (hash_kind) {
         .sha256 => blk: {
-            var d: [32]u8 = undefined;
             var h = std.crypto.hash.sha2.Sha256.init(.{});
             h.update(signed_data);
             h.update(sig.hashed_prefix);
             h.update(&trailer);
-            h.final(&d);
-            break :blk d[0] == sig.hash_hint[0] and d[1] == sig.hash_hint[1];
+            h.final(digest_buf[0..32]);
+            break :blk digest_buf[0..32];
         },
         .sha512 => blk: {
-            var d: [64]u8 = undefined;
             var h = std.crypto.hash.sha2.Sha512.init(.{});
             h.update(signed_data);
             h.update(sig.hashed_prefix);
             h.update(&trailer);
-            h.final(&d);
-            break :blk d[0] == sig.hash_hint[0] and d[1] == sig.hash_hint[1];
+            h.final(digest_buf[0..64]);
+            break :blk digest_buf[0..64];
         },
     };
-    if (!hint_ok) return .bad;
+    if (digest[0] != sig.hash_hint[0] or digest[1] != sig.hash_hint[1]) return .bad;
 
-    // --- 6. RSA-PKCS#1v1.5 verify. ----------------------------------
+    // --- 6. Algorithm dispatch. -------------------------------------
+    return switch (matched_pk.material) {
+        .rsa => |rsa_key| verifyRsa(
+            sig,
+            rsa_key,
+            hash_kind,
+            signed_data,
+            &trailer,
+        ),
+        .ed25519 => |ed_key| verifyEd25519(sig, ed_key, digest),
+        .unsupported => .internal,
+    };
+}
+
+fn verifyRsa(
+    sig: signature.Signature,
+    rsa_key: pubkey.RsaKey,
+    hash_kind: HashKind,
+    signed_data: []const u8,
+    trailer: *const [6]u8,
+) Status {
+    const sig_rsa_mpi = switch (sig.material) {
+        .rsa => |m| m,
+        else => return .internal,
+    };
+
     // Build a std.crypto rsa.PublicKey. The MPIs already have leading
     // zero bytes stripped by `packet.readMpi`. fromBytes argument
     // order is (exponent, modulus).
@@ -211,7 +254,7 @@ pub fn verifyDetached(
     const modulus_len = rsa_key.n.bytes.len;
     if (sig_rsa_mpi.bytes.len > modulus_len) return .bad;
 
-    const msg_parts = &[_][]const u8{ signed_data, sig.hashed_prefix, &trailer };
+    const msg_parts = &[_][]const u8{ signed_data, sig.hashed_prefix, trailer };
 
     inline for (.{ 256, 384, 512 }) |comptime_mod_len| {
         if (modulus_len == comptime_mod_len) {
@@ -240,6 +283,48 @@ pub fn verifyDetached(
     }
     // RSA modulus length we don't support (e.g. RSA-1024 or RSA-8192).
     return .no_key;
+}
+
+fn verifyEd25519(
+    sig: signature.Signature,
+    ed_key: pubkey.Ed25519Key,
+    digest: []const u8,
+) Status {
+    const Ed = std.crypto.sign.Ed25519;
+
+    // Marshal the 64-byte (R || S) signature buffer from whichever
+    // wire format the sig packet carried.
+    var sig_bytes: [64]u8 = undefined;
+    switch (sig.material) {
+        .ed25519 => |raw64| sig_bytes = raw64,
+        .eddsa_legacy => |rs| {
+            // EdDSALegacy: MPI(r) || MPI(s) — each MPI may have
+            // had leading zero bytes stripped by `packet.readMpi`,
+            // so left-pad to 32 bytes. A correctly-formed sig
+            // never has more than 32 bytes per component; reject
+            // anything larger as malformed.
+            @memset(&sig_bytes, 0);
+            const r = rs.r.bytes;
+            const s = rs.s.bytes;
+            if (r.len > 32 or s.len > 32) return .bad;
+            @memcpy(sig_bytes[32 - r.len .. 32], r);
+            @memcpy(sig_bytes[64 - s.len .. 64], s);
+        },
+        else => return .internal,
+    }
+
+    // Reject the all-zero public key (point at infinity) up front —
+    // std.crypto would also refuse it but the error path here is
+    // .bad rather than .internal.
+    const pk = Ed.PublicKey.fromBytes(ed_key.point) catch return .bad;
+    const ed_sig = Ed.Signature.fromBytes(sig_bytes);
+
+    // OpenPGP feeds the *digest* of (signed_data || hashed_prefix ||
+    // trailer) to the EdDSA primitive. Ed25519 then hashes the
+    // digest internally (SHA-512 over R || A || msg) as part of its
+    // own verification — there is no double pre-hash from our side.
+    ed_sig.verify(digest, pk) catch return .bad;
+    return .ok;
 }
 
 // =====================================================================
@@ -379,6 +464,146 @@ test "subkey signer when binding sig packet removed → no_key" {
         testing.allocator,
         subkey_fixture_sig,
         subkey_fixture_data,
+        &keys,
+    );
+    try testing.expectEqual(Status.no_key, status);
+}
+
+// =====================================================================
+// PR #9: Ed25519 + EdDSALegacy verification.
+// =====================================================================
+//
+// Three fixture families:
+//
+//   * `eddsa-legacy-{pubkey,sig}.bin` — synthesised via
+//     `gen_ed25519_fixture.py`; covers the GnuPG `--openpgp`-default
+//     wire format (algo 22, OID-prefixed MPI(0x40 || Q), MPI(r) ||
+//     MPI(s) signature).
+//   * `eddsa-legacy-gpg-{pubkey,sig,data}.bin` — generated by
+//     `gpg --quick-gen-key ... ed25519 sign` + `gpg --detach-sign
+//     --digest-algo SHA512`. Pure-Zig verdict here must match gpgme
+//     (which produced and verified these fixtures) — this nails the
+//     OpenPGP-Ed25519 hash interpretation against the canonical
+//     implementation. The matching private key was discarded
+//     immediately after fixture generation.
+//   * `ed25519-native-{pubkey,sig}.bin` — synthesised; covers the
+//     RFC 9580 native form (algo 27, 32-byte raw key, 64-byte raw
+//     sig).
+
+const eddsa_legacy_pubkey = @embedFile("testdata/eddsa-legacy-pubkey.bin");
+const eddsa_legacy_sig = @embedFile("testdata/eddsa-legacy-sig.bin");
+const ed25519_native_pubkey = @embedFile("testdata/ed25519-native-pubkey.bin");
+const ed25519_native_sig = @embedFile("testdata/ed25519-native-sig.bin");
+const ed25519_data = @embedFile("testdata/ed25519-data.bin");
+
+const eddsa_legacy_gpg_pubkey = @embedFile("testdata/eddsa-legacy-gpg-pubkey.bin");
+const eddsa_legacy_gpg_sig = @embedFile("testdata/eddsa-legacy-gpg-sig.bin");
+const eddsa_legacy_gpg_data = @embedFile("testdata/eddsa-legacy-gpg-data.bin");
+
+test "EdDSALegacy (algo 22) happy path" {
+    const keys = [_][]const u8{eddsa_legacy_pubkey};
+    const status = verifyDetached(
+        testing.allocator,
+        eddsa_legacy_sig,
+        ed25519_data,
+        &keys,
+    );
+    try testing.expectEqual(Status.ok, status);
+}
+
+test "EdDSALegacy: real gpg-signed fixture verifies (gpgme cross-check)" {
+    // This fixture was produced by `gpg --detach-sign --digest-algo
+    // SHA512` and verified `Good signature` by gpg itself. Our
+    // pure-Zig verdict must agree.
+    const keys = [_][]const u8{eddsa_legacy_gpg_pubkey};
+    const status = verifyDetached(
+        testing.allocator,
+        eddsa_legacy_gpg_sig,
+        eddsa_legacy_gpg_data,
+        &keys,
+    );
+    try testing.expectEqual(Status.ok, status);
+}
+
+test "native Ed25519 (algo 27) happy path" {
+    const keys = [_][]const u8{ed25519_native_pubkey};
+    const status = verifyDetached(
+        testing.allocator,
+        ed25519_native_sig,
+        ed25519_data,
+        &keys,
+    );
+    try testing.expectEqual(Status.ok, status);
+}
+
+test "tampered Ed25519 signature byte → bad" {
+    var bad_sig = try testing.allocator.dupe(u8, eddsa_legacy_gpg_sig);
+    defer testing.allocator.free(bad_sig);
+    // Flip a byte well inside the sig material (last ~64 bytes of
+    // the packet). The hash hint is upstream of this, so the hint
+    // check still passes — we want to land in the EdDSA verifier
+    // and have it reject.
+    bad_sig[bad_sig.len - 8] ^= 0xFF;
+    const keys = [_][]const u8{eddsa_legacy_gpg_pubkey};
+    const status = verifyDetached(
+        testing.allocator,
+        bad_sig,
+        eddsa_legacy_gpg_data,
+        &keys,
+    );
+    try testing.expectEqual(Status.bad, status);
+}
+
+test "tampered native Ed25519 signature byte → bad" {
+    var bad_sig = try testing.allocator.dupe(u8, ed25519_native_sig);
+    defer testing.allocator.free(bad_sig);
+    // Last byte of the packet lives inside the raw 64-byte (R || S)
+    // sig material (no MPI wrapping for algo 27).
+    bad_sig[bad_sig.len - 1] ^= 0x01;
+    const keys = [_][]const u8{ed25519_native_pubkey};
+    const status = verifyDetached(
+        testing.allocator,
+        bad_sig,
+        ed25519_data,
+        &keys,
+    );
+    try testing.expectEqual(Status.bad, status);
+}
+
+test "tampered Ed25519 signed data → bad" {
+    var tampered = try testing.allocator.dupe(u8, ed25519_data);
+    defer testing.allocator.free(tampered);
+    tampered[0] ^= 0x01;
+    const keys = [_][]const u8{eddsa_legacy_pubkey};
+    const status = verifyDetached(
+        testing.allocator,
+        eddsa_legacy_sig,
+        tampered,
+        &keys,
+    );
+    try testing.expectEqual(Status.bad, status);
+}
+
+test "Ed25519 sig with wrong key in keyring → no_key" {
+    // Use the native-form pubkey to look up an EdDSALegacy sig.
+    // The fingerprints differ (different OpenPGP framing), so no
+    // entry matches the issuer.
+    const keys = [_][]const u8{ed25519_native_pubkey};
+    const status = verifyDetached(
+        testing.allocator,
+        eddsa_legacy_sig,
+        ed25519_data,
+        &keys,
+    );
+    try testing.expectEqual(Status.no_key, status);
+}
+
+test "Ed25519 sig with empty keyring → no_key" {
+    const keys = [_][]const u8{};
+    const status = verifyDetached(
+        testing.allocator,
+        eddsa_legacy_sig,
+        ed25519_data,
         &keys,
     );
     try testing.expectEqual(Status.no_key, status);

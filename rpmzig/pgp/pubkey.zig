@@ -17,8 +17,15 @@
 //!   RSA (1, 2, 3)    : MPI(n), MPI(e)                        -- parsed
 //!   DSA (17)         : MPI(p), MPI(q), MPI(g), MPI(y)        -- skipped, marked unsupported
 //!   ECDSA (19)       : 1-octet OID len, OID, MPI(Q)          -- skipped, marked unsupported
-//!   EdDSALegacy (22) : 1-octet OID len, OID, MPI(Q w/ 0x40)  -- skipped, marked unsupported
-//!   Ed25519 (27)     : 32 raw octets                         -- skipped, marked unsupported
+//!   EdDSALegacy (22) : 1-octet OID len, OID, MPI(Q w/ 0x40)  -- parsed (PR #9)
+//!   Ed25519 (27)     : 32 raw octets                         -- parsed (PR #9)
+//!
+//! EdDSALegacy (22) and native Ed25519 (27) differ only in wire
+//! framing; the cryptographic material is the same 32-byte Ed25519
+//! public key. Both formats collapse onto a single
+//! `KeyMaterial.ed25519` variant — the original algorithm ID is
+//! still surfaced via `PublicKey.algo` for callers that need to
+//! drive sig-side parsing differently.
 //!
 //! Unknown algorithms are surfaced as `KeyMaterial.unsupported` so a
 //! keyring containing a mix of algorithms parses without failing the
@@ -59,8 +66,23 @@ pub const RsaKey = struct {
     e: packet.Mpi,
 };
 
+/// Ed25519 public-key material — 32 raw octets of the curve point.
+///
+/// Both EdDSALegacy (algo 22, OID-prefixed MPI(0x40 || Q)) and native
+/// Ed25519 (algo 27, raw 32 octets) collapse onto this. Sig-side
+/// dispatch differs (see `signature.SigMaterial`); the cryptographic
+/// material does not.
+pub const Ed25519Key = struct {
+    point: [32]u8,
+};
+
+/// OID for ed25519 used by EdDSALegacy (RFC 4880bis):
+/// 1.3.6.1.4.1.11591.15.1 — `2B 06 01 04 01 DA 47 0F 01` (9 octets).
+pub const ED25519_OID = [_]u8{ 0x2B, 0x06, 0x01, 0x04, 0x01, 0xDA, 0x47, 0x0F, 0x01 };
+
 pub const KeyMaterial = union(enum) {
     rsa: RsaKey,
+    ed25519: Ed25519Key,
     unsupported: Algorithm,
 };
 
@@ -109,6 +131,25 @@ pub fn parseBody(body: []const u8) ParseError!PublicKey {
             const e = try packet.readMpi(&r);
             break :blk .{ .rsa = .{ .n = n, .e = e } };
         },
+        .eddsa_legacy => blk: {
+            if (parseEddsaLegacy(&r)) |k| {
+                break :blk .{ .ed25519 = k };
+            } else |_| {
+                // Malformed OID / unexpected length / non-ed25519 OID.
+                // Leave the reader where it was on entry — we don't
+                // know the framing once the OID disagreed — but we
+                // still surface the packet as `unsupported` rather
+                // than failing the whole keyring walk. The caller
+                // can revisit `PublicKey.body` for raw access.
+                break :blk .{ .unsupported = algo };
+            }
+        },
+        .ed25519 => blk: {
+            const raw = try r.take(32);
+            var k: Ed25519Key = .{ .point = undefined };
+            @memcpy(&k.point, raw);
+            break :blk .{ .ed25519 = k };
+        },
         else => blk: {
             try skipAlgorithmMaterial(&r, algo);
             break :blk .{ .unsupported = algo };
@@ -138,17 +179,58 @@ fn skipAlgorithmMaterial(r: *packet.Reader, algo: Algorithm) ParseError!void {
             _ = try packet.readMpi(r);
             _ = try packet.readMpi(r);
         },
-        .ecdsa, .eddsa_legacy => {
+        .ecdsa => {
             const oid_len = try r.readU8();
             _ = try r.take(oid_len);
             _ = try packet.readMpi(r);
         },
-        .ed25519 => {
-            _ = try r.take(32);
-        },
-        .rsa_sign_and_encrypt, .rsa_encrypt_only, .rsa_sign_only => unreachable,
+        .rsa_sign_and_encrypt,
+        .rsa_encrypt_only,
+        .rsa_sign_only,
+        .eddsa_legacy,
+        .ed25519,
+        => unreachable,
         _ => {},
     }
+}
+
+const EddsaLegacyError = error{
+    UnsupportedOid,
+    UnsupportedPointPrefix,
+    UnsupportedPointLength,
+} || packet.ReaderError || packet.MpiError;
+
+/// Parse the EdDSALegacy (algo 22) public-key material:
+///   1 octet  OID length (= 9)
+///   9 octets OID = ED25519_OID
+///   MPI(Q)   where Q = 0x40 || 32 raw octets (RFC 6637 §9, RFC 4880bis)
+///
+/// Returns the 32-byte Ed25519 public key. The leading 0x40 byte
+/// marks the point as "native EdDSA" — uncompressed-but-with-y-only
+/// encoding. The MPI strip in `packet.readMpi` removes leading zero
+/// bytes; for a 263-bit MPI the top byte is 0x40 (high bit clear,
+/// but second-highest set) so no leading zero is ever produced.
+/// We defensively left-pad in case some non-standard producer emits
+/// a shorter MPI.
+fn parseEddsaLegacy(r: *packet.Reader) EddsaLegacyError!Ed25519Key {
+    const oid_len = try r.readU8();
+    if (oid_len != ED25519_OID.len) return error.UnsupportedOid;
+    const oid = try r.take(oid_len);
+    if (!std.mem.eql(u8, oid, &ED25519_OID)) return error.UnsupportedOid;
+
+    const q = try packet.readMpi(r);
+    if (q.bytes.len == 0) return error.UnsupportedPointLength;
+    if (q.bytes[0] != 0x40) return error.UnsupportedPointPrefix;
+
+    // After the 0x40 prefix come the 32 raw octets of the public key.
+    const tail = q.bytes[1..];
+    if (tail.len > 32) return error.UnsupportedPointLength;
+    var key: Ed25519Key = .{ .point = @splat(0) };
+    // Left-pad with zeros if the MPI stripped any leading zeros from
+    // the y-coordinate. Producers shouldn't do this (the 0x40 prefix
+    // keeps the MPI's MSB nonzero), but be defensive.
+    @memcpy(key.point[32 - tail.len ..], tail);
+    return key;
 }
 
 /// Compute the v4 OpenPGP fingerprint over the given Public-Key
@@ -306,7 +388,7 @@ test "ECDSA key parses as Unsupported (not an error)" {
     }
 }
 
-test "Ed25519 key parses as Unsupported with 32 raw octets" {
+test "Ed25519 (native, algo 27) parses to 32-byte point" {
     var body: [1 + 4 + 1 + 32]u8 = undefined;
     body[0] = 0x04;
     @memset(body[1..5], 0);
@@ -316,7 +398,78 @@ test "Ed25519 key parses as Unsupported with 32 raw octets" {
     const pk = try parseBody(&body);
     try testing.expectEqual(Algorithm.ed25519, pk.algo);
     switch (pk.material) {
-        .unsupported => |a| try testing.expectEqual(Algorithm.ed25519, a),
+        .ed25519 => |k| {
+            var expected: [32]u8 = @splat(0xDD);
+            try testing.expectEqualSlices(u8, &expected, &k.point);
+        },
+        else => return error.TestExpectedEd25519Material,
+    }
+}
+
+test "EdDSALegacy (algo 22) parses to 32-byte point" {
+    // v4 || BE32(0) || algo=22 || OID len 9 || ED25519_OID
+    //    || MPI(0x40 || 32 raw bytes) — bit length 263.
+    const expected_point: [32]u8 = @splat(0xC3);
+    var body: [1 + 4 + 1 + 1 + 9 + 2 + 33]u8 = undefined;
+    body[0] = 0x04;
+    @memset(body[1..5], 0);
+    body[5] = 22;
+    body[6] = ED25519_OID.len;
+    @memcpy(body[7..16], &ED25519_OID);
+    // MPI(Q) with Q = 0x40 || 0xC3 * 32. Bit length = 263.
+    body[16] = 0x01;
+    body[17] = 0x07;
+    body[18] = 0x40;
+    @memcpy(body[19..51], &expected_point);
+
+    const pk = try parseBody(&body);
+    try testing.expectEqual(Algorithm.eddsa_legacy, pk.algo);
+    switch (pk.material) {
+        .ed25519 => |k| {
+            try testing.expectEqualSlices(u8, &expected_point, &k.point);
+        },
+        else => return error.TestExpectedEd25519Material,
+    }
+}
+
+test "EdDSALegacy with wrong OID surfaces as Unsupported" {
+    // OID length is 9 but bytes don't match the ed25519 OID — e.g.
+    // the NIST P-256 OID padded out to 9 octets.
+    var body: [1 + 4 + 1 + 1 + 9 + 2 + 33]u8 = undefined;
+    body[0] = 0x04;
+    @memset(body[1..5], 0);
+    body[5] = 22;
+    body[6] = 9;
+    @memset(body[7..16], 0xEE);
+    body[16] = 0x01;
+    body[17] = 0x07;
+    body[18] = 0x40;
+    @memset(body[19..51], 0xDD);
+
+    const pk = try parseBody(&body);
+    try testing.expectEqual(Algorithm.eddsa_legacy, pk.algo);
+    switch (pk.material) {
+        .unsupported => |a| try testing.expectEqual(Algorithm.eddsa_legacy, a),
+        else => return error.TestExpectedUnsupportedMaterial,
+    }
+}
+
+test "EdDSALegacy missing 0x40 point prefix surfaces as Unsupported" {
+    var body: [1 + 4 + 1 + 1 + 9 + 2 + 33]u8 = undefined;
+    body[0] = 0x04;
+    @memset(body[1..5], 0);
+    body[5] = 22;
+    body[6] = ED25519_OID.len;
+    @memcpy(body[7..16], &ED25519_OID);
+    // MPI with Q[0] != 0x40 — invalid native-point encoding.
+    body[16] = 0x01;
+    body[17] = 0x07;
+    body[18] = 0x04;
+    @memset(body[19..51], 0xDD);
+
+    const pk = try parseBody(&body);
+    switch (pk.material) {
+        .unsupported => |a| try testing.expectEqual(Algorithm.eddsa_legacy, a),
         else => return error.TestExpectedUnsupportedMaterial,
     }
 }
