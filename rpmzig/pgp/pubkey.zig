@@ -16,7 +16,11 @@
 //!
 //!   RSA (1, 2, 3)    : MPI(n), MPI(e)                        -- parsed
 //!   DSA (17)         : MPI(p), MPI(q), MPI(g), MPI(y)        -- skipped, marked unsupported
-//!   ECDSA (19)       : 1-octet OID len, OID, MPI(Q)          -- skipped, marked unsupported
+//! Algorithm-specific key material handled here:
+//!
+//!   RSA (1, 2, 3)    : MPI(n), MPI(e)                        -- parsed
+//!   DSA (17)         : MPI(p), MPI(q), MPI(g), MPI(y)        -- skipped, marked unsupported
+//!   ECDSA (19)       : 1-octet OID len, OID, MPI(Q)          -- parsed (P-256, P-384)
 //!   EdDSALegacy (22) : 1-octet OID len, OID, MPI(Q w/ 0x40)  -- parsed (PR #9)
 //!   Ed25519 (27)     : 32 raw octets                         -- parsed (PR #9)
 //!
@@ -27,10 +31,11 @@
 //! still surfaced via `PublicKey.algo` for callers that need to
 //! drive sig-side parsing differently.
 //!
-//! Unknown algorithms are surfaced as `KeyMaterial.unsupported` so a
-//! keyring containing a mix of algorithms parses without failing the
-//! whole walk. Callers that need the unsupported material can revisit
-//! `PublicKey.body` directly.
+//! Unknown algorithms — and ECDSA on a non-{P-256, P-384} curve, or
+//! with a malformed point — are surfaced as `KeyMaterial.unsupported`
+//! so a keyring containing a mix of algorithms parses without failing
+//! the whole walk. Callers that need the unsupported material can
+//! revisit `PublicKey.body` directly.
 //!
 //! Only v4 keys are accepted. v6 (RFC 9580 §5.5.2) lands in PR #9 if
 //! any distro starts shipping v6 signatures.
@@ -80,11 +85,32 @@ pub const Ed25519Key = struct {
 /// 1.3.6.1.4.1.11591.15.1 — `2B 06 01 04 01 DA 47 0F 01` (9 octets).
 pub const ED25519_OID = [_]u8{ 0x2B, 0x06, 0x01, 0x04, 0x01, 0xDA, 0x47, 0x0F, 0x01 };
 
+pub const EcCurve = enum { p256, p384 };
+
+pub const EcdsaKey = struct {
+    curve: EcCurve,
+    /// Q point in SEC1 uncompressed form: 0x04 || x || y. Length is
+    /// 65 bytes for P-256 (32-byte coordinates) or 97 bytes for
+    /// P-384 (48-byte coordinates). Aliases into the input body
+    /// slice via the MPI reader.
+    point: []const u8,
+};
+
 pub const KeyMaterial = union(enum) {
     rsa: RsaKey,
+    ecdsa: EcdsaKey,
     ed25519: Ed25519Key,
     unsupported: Algorithm,
 };
+
+/// ECDSA NIST P-256 curve OID — `1.2.840.10045.3.1.7` encoded as
+/// raw DER OID octets (the value bytes only, without the leading
+/// `06 LL` length envelope).
+pub const OID_NIST_P256 = [_]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07 };
+
+/// ECDSA NIST P-384 curve OID — `1.3.132.0.34` encoded as raw DER
+/// OID octets (no length envelope).
+pub const OID_NIST_P384 = [_]u8{ 0x2B, 0x81, 0x04, 0x00, 0x22 };
 
 pub const PublicKey = struct {
     version: u8,
@@ -150,6 +176,10 @@ pub fn parseBody(body: []const u8) ParseError!PublicKey {
             @memcpy(&k.point, raw);
             break :blk .{ .ed25519 = k };
         },
+        .ecdsa => blk: {
+            const k = try parseEcdsaMaterial(&r);
+            break :blk if (k) |kk| .{ .ecdsa = kk } else .{ .unsupported = algo };
+        },
         else => blk: {
             try skipAlgorithmMaterial(&r, algo);
             break :blk .{ .unsupported = algo };
@@ -179,16 +209,12 @@ fn skipAlgorithmMaterial(r: *packet.Reader, algo: Algorithm) ParseError!void {
             _ = try packet.readMpi(r);
             _ = try packet.readMpi(r);
         },
-        .ecdsa => {
-            const oid_len = try r.readU8();
-            _ = try r.take(oid_len);
-            _ = try packet.readMpi(r);
-        },
         .rsa_sign_and_encrypt,
         .rsa_encrypt_only,
         .rsa_sign_only,
         .eddsa_legacy,
         .ed25519,
+        .ecdsa,
         => unreachable,
         _ => {},
     }
@@ -231,6 +257,50 @@ fn parseEddsaLegacy(r: *packet.Reader) EddsaLegacyError!Ed25519Key {
     // keeps the MPI's MSB nonzero), but be defensive.
     @memcpy(key.point[32 - tail.len ..], tail);
     return key;
+}
+
+/// Parse ECDSA-specific key material (RFC 4880 §5.5.2 / RFC 6637):
+///
+///   1 octet   OID length
+///   N octets  OID (raw DER value bytes — no `06 LL` envelope)
+///   MPI(Q)    where Q is the EC point in SEC1 uncompressed form:
+///             0x04 || x || y, each coord big-endian.
+///
+/// Returns `null` (with the reader advanced past the material) when
+/// the curve is one we don't support or the point body is the wrong
+/// shape. Genuine truncation errors propagate. The leading 0x04 byte
+/// of SEC1 uncompressed encoding has its high bit clear, so
+/// `packet.readMpi`'s leading-zero strip is a no-op and the MPI
+/// payload comes back at the full curve length — see the inline
+/// assertion below.
+fn parseEcdsaMaterial(r: *packet.Reader) ParseError!?EcdsaKey {
+    const oid_len = try r.readU8();
+    const oid = try r.take(oid_len);
+
+    const curve: EcCurve = if (std.mem.eql(u8, oid, &OID_NIST_P256))
+        .p256
+    else if (std.mem.eql(u8, oid, &OID_NIST_P384))
+        .p384
+    else {
+        // Unknown curve OID — drain the MPI so the reader is left
+        // in a known state, then surface as unsupported.
+        _ = try packet.readMpi(r);
+        return null;
+    };
+
+    const q = try packet.readMpi(r);
+    const expected_len: usize = switch (curve) {
+        .p256 => 65,
+        .p384 => 97,
+    };
+    // SEC1 uncompressed point must be exactly the curve's expected
+    // length and start with 0x04. (Compressed-point encoding 0x02 /
+    // 0x03 is permitted by RFC 6637 but RPM signers never emit it,
+    // and `std.crypto.sign.ecdsa` accepts uncompressed only.)
+    if (q.bytes.len != expected_len) return null;
+    if (q.bytes[0] != 0x04) return null;
+
+    return EcdsaKey{ .curve = curve, .point = q.bytes };
 }
 
 /// Compute the v4 OpenPGP fingerprint over the given Public-Key
@@ -365,16 +435,16 @@ test "truncated RSA modulus rejected" {
     try testing.expectError(error.TruncatedMpi, parseBody(&body));
 }
 
-test "ECDSA key parses as Unsupported (not an error)" {
+test "parse ECDSA P-256 public-key body" {
     // v4 || BE32(0) || algo=19 || OID len 8 || NIST P-256 OID || MPI(Q)
-    const nistp256_oid = [_]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07 };
     var body: [1 + 4 + 1 + 1 + 8 + 2 + 65]u8 = undefined;
     body[0] = 0x04;
     @memset(body[1..5], 0);
     body[5] = 19;
-    body[6] = nistp256_oid.len;
-    @memcpy(body[7..15], &nistp256_oid);
+    body[6] = OID_NIST_P256.len;
+    @memcpy(body[7..15], &OID_NIST_P256);
     // MPI(Q): 515 bits, 65 bytes (0x04 || X || Y for an uncompressed P-256 point).
+    // bit_length = 8*65 - 5_leading_zero_bits_in_0x04 = 515 = 0x0203.
     body[15] = 0x02;
     body[16] = 0x03;
     body[17] = 0x04;
@@ -382,6 +452,83 @@ test "ECDSA key parses as Unsupported (not an error)" {
 
     const pk = try parseBody(&body);
     try testing.expectEqual(Algorithm.ecdsa, pk.algo);
+    switch (pk.material) {
+        .ecdsa => |ec| {
+            try testing.expectEqual(EcCurve.p256, ec.curve);
+            try testing.expectEqual(@as(usize, 65), ec.point.len);
+            try testing.expectEqual(@as(u8, 0x04), ec.point[0]);
+        },
+        else => return error.TestExpectedEcdsaMaterial,
+    }
+}
+
+test "parse ECDSA P-384 public-key body" {
+    // v4 || BE32(0) || algo=19 || OID len 5 || NIST P-384 OID || MPI(Q)
+    var body: [1 + 4 + 1 + 1 + 5 + 2 + 97]u8 = undefined;
+    body[0] = 0x04;
+    @memset(body[1..5], 0);
+    body[5] = 19;
+    body[6] = OID_NIST_P384.len;
+    @memcpy(body[7..12], &OID_NIST_P384);
+    // MPI(Q): 771 bits = 8*97 - 5 leading zero bits in 0x04. 0x303.
+    body[12] = 0x03;
+    body[13] = 0x03;
+    body[14] = 0x04;
+    @memset(body[15..111], 0xDE);
+
+    const pk = try parseBody(&body);
+    try testing.expectEqual(Algorithm.ecdsa, pk.algo);
+    switch (pk.material) {
+        .ecdsa => |ec| {
+            try testing.expectEqual(EcCurve.p384, ec.curve);
+            try testing.expectEqual(@as(usize, 97), ec.point.len);
+            try testing.expectEqual(@as(u8, 0x04), ec.point[0]);
+        },
+        else => return error.TestExpectedEcdsaMaterial,
+    }
+}
+
+test "ECDSA on unsupported curve OID is surfaced as Unsupported" {
+    // Use the brainpoolP256r1 OID (1.3.36.3.3.2.8.1.1.7), which is
+    // a real curve we don't accept.
+    const brainpool_oid = [_]u8{ 0x2B, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x07 };
+    var body: [1 + 4 + 1 + 1 + brainpool_oid.len + 2 + 65]u8 = undefined;
+    body[0] = 0x04;
+    @memset(body[1..5], 0);
+    body[5] = 19;
+    body[6] = brainpool_oid.len;
+    @memcpy(body[7 .. 7 + brainpool_oid.len], &brainpool_oid);
+    const mpi_off = 7 + brainpool_oid.len;
+    body[mpi_off] = 0x02;
+    body[mpi_off + 1] = 0x03;
+    body[mpi_off + 2] = 0x04;
+    @memset(body[mpi_off + 3 ..], 0xCC);
+
+    const pk = try parseBody(&body);
+    switch (pk.material) {
+        .unsupported => |a| try testing.expectEqual(Algorithm.ecdsa, a),
+        else => return error.TestExpectedUnsupportedMaterial,
+    }
+}
+
+test "ECDSA with malformed point (wrong length) is surfaced as Unsupported" {
+    // P-256 OID but a 33-byte point — neither uncompressed (65) nor
+    // compressed (33 with leading 0x02/0x03 starts with 0x04 — but
+    // we explicitly reject anything other than the uncompressed
+    // length for the curve).
+    var body: [1 + 4 + 1 + 1 + 8 + 2 + 33]u8 = undefined;
+    body[0] = 0x04;
+    @memset(body[1..5], 0);
+    body[5] = 19;
+    body[6] = OID_NIST_P256.len;
+    @memcpy(body[7..15], &OID_NIST_P256);
+    // MPI(Q): bit_length 263 = 0x0107, 33 bytes payload.
+    body[15] = 0x01;
+    body[16] = 0x07;
+    body[17] = 0x04;
+    @memset(body[18..50], 0xBB);
+
+    const pk = try parseBody(&body);
     switch (pk.material) {
         .unsupported => |a| try testing.expectEqual(Algorithm.ecdsa, a),
         else => return error.TestExpectedUnsupportedMaterial,
