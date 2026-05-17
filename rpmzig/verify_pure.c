@@ -1,0 +1,59 @@
+/*
+ * Pure-Zig signature verifier glue (PR #5 of plan-pure-zig-pgp.md).
+ *
+ * Bridges the C-side `tdnf_rpm_file` to the Zig-side
+ * `rpmzig_verify_detached` (declared in pgp/verify.zig via `export
+ * fn`). Stores no state, holds no gpgme handle — `<gpgme.h>` is
+ * intentionally absent so this file can be compiled into builds that
+ * have no gpgme available.
+ *
+ * Status codes returned via *out_status are the same
+ * TDNF_RPMZIG_VERIFY_* set used by the gpgme path; the
+ * GPGME_ERROR=4 slot doubles as the pure-Zig path's "internal
+ * error" until PR #6+ reduce the unsupported-input surface to zero.
+ */
+
+#include <stdio.h>
+#include <string.h>
+
+#include "rpmdb.h"
+#include "verify.h"
+
+/* Declared in pgp/verify.zig via `export fn`. */
+extern int rpmzig_verify_detached(
+    const unsigned char *sig_bytes, size_t sig_len,
+    const unsigned char *signed_bytes, size_t signed_len,
+    const void *const *key_blobs, const size_t *key_lens, size_t key_count);
+
+int tdnf_rpmzig_verify_pure(
+    tdnf_rpm_file *fh,
+    const void *const *key_blobs,
+    const size_t *key_lens,
+    size_t key_count,
+    int *out_status)
+{
+    const unsigned char *sig_bytes = NULL;
+    size_t sig_len = 0;
+    const unsigned char *signed_bytes = NULL;
+    size_t signed_len = 0;
+    int rc = 0;
+    int status = 0;
+
+    if (!fh || !out_status) return -1;
+    *out_status = TDNF_RPMZIG_VERIFY_GPGME_ERROR;
+
+    rc = tdnf_rpm_file_signed_range(fh,
+        &sig_bytes, &sig_len,
+        &signed_bytes, &signed_len);
+    if (rc != 0) {
+        *out_status = TDNF_RPMZIG_VERIFY_NO_SIG;
+        return 1;
+    }
+
+    status = rpmzig_verify_detached(
+        sig_bytes, sig_len,
+        signed_bytes, signed_len,
+        key_blobs, key_lens, key_count);
+    *out_status = status;
+    return status == TDNF_RPMZIG_VERIFY_OK ? 0 : 1;
+}

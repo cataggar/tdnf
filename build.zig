@@ -403,10 +403,11 @@ pub fn build(b: *Build) void {
         b.getInstallStep().dependOn(&install.step);
     }
 
-    // tdnf-rpm-verify: smoke-test exe for the gpgme-backed
-    // signature verifier (T3 PR #1). verify.c uses the gpgme C API
-    // directly; it lives in the consuming binary rather than in
-    // rpmzig_lib so the gpgme dep is contained.
+    // tdnf-rpm-verify: smoke-test exe for both signature verifier
+    // paths — the gpgme-backed one (T3 PR #1) and the pure-Zig one
+    // (plan-pure-zig-pgp.md PR #5). `--pure` on the command line
+    // selects the latter; without it the legacy gpgme path runs so
+    // the two can be cross-checked against the same input.
     {
         const mod = b.createModule(.{
             .target = target,
@@ -417,7 +418,7 @@ pub fn build(b: *Build) void {
         mod.addIncludePath(b.path("rpmzig"));
         mod.addCSourceFiles(.{
             .root = b.path("rpmzig"),
-            .files = &.{ "verify_main.c", "verify.c" },
+            .files = &.{ "verify_main.c", "verify.c", "verify_pure.c" },
             .flags = &tdnf_cflags,
         });
         mod.linkLibrary(rpmzig_lib);
@@ -462,7 +463,11 @@ pub fn build(b: *Build) void {
     if (rpmzig_verify) {
         // Cross-check shim + the verify.c verifier itself. Pulled
         // into libtdnf only on this build flag so the gpgme runtime
-        // dep stays opt-in.
+        // dep stays opt-in. The pure-Zig glue (verify_pure.c) ships
+        // alongside it — it has no gpgme dependency of its own but
+        // is gated behind the same flag for now; PR #11 of
+        // plan-pure-zig-pgp.md will introduce -Drpmzig-verify-pure-zig
+        // to flip it on independently.
         tdnf_so_mod.addCSourceFiles(.{
             .root = b.path("client"),
             .files = &.{"gpgcheck_zig.c"},
@@ -470,7 +475,7 @@ pub fn build(b: *Build) void {
         });
         tdnf_so_mod.addCSourceFiles(.{
             .root = b.path("rpmzig"),
-            .files = &.{"verify.c"},
+            .files = &.{ "verify.c", "verify_pure.c" },
             .flags = &tdnf_cflags,
         });
     }
