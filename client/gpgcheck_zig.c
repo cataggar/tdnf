@@ -2,49 +2,35 @@
  * rpmzig primary signature verifier for TDNFGPGCheckPackage.
  *
  * Compiled into libtdnf only when build.zig is invoked with
- * -Drpmzig-verify=true (defines TDNF_RPMZIG_VERIFY). When the
- * macro is unset this file is not part of the build and libtdnf
- * gains no new dependencies.
+ * -Drpmzig-verify=true or -Drpmzig-verify-pure-zig=true (both
+ * define TDNF_RPMZIG_VERIFY). When neither flag is set this file
+ * is not part of the build and libtdnf gains no new dependencies.
  *
  * Under the flag, this function REPLACES the librpm
- * rpmVerifySignatures path (TDNFGPGCheck) — rpmzig + gpgme is
- * the sole signature verifier on the install path. The rpmts is
- * separately set to RPMVSF_MASK_NOSIGNATURES so rpmReadPackageFile
- * runs as a header-only reader.
+ * rpmVerifySignatures path (TDNFGPGCheck) — rpmzig is the sole
+ * signature verifier on the install path. The rpmts is separately
+ * set to RPMVSF_MASK_NOSIGNATURES so rpmReadPackageFile runs as a
+ * header-only reader.
  *
- * Trust set:
+ * Backend selection (compile-time, no runtime branching):
+ *
+ *   TDNF_RPMZIG_VERIFY (default rpmzig build)
+ *       Dispatches to tdnf_rpmzig_verify_with_keys (gpgme backend
+ *       in rpmzig/verify.c). libtdnf links libgpgme.so.11.
+ *
+ *   TDNF_RPMZIG_VERIFY_PURE_ZIG (plan-pure-zig-pgp.md PR #11)
+ *       Dispatches to tdnf_rpmzig_verify_pure (pure-Zig backend in
+ *       rpmzig/verify_pure.c plus rpmzig/pgp). verify.c is
+ *       excluded from the build; libtdnf does NOT link libgpgme,
+ *       libgpg-error, or libassuan. This is the configuration
+ *       documented in plan acceptance #3.
+ *
+ * Trust set (both backends):
  *   - every gpg-pubkey-* installed in the rpmdb (the same keyring
  *     'rpm --import' / TDNFImportGPGKeyFile build up over time)
  *   - the fresh key tdnf just fetched for this repo
  *
  * The status codes match TDNF_RPMZIG_VERIFY_* from verify.h.
- *
- * When -Drpmzig-verify-pure-zig=true is *also* set (defines
- * TDNF_RPMZIG_VERIFY_PURE_ZIG), the pure-Zig verifier
- * tdnf_rpmzig_verify_pure runs alongside the gpgme path with the
- * same keyring. The gpgme verdict remains authoritative, but the
- * cross-check is now strict (plan-pure-zig-pgp.md PR #10): a
- * single divergence between the two verdicts is escalated to a
- * hard error by forcing *out_status to TDNF_RPMZIG_VERIFY_BAD,
- * which the caller in client/gpgcheck.c surfaces as
- * ERROR_TDNF_RPM_GPG_NO_MATCH and refuses to install the package.
- * The soak period (PR #7's log-only behaviour) is over. PR #11
- * flips pure-Zig to primary and drops the gpgme link entirely.
- *
- * This mirrors the log-to-error promotion the librpm-replacement
- * plan applied to its own rpmzig+librpm cross-check in T3 PR #4
- * (commit 0d3ed83).
- *
- * Manual cross-check (until the pytest path adds a parametrize):
- *
- *   zig build -Drpmzig-verify-pure-zig=true install --prefix ./out
- *   sudo LD_LIBRARY_PATH=./out/lib ./out/bin/tdnf install -y <pkg> \
- *       2>&1 | grep rpmzig-pure-zig
- *
- * On agreement, every fresh-key install prints one
- * `rpmzig-pure-zig: agrees ...` line. On disagreement the install
- * aborts with `rpmzig-pure-zig: DISAGREEMENT ...` followed by the
- * usual ERROR_TDNF_RPM_GPG_NO_MATCH path from gpgcheck.c.
  */
 
 #include <stdio.h>
@@ -163,36 +149,14 @@ int TDNFRpmzigVerify(
     lens[total_keys] = fresh_key_len;
     total_keys++;
 
-    (void)tdnf_rpmzig_verify_with_keys(fh, blobs, lens, total_keys, &status);
-
 #ifdef TDNF_RPMZIG_VERIFY_PURE_ZIG
-    /* Strict cross-check: pure-Zig verifier must agree with the
-     * gpgme path. Same fh + same in-memory keyring. The soak
-     * period (PR #7's log-only behaviour) is over — any divergence
-     * is treated as a hard failure. We override `status` so the
-     * caller in client/gpgcheck.c takes the existing non-OK branch
-     * and raises ERROR_TDNF_RPM_GPG_NO_MATCH, refusing the install.
-     * gpgme remains authoritative on agreement; PR #11 flips
-     * pure-Zig to primary and drops the gpgme link. */
-    {
-        const char *slash = strrchr(pkg_path, '/');
-        const char *pkg_name = slash ? slash + 1 : pkg_path;
-        int pure_status = TDNF_RPMZIG_VERIFY_GPGME_ERROR;
-        (void)tdnf_rpmzig_verify_pure(
-            fh, blobs, lens, total_keys, &pure_status);
-        if (pure_status != status) {
-            fprintf(stderr,
-                "rpmzig-pure-zig: DISAGREEMENT vs gpgme "
-                "(verifier mismatch is a hard error) for %s: "
-                "pure=%d gpgme=%d\n",
-                pkg_name, pure_status, status);
-            status = TDNF_RPMZIG_VERIFY_BAD;
-        } else {
-            fprintf(stderr,
-                "rpmzig-pure-zig: agrees with gpgme (status=%d) for %s\n",
-                pure_status, pkg_name);
-        }
-    }
+    /* Pure-Zig path (plan-pure-zig-pgp.md PR #11): the gpgme
+     * backend is not compiled into this build; route straight to
+     * tdnf_rpmzig_verify_pure. Same keyring, same status codes. */
+    (void)tdnf_rpmzig_verify_pure(fh, blobs, lens, total_keys, &status);
+#else
+    /* gpgme backend (default rpmzig build). */
+    (void)tdnf_rpmzig_verify_with_keys(fh, blobs, lens, total_keys, &status);
 #endif
 
     *out_status = status;
