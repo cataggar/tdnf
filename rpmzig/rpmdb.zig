@@ -803,5 +803,6 @@ test {
 
 test {
     _ = @import("pgp/packet.zig");
+    _ = @import("pgp/pubkey.zig");
 }
 
