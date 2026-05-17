@@ -796,5 +796,8 @@ test {
     _ = header;
     _ = pkgfile;
     _ = cpio;
+    // PGP submodules (PR #1 of plan-pure-zig-pgp.md). Imported here
+    // only for test discovery; no runtime dependency.
+    _ = @import("pgp/armor.zig");
 }
 
