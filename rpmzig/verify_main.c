@@ -8,6 +8,11 @@
  * no GPG-home concept; the keyring is built solely from --key
  * and/or --rpmdb).
  *
+ * Under -Drpmzig-verify-pure-zig=true (PR #11) the gpgme backend
+ * (verify.c) is excluded from the build, the binary always
+ * dispatches to the pure-Zig verifier, and --homedir is rejected
+ * with a usage error.
+ *
  * Three sources of keys (combinable in the --rpmdb + --key case):
  *
  *   tdnf-rpm-verify <file.rpm> [--homedir <dir>]
@@ -26,7 +31,8 @@
  *
  *   tdnf-rpm-verify <file.rpm> --pure ...
  *       Run the pure-Zig verifier instead of gpgme. Implies
- *       --key/--rpmdb (no --homedir).
+ *       --key/--rpmdb (no --homedir). This is the only mode under
+ *       -Drpmzig-verify-pure-zig=true.
  *
  *   (--homedir is mutually exclusive with --key/--rpmdb and with
  *    --pure.)
@@ -89,7 +95,9 @@ int main(int argc, char **argv)
 {
     tdnf_rpm_file *fh = NULL;
     const char *path = NULL;
+#ifndef TDNF_RPMZIG_VERIFY_PURE_ZIG
     const char *homedir = NULL;
+#endif
     const char *key_paths[MAX_KEYS] = { 0 };
     unsigned char *key_blobs[MAX_KEYS] = { 0 };
     /* parallel array: 1 = blob was allocated by tdnf_rpmdb_pubkeys_*
@@ -109,15 +117,27 @@ int main(int argc, char **argv)
 
     if (argc < 2) {
         fprintf(stderr,
+#ifdef TDNF_RPMZIG_VERIFY_PURE_ZIG
+            "usage: %s <file.rpm> --pure "
+            "[--key <key.asc> ...] [--rpmdb [root]]\n",
+#else
             "usage: %s <file.rpm> [--pure] [--homedir <dir>] "
             "[--key <key.asc> ...] [--rpmdb [root]]\n",
+#endif
             argv[0]);
         return 4;
     }
     path = argv[1];
     for (i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--homedir") == 0 && i + 1 < argc) {
+#ifdef TDNF_RPMZIG_VERIFY_PURE_ZIG
+            fprintf(stderr,
+                "--homedir is not supported in this build "
+                "(pure-Zig verifier only — use --key/--rpmdb)\n");
+            return 4;
+#else
             homedir = argv[++i];
+#endif
         } else if (strcmp(argv[i], "--key") == 0 && i + 1 < argc) {
             if (key_count >= MAX_KEYS) {
                 fprintf(stderr, "too many --key (max %d)\n", MAX_KEYS);
@@ -132,13 +152,25 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--pure") == 0) {
             use_pure = 1;
         } else if (i == 2 && argv[i][0] != '-') {
+#ifdef TDNF_RPMZIG_VERIFY_PURE_ZIG
+            fprintf(stderr,
+                "bare homedir is not supported in this build "
+                "(pure-Zig verifier only — use --key/--rpmdb)\n");
+            return 4;
+#else
             /* Legacy: bare 2nd arg = homedir, for back-compat with PR #13. */
             homedir = argv[i];
+#endif
         } else {
             fprintf(stderr, "unknown arg: %s\n", argv[i]);
             return 4;
         }
     }
+#ifdef TDNF_RPMZIG_VERIFY_PURE_ZIG
+    /* gpgme backend is excluded from this build — always use the
+     * pure-Zig verifier. */
+    use_pure = 1;
+#else
     if (homedir && (key_count > 0 || use_rpmdb)) {
         fprintf(stderr,
             "--homedir is mutually exclusive with --key and --rpmdb\n");
@@ -149,6 +181,7 @@ int main(int argc, char **argv)
             "--pure is mutually exclusive with --homedir (use --key/--rpmdb)\n");
         return 4;
     }
+#endif
 
     fh = tdnf_rpm_file_open(path);
     if (!fh) {
@@ -200,11 +233,13 @@ int main(int argc, char **argv)
     if (use_pure) {
         rc = tdnf_rpmzig_verify_pure(fh,
             (const void *const *)key_blobs, key_lens, key_count, &status);
+#ifndef TDNF_RPMZIG_VERIFY_PURE_ZIG
     } else if (key_count > 0) {
         rc = tdnf_rpmzig_verify_with_keys(fh,
             (const void *const *)key_blobs, key_lens, key_count, &status);
     } else {
         rc = tdnf_rpmzig_verify(fh, homedir, &status);
+#endif
     }
 
     switch (status) {
