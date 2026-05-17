@@ -3,12 +3,22 @@
 //!
 //! Combines `armor` (PR #1), `packet` (PR #2), `pubkey` (PR #3),
 //! `signature` (PR #4) and `keyring` (PR #6) with
-//! `std.crypto.Certificate.rsa` and `std.crypto.sign.Ed25519` to
-//! verify v4 OpenPGP detached signatures.
+//! Top-level OpenPGP signature verifier — PRs #5 + #6 + #8 + #9 of
+//! plan-pure-zig-pgp.md.
+//!
+//! Combines `armor` (PR #1), `packet` (PR #2), `pubkey` (PR #3),
+//! `signature` (PR #4) and `keyring` (PR #6) with
+//! `std.crypto.Certificate.rsa`, `std.crypto.sign.ecdsa` and
+//! `std.crypto.sign.Ed25519` to verify v4 OpenPGP detached
+//! signatures.
 //!
 //! Algorithms wired in so far:
 //!
 //!   * RSA-PKCS#1v1.5 + SHA-256 / SHA-512  (PR #5).
+//!   * ECDSA P-256+SHA-256 / P-384+SHA-384 (PR #8). The curve/hash
+//!     pairing is strict — RPM 4.20's rpmsign emits the matching
+//!     pair; deviation suggests malformed input and is rejected as
+//!     `.internal`.
 //!   * Ed25519 — both native (algo 27, RFC 9580) and EdDSALegacy
 //!     (algo 22, GnuPG `--openpgp` default) wire formats — with
 //!     SHA-256 or SHA-512 (PR #9).
@@ -17,7 +27,7 @@
 //!
 //!   * SHA-1 stays disabled until a policy knob lands (legacy keys
 //!     only — Sequoia rejects SHA-1 since Feb 2023). SHA-384 is
-//!     unused in practice.
+//!     accepted only when paired with ECDSA P-384.
 //!   * Binary signature type (0x00) only. Subkey-binding (0x18)
 //!     and back-sig (0x19) verification live in `keyring.zig`.
 //!   * Subkey trust is gated on `keyring.parse` having verified
@@ -53,20 +63,8 @@ pub const Status = enum(c_int) {
     internal = 4,
 };
 
-const HashKind = enum { sha256, sha512 };
+const HashKind = enum { sha256, sha384, sha512 };
 
-/// Verify a single OpenPGP detached signature blob over `signed_data`,
-/// against the supplied keyring. Returns a verdict; never raises.
-///
-/// * `sig_pkt_bytes` — the binary OpenPGP Signature packet (Tag 2),
-///   header included. ASCII armor is NOT accepted here (sig packets
-///   embedded in `.rpm` files are always binary). Wrap with
-///   `armor.decodeAny` first if the caller has armored input.
-/// * `signed_data` — the bytes the signature covers, verbatim.
-/// * `key_blobs` — each entry is an OpenPGP public-key blob, armored
-///   or binary; armor is auto-detected. A single blob may contain a
-///   primary key and any number of subkeys; all of them are
-///   considered when looking for the issuer.
 /// Verify a single OpenPGP detached signature blob over `signed_data`,
 /// against the supplied keyring. Returns a verdict; never raises.
 ///
@@ -96,11 +94,12 @@ pub fn verifyDetached(
     if (sig.sig_type != .binary_document) return .internal;
     const hash_kind: HashKind = switch (sig.hash_algo) {
         .sha256 => .sha256,
+        .sha384 => .sha384,
         .sha512 => .sha512,
         else => return .internal,
     };
     switch (sig.material) {
-        .rsa, .ed25519, .eddsa_legacy => {},
+        .rsa, .ed25519, .eddsa_legacy, .ecdsa => {},
         else => return .internal,
     }
 
@@ -172,6 +171,10 @@ pub fn verifyDetached(
     // that with SHA-512 internally). Confirmed against a real gpg
     // detached sig fixture before commit.
     //
+    // ECDSA (PR #8) similarly takes the prehashed digest, then
+    // `verifyPrehashed` performs the curve arithmetic. Curve / hash
+    // pairing is enforced inside `verifyEcdsa`.
+    //
     // For RSA-PKCS#1v1.5 we still want the digest available for
     // the 2-byte hash-hint short-circuit; the heavier
     // `concatVerify` recomputes the digest internally.
@@ -195,6 +198,14 @@ pub fn verifyDetached(
             h.final(digest_buf[0..32]);
             break :blk digest_buf[0..32];
         },
+        .sha384 => blk: {
+            var h = std.crypto.hash.sha2.Sha384.init(.{});
+            h.update(signed_data);
+            h.update(sig.hashed_prefix);
+            h.update(&trailer);
+            h.final(digest_buf[0..48]);
+            break :blk digest_buf[0..48];
+        },
         .sha512 => blk: {
             var h = std.crypto.hash.sha2.Sha512.init(.{});
             h.update(signed_data);
@@ -215,7 +226,13 @@ pub fn verifyDetached(
             signed_data,
             &trailer,
         ),
-        .ed25519 => |ed_key| verifyEd25519(sig, ed_key, digest),
+        .ecdsa => |ec_key| verifyEcdsa(sig, ec_key, hash_kind, digest),
+        .ed25519 => |ed_key| if (hash_kind == .sha384)
+            // Ed25519 + SHA-384 isn't a pairing OpenPGP defines —
+            // RFC 9580 specifies SHA-256 or SHA-512.
+            .internal
+        else
+            verifyEd25519(sig, ed_key, digest),
         .unsupported => .internal,
     };
 }
@@ -276,6 +293,9 @@ fn verifyRsa(
                     pkey,
                     std.crypto.hash.sha2.Sha512,
                 ),
+                // RSA + SHA-384 isn't in the supported matrix (no
+                // distro signs with it). Pure-Zig path stays small.
+                .sha384 => return .internal,
             };
             verdict catch return .bad;
             return .ok;
@@ -325,6 +345,79 @@ fn verifyEd25519(
     // own verification — there is no double pre-hash from our side.
     ed_sig.verify(digest, pk) catch return .bad;
     return .ok;
+}
+
+/// ECDSA path. Strict (curve, hash) pairing:
+///
+///   * P-256 → SHA-256 → `std.crypto.sign.ecdsa.EcdsaP256Sha256`
+///   * P-384 → SHA-384 → `std.crypto.sign.ecdsa.EcdsaP384Sha384`
+///
+/// OpenPGP transmits (r, s) as two MPIs — the leading-zero strip in
+/// `packet.readMpi` can make them shorter than the curve order, so
+/// we left-pad to the scalar length before concatenating into the
+/// raw `[encoded_length]u8` `Signature.fromBytes` expects. The
+/// (32 or 48 byte) precomputed `digest` is fed straight into
+/// `verifyPrehashed`.
+fn verifyEcdsa(
+    sig: signature.Signature,
+    ec_key: pubkey.EcdsaKey,
+    hash_kind: HashKind,
+    digest: []const u8,
+) Status {
+    const sig_ec = switch (sig.material) {
+        .ecdsa => |m| m,
+        else => return .internal,
+    };
+
+    // Strict curve/hash pairing. RPM 4.20's rpmsign always emits the
+    // matching pair (RFC 6637 §13: "default hash algorithm" is also
+    // the matching SHA-* size); any deviation here is suspicious.
+    const Scheme = enum { p256, p384 };
+    const scheme: Scheme = switch (ec_key.curve) {
+        .p256 => if (hash_kind == .sha256) .p256 else return .internal,
+        .p384 => if (hash_kind == .sha384) .p384 else return .internal,
+    };
+
+    switch (scheme) {
+        inline .p256, .p384 => |comp_scheme| {
+            const Ec = switch (comp_scheme) {
+                .p256 => std.crypto.sign.ecdsa.EcdsaP256Sha256,
+                .p384 => std.crypto.sign.ecdsa.EcdsaP384Sha384,
+            };
+            const digest_len: usize = switch (comp_scheme) {
+                .p256 => 32,
+                .p384 => 48,
+            };
+            // verifyDetached has already done the hash-hint
+            // short-circuit on this same `digest`, so by the time
+            // we land here we expect the slice to be the right
+            // length. The check is cheap insurance against a
+            // future refactor decoupling the two paths.
+            if (digest.len != digest_len) return .internal;
+            var prehashed: [digest_len]u8 = undefined;
+            @memcpy(&prehashed, digest);
+
+            const sig_encoded_len = Ec.Signature.encoded_length;
+            const scalar_len = sig_encoded_len / 2;
+            if (sig_ec.r.bytes.len > scalar_len) return .bad;
+            if (sig_ec.s.bytes.len > scalar_len) return .bad;
+
+            var raw: [sig_encoded_len]u8 = @splat(0);
+            @memcpy(
+                raw[scalar_len - sig_ec.r.bytes.len .. scalar_len],
+                sig_ec.r.bytes,
+            );
+            @memcpy(
+                raw[sig_encoded_len - sig_ec.s.bytes.len ..],
+                sig_ec.s.bytes,
+            );
+            const sig_obj = Ec.Signature.fromBytes(raw);
+
+            const pkey = Ec.PublicKey.fromSec1(ec_key.point) catch return .internal;
+            sig_obj.verifyPrehashed(prehashed, pkey) catch return .bad;
+            return .ok;
+        },
+    }
 }
 
 // =====================================================================
@@ -467,6 +560,113 @@ test "subkey signer when binding sig packet removed → no_key" {
         &keys,
     );
     try testing.expectEqual(Status.no_key, status);
+}
+
+// ---------------------------------------------------------------------
+// PR #8: ECDSA P-256 / P-384 + SHA-256 / SHA-384 detached signatures.
+//
+// Fixtures are generated by `testdata/gen_ecdsa_fixture.py` —
+// re-running that script produces different bytes (key material is
+// ephemeral) so the tests only assert verdict, not exact byte
+// patterns. The wrong-key fixture is an independent P-256 keypair
+// that has the right algorithm but the wrong fingerprint, so it
+// exercises the `.no_key` branch rather than `.internal`.
+// ---------------------------------------------------------------------
+
+const ecdsa_p256_pubkey = @embedFile("testdata/ecdsa-p256-pubkey.bin");
+const ecdsa_p256_sig = @embedFile("testdata/ecdsa-p256-sig.bin");
+const ecdsa_p256_data = @embedFile("testdata/ecdsa-p256-data.bin");
+const ecdsa_p256_wrong_pubkey = @embedFile("testdata/ecdsa-p256-wrong-pubkey.bin");
+const ecdsa_p384_pubkey = @embedFile("testdata/ecdsa-p384-pubkey.bin");
+const ecdsa_p384_sig = @embedFile("testdata/ecdsa-p384-sig.bin");
+const ecdsa_p384_data = @embedFile("testdata/ecdsa-p384-data.bin");
+
+test "ECDSA P-256 + SHA-256 happy path" {
+    const keys = [_][]const u8{ecdsa_p256_pubkey};
+    const status = verifyDetached(
+        testing.allocator,
+        ecdsa_p256_sig,
+        ecdsa_p256_data,
+        &keys,
+    );
+    try testing.expectEqual(Status.ok, status);
+}
+
+test "ECDSA P-256: tampered sig MPI → bad" {
+    var bad_sig = try testing.allocator.dupe(u8, ecdsa_p256_sig);
+    defer testing.allocator.free(bad_sig);
+    // Flip a byte deep in the MPI payload. The sig body is 111 B; r
+    // and s live in the trailing ~70 B, well past the header / hashed
+    // area / hash hint.
+    bad_sig[bad_sig.len - 8] ^= 0x55;
+    const keys = [_][]const u8{ecdsa_p256_pubkey};
+    const status = verifyDetached(testing.allocator, bad_sig, ecdsa_p256_data, &keys);
+    try testing.expectEqual(Status.bad, status);
+}
+
+test "ECDSA P-256: wrong key → no_key" {
+    const keys = [_][]const u8{ecdsa_p256_wrong_pubkey};
+    const status = verifyDetached(
+        testing.allocator,
+        ecdsa_p256_sig,
+        ecdsa_p256_data,
+        &keys,
+    );
+    try testing.expectEqual(Status.no_key, status);
+}
+
+test "ECDSA P-256: tampered signed data → bad" {
+    var tampered = try testing.allocator.dupe(u8, ecdsa_p256_data);
+    defer testing.allocator.free(tampered);
+    tampered[0] ^= 0x01;
+    const keys = [_][]const u8{ecdsa_p256_pubkey};
+    const status = verifyDetached(testing.allocator, ecdsa_p256_sig, tampered, &keys);
+    try testing.expectEqual(Status.bad, status);
+}
+
+test "ECDSA P-384 + SHA-384 happy path" {
+    const keys = [_][]const u8{ecdsa_p384_pubkey};
+    const status = verifyDetached(
+        testing.allocator,
+        ecdsa_p384_sig,
+        ecdsa_p384_data,
+        &keys,
+    );
+    try testing.expectEqual(Status.ok, status);
+}
+
+test "ECDSA P-384: tampered sig MPI → bad" {
+    var bad_sig = try testing.allocator.dupe(u8, ecdsa_p384_sig);
+    defer testing.allocator.free(bad_sig);
+    bad_sig[bad_sig.len - 8] ^= 0x55;
+    const keys = [_][]const u8{ecdsa_p384_pubkey};
+    const status = verifyDetached(testing.allocator, bad_sig, ecdsa_p384_data, &keys);
+    try testing.expectEqual(Status.bad, status);
+}
+
+test "ECDSA: P-256 key but sig says SHA-512 → rejected" {
+    // Hand-mutate the P-256 sig packet's hash-algo byte to SHA-512
+    // (id 10). The packet body starts after the 3-byte old-format
+    // header (`0x89 || BE16(len)`); hash_algo is at body offset 3.
+    //
+    // Two failure modes are equally acceptable here: the hash-hint
+    // short-circuit (the SHA-512 of the data won't match the hint
+    // recorded for the original SHA-256 sig) returns `.bad`, and a
+    // hypothetical sig whose hint *did* match — but came with a
+    // curve/hash mismatch — would return `.internal` from
+    // `verifyEcdsa`'s strict-pairing check. Either way the verdict
+    // is "rejected"; we just check the verifier doesn't accept it.
+    var twisted_sig = try testing.allocator.dupe(u8, ecdsa_p256_sig);
+    defer testing.allocator.free(twisted_sig);
+    twisted_sig[3 + 3] = 10;
+    const keys = [_][]const u8{ecdsa_p256_pubkey};
+    const status = verifyDetached(
+        testing.allocator,
+        twisted_sig,
+        ecdsa_p256_data,
+        &keys,
+    );
+    try testing.expect(status == .bad or status == .internal);
 }
 
 // =====================================================================
