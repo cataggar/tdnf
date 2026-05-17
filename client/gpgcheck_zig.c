@@ -22,11 +22,18 @@
  * When -Drpmzig-verify-pure-zig=true is *also* set (defines
  * TDNF_RPMZIG_VERIFY_PURE_ZIG), the pure-Zig verifier
  * tdnf_rpmzig_verify_pure runs alongside the gpgme path with the
- * same keyring and any disagreement is logged to stderr. The
- * gpgme verdict remains authoritative — pure-Zig is monitor-mode
- * only in this PR (plan-pure-zig-pgp.md PR #7). PR #10 promotes
- * disagreement to a hard error; PR #11 flips pure-Zig to primary
- * and drops the gpgme link.
+ * same keyring. The gpgme verdict remains authoritative, but the
+ * cross-check is now strict (plan-pure-zig-pgp.md PR #10): a
+ * single divergence between the two verdicts is escalated to a
+ * hard error by forcing *out_status to TDNF_RPMZIG_VERIFY_BAD,
+ * which the caller in client/gpgcheck.c surfaces as
+ * ERROR_TDNF_RPM_GPG_NO_MATCH and refuses to install the package.
+ * The soak period (PR #7's log-only behaviour) is over. PR #11
+ * flips pure-Zig to primary and drops the gpgme link entirely.
+ *
+ * This mirrors the log-to-error promotion the librpm-replacement
+ * plan applied to its own rpmzig+librpm cross-check in T3 PR #4
+ * (commit 0d3ed83).
  *
  * Manual cross-check (until the pytest path adds a parametrize):
  *
@@ -34,8 +41,10 @@
  *   sudo LD_LIBRARY_PATH=./out/lib ./out/bin/tdnf install -y <pkg> \
  *       2>&1 | grep rpmzig-pure-zig
  *
- * Every fresh-key install prints one `rpmzig-pure-zig: agrees ...`
- * or `rpmzig-pure-zig: ... DISAGREEMENT ...` line.
+ * On agreement, every fresh-key install prints one
+ * `rpmzig-pure-zig: agrees ...` line. On disagreement the install
+ * aborts with `rpmzig-pure-zig: DISAGREEMENT ...` followed by the
+ * usual ERROR_TDNF_RPM_GPG_NO_MATCH path from gpgcheck.c.
  */
 
 #include <stdio.h>
@@ -157,10 +166,14 @@ int TDNFRpmzigVerify(
     (void)tdnf_rpmzig_verify_with_keys(fh, blobs, lens, total_keys, &status);
 
 #ifdef TDNF_RPMZIG_VERIFY_PURE_ZIG
-    /* Log-only cross-check: pure-Zig verifier should agree with
-     * the gpgme path. Same fh + same in-memory keyring. Disagreement
-     * doesn't override gpgme — PR #10 promotes it to a hard error,
-     * PR #11 flips pure-Zig to primary. */
+    /* Strict cross-check: pure-Zig verifier must agree with the
+     * gpgme path. Same fh + same in-memory keyring. The soak
+     * period (PR #7's log-only behaviour) is over — any divergence
+     * is treated as a hard failure. We override `status` so the
+     * caller in client/gpgcheck.c takes the existing non-OK branch
+     * and raises ERROR_TDNF_RPM_GPG_NO_MATCH, refusing the install.
+     * gpgme remains authoritative on agreement; PR #11 flips
+     * pure-Zig to primary and drops the gpgme link. */
     {
         const char *slash = strrchr(pkg_path, '/');
         const char *pkg_name = slash ? slash + 1 : pkg_path;
@@ -169,9 +182,11 @@ int TDNFRpmzigVerify(
             fh, blobs, lens, total_keys, &pure_status);
         if (pure_status != status) {
             fprintf(stderr,
-                "rpmzig-pure-zig: DISAGREEMENT for %s: "
+                "rpmzig-pure-zig: DISAGREEMENT vs gpgme "
+                "(verifier mismatch is a hard error) for %s: "
                 "pure=%d gpgme=%d\n",
                 pkg_name, pure_status, status);
+            status = TDNF_RPMZIG_VERIFY_BAD;
         } else {
             fprintf(stderr,
                 "rpmzig-pure-zig: agrees with gpgme (status=%d) for %s\n",
