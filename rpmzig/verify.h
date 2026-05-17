@@ -69,6 +69,39 @@ int tdnf_rpmzig_verify_with_keys(
     int *out_status
 );
 
+/**
+ * Verify the GPG signature on a .rpm file using a pure-Zig verifier
+ * (no gpgme). `key_blobs[]` is an array of `key_count` OpenPGP
+ * public-key blobs (armored or binary); each entry is `key_lens[i]`
+ * bytes long.
+ *
+ * This is the kernel of plan-pure-zig-pgp.md / PR #5. PR #7 wires it
+ * alongside the gpgme path as a log-only cross-check; PR #10 promotes
+ * disagreement to an error; PR #11 makes pure-Zig the only path
+ * under -Drpmzig-verify-pure-zig=true.
+ *
+ * PR #5 limitations (intentionally narrow scope):
+ *   - RSA only. ECDSA / Ed25519 land in PRs #8 / #9.
+ *   - SHA-256 / SHA-512 only.
+ *   - Binary signature type (0x00) only.
+ *   - Subkey trust without binding-sig verification. PR #6 closes
+ *     this gap.
+ * Out-of-scope cases return TDNF_RPMZIG_VERIFY_GPGME_ERROR (numeric
+ * 4, repurposed as "internal error" on the pure path). Subsequent
+ * PRs reduce that surface to zero.
+ *
+ * On success writes a TDNF_RPMZIG_VERIFY_* status into *out_status.
+ * Returns 0 on OK, non-zero otherwise (same convention as the gpgme
+ * variants above).
+ */
+int tdnf_rpmzig_verify_pure(
+    tdnf_rpm_file *fh,
+    const void *const *key_blobs,
+    const size_t *key_lens,
+    size_t key_count,
+    int *out_status
+);
+
 #ifdef __cplusplus
 }
 #endif

@@ -484,6 +484,15 @@ fn dupZ(src: []const u8) ?[*:0]u8 {
 const pkgfile = @import("pkgfile.zig");
 const cpio = @import("cpio.zig");
 
+// PR #5 of plan-pure-zig-pgp.md: pull the pure-Zig PGP verifier into
+// the rpmzig static library so its `export fn rpmzig_verify_detached`
+// is reachable from C. A bare `_ = @import(...)` in a `comptime`
+// block forces the compiler to evaluate the module at non-test
+// build time, which in turn instantiates any `export fn` it declares.
+comptime {
+    _ = @import("pgp/verify.zig");
+}
+
 /// Opaque handle wrapping a parsed RpmFile and its allocator.
 pub const FileHandle = struct {
     file: pkgfile.RpmFile,
@@ -805,5 +814,6 @@ test {
     _ = @import("pgp/packet.zig");
     _ = @import("pgp/pubkey.zig");
     _ = @import("pgp/signature.zig");
+    _ = @import("pgp/verify.zig");
 }
 
