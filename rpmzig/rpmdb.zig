@@ -798,3 +798,7 @@ test {
     _ = cpio;
 }
 
+test {
+    _ = @import("pgp/packet.zig");
+}
+
