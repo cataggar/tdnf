@@ -18,6 +18,24 @@
  *   - the fresh key tdnf just fetched for this repo
  *
  * The status codes match TDNF_RPMZIG_VERIFY_* from verify.h.
+ *
+ * When -Drpmzig-verify-pure-zig=true is *also* set (defines
+ * TDNF_RPMZIG_VERIFY_PURE_ZIG), the pure-Zig verifier
+ * tdnf_rpmzig_verify_pure runs alongside the gpgme path with the
+ * same keyring and any disagreement is logged to stderr. The
+ * gpgme verdict remains authoritative — pure-Zig is monitor-mode
+ * only in this PR (plan-pure-zig-pgp.md PR #7). PR #10 promotes
+ * disagreement to a hard error; PR #11 flips pure-Zig to primary
+ * and drops the gpgme link.
+ *
+ * Manual cross-check (until the pytest path adds a parametrize):
+ *
+ *   zig build -Drpmzig-verify-pure-zig=true install --prefix ./out
+ *   sudo LD_LIBRARY_PATH=./out/lib ./out/bin/tdnf install -y <pkg> \
+ *       2>&1 | grep rpmzig-pure-zig
+ *
+ * Every fresh-key install prints one `rpmzig-pure-zig: agrees ...`
+ * or `rpmzig-pure-zig: ... DISAGREEMENT ...` line.
  */
 
 #include <stdio.h>
@@ -137,6 +155,30 @@ int TDNFRpmzigVerify(
     total_keys++;
 
     (void)tdnf_rpmzig_verify_with_keys(fh, blobs, lens, total_keys, &status);
+
+#ifdef TDNF_RPMZIG_VERIFY_PURE_ZIG
+    /* Log-only cross-check: pure-Zig verifier should agree with
+     * the gpgme path. Same fh + same in-memory keyring. Disagreement
+     * doesn't override gpgme — PR #10 promotes it to a hard error,
+     * PR #11 flips pure-Zig to primary. */
+    {
+        const char *slash = strrchr(pkg_path, '/');
+        const char *pkg_name = slash ? slash + 1 : pkg_path;
+        int pure_status = TDNF_RPMZIG_VERIFY_GPGME_ERROR;
+        (void)tdnf_rpmzig_verify_pure(
+            fh, blobs, lens, total_keys, &pure_status);
+        if (pure_status != status) {
+            fprintf(stderr,
+                "rpmzig-pure-zig: DISAGREEMENT for %s: "
+                "pure=%d gpgme=%d\n",
+                pkg_name, pure_status, status);
+        } else {
+            fprintf(stderr,
+                "rpmzig-pure-zig: agrees with gpgme (status=%d) for %s\n",
+                pure_status, pkg_name);
+        }
+    }
+#endif
 
     *out_status = status;
     rc = (status == TDNF_RPMZIG_VERIFY_OK) ? 0 : 1;
