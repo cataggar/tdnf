@@ -815,5 +815,6 @@ test {
     _ = @import("pgp/pubkey.zig");
     _ = @import("pgp/signature.zig");
     _ = @import("pgp/verify.zig");
+    _ = @import("pgp/keyring.zig");
 }
 
