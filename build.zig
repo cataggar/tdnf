@@ -105,11 +105,26 @@ pub fn build(b: *Build) void {
     // freshly downloaded gpgkey URL. Disagreements log to stderr;
     // librpm's verdict remains authoritative. Default false — does
     // not change observable behavior. See T3 PR #3.
-    const rpmzig_verify = b.option(
+    var rpmzig_verify = b.option(
         bool,
         "rpmzig-verify",
         "Enable rpmzig+gpgme cross-check of librpm signature verification (default false)",
     ) orelse false;
+
+    // Log-only cross-check between the pure-Zig OpenPGP verifier and
+    // the gpgme path (plan-pure-zig-pgp.md PR #7). When set,
+    // client/gpgcheck_zig.c calls tdnf_rpmzig_verify_pure alongside
+    // tdnf_rpmzig_verify_with_keys and logs any disagreement to
+    // stderr without overriding the gpgme verdict. Implies
+    // -Drpmzig-verify=true (we cross-check against the gpgme path,
+    // so it must be compiled in too). Adds no new runtime
+    // dependencies — pure-Zig is std.crypto-only. Default false.
+    const rpmzig_verify_pure_zig = b.option(
+        bool,
+        "rpmzig-verify-pure-zig",
+        "Run pure-Zig OpenPGP verifier alongside the gpgme one (log-only cross-check; implies -Drpmzig-verify=true). Default false.",
+    ) orelse false;
+    if (rpmzig_verify_pure_zig) rpmzig_verify = true;
 
     const prefix = b.install_prefix;
     const libdir = "lib";
@@ -449,6 +464,9 @@ pub fn build(b: *Build) void {
         tdnf_so_mod.addCMacro("TDNF_RPMZIG_VERIFY", "1");
         tdnf_so_mod.addIncludePath(b.path("rpmzig"));
     }
+    if (rpmzig_verify_pure_zig) {
+        tdnf_so_mod.addCMacro("TDNF_RPMZIG_VERIFY_PURE_ZIG", "1");
+    }
     tdnf_so_mod.addCSourceFiles(.{
         .root = b.path("client"),
         .files = &.{
@@ -464,10 +482,13 @@ pub fn build(b: *Build) void {
         // Cross-check shim + the verify.c verifier itself. Pulled
         // into libtdnf only on this build flag so the gpgme runtime
         // dep stays opt-in. The pure-Zig glue (verify_pure.c) ships
-        // alongside it — it has no gpgme dependency of its own but
-        // is gated behind the same flag for now; PR #11 of
-        // plan-pure-zig-pgp.md will introduce -Drpmzig-verify-pure-zig
-        // to flip it on independently.
+        // alongside it — it has no gpgme dependency of its own. The
+        // separate -Drpmzig-verify-pure-zig flag (implies this one)
+        // additionally defines TDNF_RPMZIG_VERIFY_PURE_ZIG so
+        // gpgcheck_zig.c runs the pure-Zig verifier alongside the
+        // gpgme one as a log-only cross-check (PR #7 of
+        // plan-pure-zig-pgp.md). PR #11 will flip it to primary and
+        // drop gpgme entirely.
         tdnf_so_mod.addCSourceFiles(.{
             .root = b.path("client"),
             .files = &.{"gpgcheck_zig.c"},
