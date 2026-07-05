@@ -14,17 +14,22 @@
 #define ATTR_TYPE       (char*)"type"
 #define ATTR_LOCATION   (char*)"location"
 #define ATTR_PREFERENCE (char*)"preference"
+#define ATTR_PRIORITY   (char*)"priority"
 
 static int hashTypeComparator(const void * p1, const void * p2)
 {
     return strcmp(*((const char **)p1), *((const char **)p2));
 }
 
-// Structure to hold element information
-struct MetalinkElementInfo {
-    uint32_t     dwError;
+typedef struct _TDNF_METALINK_CALLBACK_CONTEXT
+{
     TDNF_ML_CTX  *ml_ctx;
     const char   *filename;
+} TDNF_METALINK_CALLBACK_CONTEXT;
+
+struct MetalinkElementInfo {
+    uint32_t     dwError;
+    TDNF_METALINK_CALLBACK_CONTEXT  cbCtx;
     const char   *startElement;
     const char   *endElement;
     const char   **attributes;
@@ -184,6 +189,422 @@ TDNFMetalinkUrlFree(
     TDNF_SAFE_FREE_MEMORY(ml_url_info);
 }
 
+static uint32_t
+TDNFMetalinkAllocateStringBuffer(
+    const char *pszBuffer,
+    size_t nBufferLength,
+    char **ppszValue
+    )
+{
+    uint32_t dwError = 0;
+    char *pszValue = NULL;
+
+    if (!pszBuffer || !ppszValue)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    dwError = TDNFAllocateMemory(nBufferLength + 1, sizeof(char), (void **)&pszValue);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    if (nBufferLength > 0)
+    {
+        memcpy(pszValue, pszBuffer, nBufferLength);
+    }
+    pszValue[nBufferLength] = '\0';
+
+    *ppszValue = pszValue;
+
+cleanup:
+    return dwError;
+error:
+    TDNF_SAFE_FREE_MEMORY(pszValue);
+    if (ppszValue)
+    {
+        *ppszValue = NULL;
+    }
+    goto cleanup;
+}
+
+static uint32_t
+TDNFMetalinkParseFileName(
+    TDNF_METALINK_CALLBACK_CONTEXT *pCbCtx,
+    const char *pszName
+    )
+{
+    uint32_t dwError = 0;
+
+    if (!pCbCtx || !pCbCtx->ml_ctx || IsNullOrEmptyString(pCbCtx->filename) ||
+        IsNullOrEmptyString(pszName))
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    if (strcmp(pszName, pCbCtx->filename))
+    {
+        pr_err("%s: Invalid filename from metalink file:%s", __func__, pszName);
+        dwError = ERROR_TDNF_METALINK_PARSER_INVALID_FILE_NAME;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    if (pCbCtx->ml_ctx->filename != NULL)
+    {
+        if (strcmp(pCbCtx->ml_ctx->filename, pszName))
+        {
+            dwError = ERROR_TDNF_METALINK_PARSER_INVALID_FILE_NAME;
+            BAIL_ON_TDNF_ERROR(dwError);
+        }
+        goto cleanup;
+    }
+
+    dwError = TDNFAllocateString(pszName, &pCbCtx->ml_ctx->filename);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+cleanup:
+    return dwError;
+error:
+    goto cleanup;
+}
+
+static uint32_t
+TDNFMetalinkParseSizeValue(
+    TDNF_ML_CTX *ml_ctx,
+    const char *pszValue,
+    size_t nValueLength
+    )
+{
+    uint32_t dwError = 0;
+    char size_buf[12];
+    char *p = size_buf;
+    const char *q = pszValue;
+
+    if (!ml_ctx || !pszValue)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    while ((size_t)(q - pszValue) < nValueLength &&
+           p < size_buf + sizeof(size_buf) - 1 &&
+           isdigit((unsigned char)*q))
+    {
+        *p++ = *q++;
+    }
+    *p = 0;
+
+    if (!size_buf[0])
+    {
+        dwError = ERROR_TDNF_METALINK_PARSER_MISSING_FILE_SIZE;
+        pr_err("XML Parser Error: file size is missing: '%s'", size_buf);
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    ml_ctx->size = strtoi(size_buf);
+
+cleanup:
+    return dwError;
+error:
+    goto cleanup;
+}
+
+static uint32_t
+TDNFMetalinkNormalizeUrlPreference(
+    const char *pszRankingValue,
+    bool bRankingIsPriority,
+    int *pnPreference
+    )
+{
+    uint32_t dwError = 0;
+    const char *pszRankingName = bRankingIsPriority ? ATTR_PRIORITY : ATTR_PREFERENCE;
+
+    if (!pnPreference)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    *pnPreference = 0;
+    if (IsNullOrEmptyString(pszRankingValue))
+    {
+        goto cleanup;
+    }
+
+    if (bRankingIsPriority)
+    {
+        long nPriority = 0;
+
+        if (sscanf(pszRankingValue, "%ld", &nPriority) != 1)
+        {
+            dwError = ERROR_TDNF_INVALID_PARAMETER;
+            pr_err("XML Parser Warning: %s is invalid value: %s\n",
+                   pszRankingName, pszRankingValue);
+            BAIL_ON_TDNF_ERROR(dwError);
+        }
+
+        if (nPriority <= 0 || nPriority >= INT_MAX)
+        {
+            dwError = ERROR_TDNF_METALINK_PARSER_MISSING_URL_ATTR;
+            pr_err("XML Parser Warning: Bad value (\"%s\") of \"%s\""
+                   "attribute in url element (should be in range 1-%d)",
+                   pszRankingValue, pszRankingName, INT_MAX - 1);
+            BAIL_ON_TDNF_ERROR(dwError);
+        }
+
+        *pnPreference = INT_MAX - (int)nPriority;
+    }
+    else
+    {
+        int nPreference = 0;
+
+        if (sscanf(pszRankingValue, "%d", &nPreference) != 1)
+        {
+            dwError = ERROR_TDNF_INVALID_PARAMETER;
+            pr_err("XML Parser Warning: %s is invalid value: %s\n",
+                   pszRankingName, pszRankingValue);
+            BAIL_ON_TDNF_ERROR(dwError);
+        }
+
+        if (nPreference < 0 || nPreference > 100)
+        {
+            dwError = ERROR_TDNF_METALINK_PARSER_MISSING_URL_ATTR;
+            pr_err("XML Parser Warning: Bad value (\"%s\") of \"%s\""
+                   "attribute in url element (should be in range 0-100)",
+                   pszRankingValue, pszRankingName);
+            BAIL_ON_TDNF_ERROR(dwError);
+        }
+
+        *pnPreference = nPreference;
+    }
+
+cleanup:
+    return dwError;
+error:
+    goto cleanup;
+}
+
+static uint32_t
+TDNFMetalinkParseHashValue(
+    TDNF_ML_CTX *ml_ctx,
+    const char *pszType,
+    const char *pszValue,
+    size_t nValueLength
+    )
+{
+    uint32_t dwError = 0;
+    char *pszHashValue = NULL;
+    TDNF_ML_HASH_INFO *ml_hash_info = NULL;
+
+    if (!ml_ctx || IsNullOrEmptyString(pszType) || !pszValue)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    dwError = TDNFAllocateMemory(1, sizeof(TDNF_ML_HASH_INFO), (void**)&ml_hash_info);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    dwError = TDNFAllocateString(pszType, &ml_hash_info->type);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    dwError = TDNFMetalinkAllocateStringBuffer(pszValue, nValueLength, &pszHashValue);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    if (IsNullOrEmptyString(pszHashValue))
+    {
+        dwError = ERROR_TDNF_METALINK_PARSER_MISSING_HASH_CONTENT;
+        pr_err("XML Parser Error:HASH value is not present in HASH element");
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    ml_hash_info->value = pszHashValue;
+    pszHashValue = NULL;
+
+    dwError = TDNFAppendList(&ml_ctx->hashes, ml_hash_info);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+cleanup:
+    TDNF_SAFE_FREE_MEMORY(pszHashValue);
+    return dwError;
+
+error:
+    if (ml_hash_info)
+    {
+        TDNFMetalinkHashFree(ml_hash_info);
+        ml_hash_info = NULL;
+    }
+    goto cleanup;
+}
+
+static uint32_t
+TDNFMetalinkParseUrlValue(
+    TDNF_ML_CTX *ml_ctx,
+    const char *pszProtocol,
+    const char *pszType,
+    const char *pszLocation,
+    const char *pszRankingValue,
+    bool bRankingIsPriority,
+    const char *pszValue,
+    size_t nValueLength
+    )
+{
+    uint32_t dwError = 0;
+    char *pszUrlValue = NULL;
+    TDNF_ML_URL_INFO *ml_url_info = NULL;
+
+    if (!ml_ctx || !pszValue)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    dwError = TDNFAllocateMemory(1, sizeof(TDNF_ML_URL_INFO), (void**)&ml_url_info);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    if (!IsNullOrEmptyString(pszProtocol))
+    {
+        dwError = TDNFAllocateString(pszProtocol, &ml_url_info->protocol);
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    if (!IsNullOrEmptyString(pszType))
+    {
+        dwError = TDNFAllocateString(pszType, &ml_url_info->type);
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    if (!IsNullOrEmptyString(pszLocation))
+    {
+        dwError = TDNFAllocateString(pszLocation, &ml_url_info->location);
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    dwError = TDNFMetalinkNormalizeUrlPreference(
+                    pszRankingValue,
+                    bRankingIsPriority,
+                    &ml_url_info->preference);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    dwError = TDNFMetalinkAllocateStringBuffer(pszValue, nValueLength, &pszUrlValue);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    if (IsNullOrEmptyString(pszUrlValue))
+    {
+        dwError = ERROR_TDNF_METALINK_PARSER_MISSING_URL_CONTENT;
+        pr_err("URL is not present in URL element");
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    ml_url_info->url = pszUrlValue;
+    pszUrlValue = NULL;
+
+    dwError = TDNFAppendList(&ml_ctx->urls, ml_url_info);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+cleanup:
+    TDNF_SAFE_FREE_MEMORY(pszUrlValue);
+    return dwError;
+
+error:
+    if (ml_url_info)
+    {
+        TDNFMetalinkUrlFree(ml_url_info);
+        ml_url_info = NULL;
+    }
+    goto cleanup;
+}
+
+#ifdef TDNF_METALINK_ZIG_XML
+static uint32_t
+TDNFMetalinkZigParseFile(
+    void *pUserData,
+    const char *pszName
+    )
+{
+    return TDNFMetalinkParseFileName(
+                (TDNF_METALINK_CALLBACK_CONTEXT *)pUserData,
+                pszName);
+}
+
+static uint32_t
+TDNFMetalinkZigParseSize(
+    void *pUserData,
+    const char *pszValue,
+    size_t nValueLength
+    )
+{
+    TDNF_METALINK_CALLBACK_CONTEXT *pCbCtx = pUserData;
+
+    if (!pCbCtx)
+    {
+        return ERROR_TDNF_INVALID_PARAMETER;
+    }
+
+    return TDNFMetalinkParseSizeValue(
+                pCbCtx->ml_ctx,
+                pszValue,
+                nValueLength);
+}
+
+static uint32_t
+TDNFMetalinkZigParseHash(
+    void *pUserData,
+    const char *pszType,
+    const char *pszValue,
+    size_t nValueLength
+    )
+{
+    TDNF_METALINK_CALLBACK_CONTEXT *pCbCtx = pUserData;
+
+    if (!pCbCtx)
+    {
+        return ERROR_TDNF_INVALID_PARAMETER;
+    }
+
+    return TDNFMetalinkParseHashValue(
+                pCbCtx->ml_ctx,
+                pszType,
+                pszValue,
+                nValueLength);
+}
+
+static uint32_t
+TDNFMetalinkZigParseUrl(
+    void *pUserData,
+    const char *pszProtocol,
+    const char *pszType,
+    const char *pszLocation,
+    const char *pszRankingValue,
+    bool bRankingIsPriority,
+    const char *pszValue,
+    size_t nValueLength
+    )
+{
+    TDNF_METALINK_CALLBACK_CONTEXT *pCbCtx = pUserData;
+
+    if (!pCbCtx)
+    {
+        return ERROR_TDNF_INVALID_PARAMETER;
+    }
+
+    if (nValueLength <= MIN_URL_LENGTH)
+    {
+        return 0;
+    }
+
+    return TDNFMetalinkParseUrlValue(
+                pCbCtx->ml_ctx,
+                pszProtocol,
+                pszType,
+                pszLocation,
+                pszRankingValue,
+                bRankingIsPriority,
+                pszValue,
+                nValueLength);
+}
+#endif
+
 void
 TDNFMetalinkFree(
     TDNF_ML_CTX *ml_ctx
@@ -204,6 +625,11 @@ TDNFSearchTag(
     const char *type
     )
 {
+    if (!attr || !type)
+    {
+        return NULL;
+    }
+
     for (int i = 0; attr[i]; i += 2)
     {
         if((!strcmp(attr[i], type)) && (attr[i + 1] != NULL))
@@ -224,7 +650,7 @@ TDNFParseFileTag(
     const char *name = NULL;
     struct MetalinkElementInfo* elementInfo = (struct MetalinkElementInfo*)userData;
 
-    if(!elementInfo || !elementInfo->ml_ctx || IsNullOrEmptyString(elementInfo->filename))
+    if(!elementInfo || !elementInfo->cbCtx.ml_ctx || IsNullOrEmptyString(elementInfo->cbCtx.filename))
     {
         dwError = ERROR_TDNF_INVALID_PARAMETER;
         BAIL_ON_TDNF_ERROR(dwError);
@@ -239,14 +665,7 @@ TDNFParseFileTag(
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    if (strcmp(name, elementInfo->filename))
-    {
-        pr_err("%s: Invalid filename from metalink file:%s", __func__, name);
-        dwError = ERROR_TDNF_METALINK_PARSER_INVALID_FILE_NAME;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    dwError = TDNFAllocateString(name, &(elementInfo->ml_ctx->filename));
+    dwError = TDNFMetalinkParseFileName(&elementInfo->cbCtx, name);
     BAIL_ON_TDNF_ERROR(dwError);
 
 cleanup:
@@ -264,11 +683,9 @@ TDNFParseHashTag(
 {
     uint32_t dwError = 0;
     const char *type = NULL;
-    char *value = NULL;
-    TDNF_ML_HASH_INFO *ml_hash_info = NULL;
     struct MetalinkElementInfo* elementInfo = (struct MetalinkElementInfo*)userData;
 
-    if(!elementInfo || !elementInfo->ml_ctx)
+    if(!elementInfo || !elementInfo->cbCtx.ml_ctx)
     {
         dwError = ERROR_TDNF_INVALID_PARAMETER;
         BAIL_ON_TDNF_ERROR(dwError);
@@ -284,42 +701,17 @@ TDNFParseHashTag(
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    dwError = TDNFAllocateMemory(1, sizeof(TDNF_ML_HASH_INFO),
-                                 (void**)&ml_hash_info);
-    BAIL_ON_TDNF_ERROR(dwError);
-
-    dwError = TDNFAllocateString(type, &(ml_hash_info->type));
-    BAIL_ON_TDNF_ERROR(dwError);
-
-    //Get Hash Content.
-    TDNFAllocateStringN(val, len, &value);
-
-    if(!value)
-    {
-        dwError = ERROR_TDNF_METALINK_PARSER_MISSING_HASH_CONTENT;
-        pr_err("XML Parser Error:HASH value is not present in HASH element");
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    dwError = TDNFAllocateString(value, &(ml_hash_info->value));
-    BAIL_ON_TDNF_ERROR(dwError);
-
-    //Append hash info in ml_ctx hash list.
-    dwError = TDNFAppendList(&(elementInfo->ml_ctx->hashes), ml_hash_info);
+    dwError = TDNFMetalinkParseHashValue(
+                    elementInfo->cbCtx.ml_ctx,
+                    type,
+                    val,
+                    (size_t)len);
     BAIL_ON_TDNF_ERROR(dwError);
 
 cleanup:
-    if(value != NULL){
-       TDNF_SAFE_FREE_MEMORY(value);
-    }
     return dwError;
 
 error:
-    if(ml_hash_info)
-    {
-        TDNFMetalinkHashFree(ml_hash_info);
-        ml_hash_info = NULL;
-    }
     goto cleanup;
 }
 
@@ -331,95 +723,38 @@ TDNFParseUrlTag(
     )
 {
     uint32_t dwError = 0;
-    char *value = NULL;
-    char *prefval = NULL;
-    int prefValue = 0;
-    TDNF_ML_URL_INFO *ml_url_info = NULL;
     struct MetalinkElementInfo* elementInfo = (struct MetalinkElementInfo*)userData;
+    const char *pszProtocol = NULL;
+    const char *pszType = NULL;
+    const char *pszLocation = NULL;
+    const char *pszPreference = NULL;
 
-    if(!elementInfo || !elementInfo->ml_ctx)
+    if(!elementInfo || !elementInfo->cbCtx.ml_ctx)
     {
         dwError = ERROR_TDNF_INVALID_PARAMETER;
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    dwError = TDNFAllocateMemory(1, sizeof(TDNF_ML_URL_INFO),
-                                 (void**)&ml_url_info);
-    BAIL_ON_TDNF_ERROR(dwError);
+    pszProtocol = TDNFSearchTag(elementInfo->attributes, ATTR_PROTOCOL);
+    pszType = TDNFSearchTag(elementInfo->attributes, ATTR_TYPE);
+    pszLocation = TDNFSearchTag(elementInfo->attributes, ATTR_LOCATION);
+    pszPreference = TDNFSearchTag(elementInfo->attributes, ATTR_PREFERENCE);
 
-    for (int i = 0; elementInfo->attributes[i]; i += 2)
-    {
-        if ((!strcmp(elementInfo->attributes[i], ATTR_PROTOCOL)) && (elementInfo->attributes[i + 1] != NULL))
-        {
-           value = (char *)elementInfo->attributes[i + 1];
-           dwError = TDNFAllocateString(value, &(ml_url_info->protocol));
-           BAIL_ON_TDNF_ERROR(dwError);
-        }
-        if ((!strcmp(elementInfo->attributes[i], ATTR_TYPE)) && (elementInfo->attributes[i + 1] != NULL))
-        {
-           value = (char *)elementInfo->attributes[i + 1];
-           dwError = TDNFAllocateString(value, &(ml_url_info->type));
-           BAIL_ON_TDNF_ERROR(dwError);
-        }
-        if ((!strcmp(elementInfo->attributes[i], ATTR_LOCATION)) && (elementInfo->attributes[i + 1] != NULL))
-        {
-           value = (char *)elementInfo->attributes[i + 1];
-           dwError = TDNFAllocateString(value, &(ml_url_info->location));
-           BAIL_ON_TDNF_ERROR(dwError);
-        }
-        if ((!strcmp(elementInfo->attributes[i], ATTR_PREFERENCE)) && (elementInfo->attributes[i + 1] != NULL))
-        {
-           prefval = (char *)elementInfo->attributes[i + 1];
-           if(sscanf(prefval, "%d", &prefValue) != 1)
-           {
-               dwError = ERROR_TDNF_INVALID_PARAMETER;
-               pr_err("XML Parser Warning: Preference is invalid value: %s\n", prefval);
-               BAIL_ON_TDNF_ERROR(dwError);
-           }
-
-           if (prefValue < 0 || prefValue > 100)
-           {
-               dwError = ERROR_TDNF_METALINK_PARSER_MISSING_URL_ATTR;
-               pr_err("XML Parser Warning: Bad value (\"%s\") of \"preference\""
-                      "attribute in url element (should be in range 0-100)", value);
-               BAIL_ON_TDNF_ERROR(dwError);
-           }
-           else
-           {
-               ml_url_info->preference = prefValue;
-           }
-       }
-    }
-
-    //Get URL Content.
-    TDNFAllocateStringN(val, len, &value);
-
-    if(!value)
-    {
-        dwError = ERROR_TDNF_METALINK_PARSER_MISSING_URL_CONTENT;
-        pr_err("URL is no present in URL element");
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    dwError = TDNFAllocateString(value, &(ml_url_info->url));
-    BAIL_ON_TDNF_ERROR(dwError);
-
-    //Append url info in ml_ctx url list.
-    dwError = TDNFAppendList(&(elementInfo->ml_ctx->urls), ml_url_info);
+    dwError = TDNFMetalinkParseUrlValue(
+                    elementInfo->cbCtx.ml_ctx,
+                    pszProtocol,
+                    pszType,
+                    pszLocation,
+                    pszPreference,
+                    false,
+                    val,
+                    (size_t)len);
     BAIL_ON_TDNF_ERROR(dwError);
 
 cleanup:
-    if(value != NULL){
-       TDNF_SAFE_FREE_MEMORY(value);
-    }
     return dwError;
 
 error:
-    if(ml_url_info)
-    {
-        TDNFMetalinkUrlFree(ml_url_info);
-        ml_url_info = NULL;
-    }
     goto cleanup;
 }
 
@@ -456,7 +791,8 @@ TDNFXmlParseData(
 {
     struct MetalinkElementInfo* elementInfo = (struct MetalinkElementInfo*)userData;
 
-    if(!elementInfo || !elementInfo->ml_ctx || IsNullOrEmptyString(elementInfo->filename) || elementInfo->dwError)
+    if(!elementInfo || !elementInfo->cbCtx.ml_ctx ||
+       IsNullOrEmptyString(elementInfo->cbCtx.filename) || elementInfo->dwError)
     {
         uint32_t dwError = ERROR_TDNF_INVALID_PARAMETER;
 
@@ -476,23 +812,11 @@ TDNFXmlParseData(
     }
     else if(!strcmp(elementInfo->startElement, TAG_NAME_SIZE))
     {
-        /* 12-1 chars is sufficient to hold a file size in decimal digits */
-        char size_buf[12], *p = size_buf;
-        const char *q = val;
-
-        while (*q &&
-               q < val + len &&
-               p < size_buf + sizeof(size_buf) - 1 &&
-               isdigit(*q))
-            *p++ = *q++;
-        *p = 0;
-
-        if (!size_buf[0]) {
-            elementInfo->dwError = ERROR_TDNF_METALINK_PARSER_MISSING_FILE_SIZE;
-            pr_err("XML Parser Error: file size is missing: '%s'", size_buf);
-            BAIL_ON_TDNF_ERROR(elementInfo->dwError);
-        }
-        elementInfo->ml_ctx->size = strtoi(size_buf);
+        elementInfo->dwError = TDNFMetalinkParseSizeValue(
+                                    elementInfo->cbCtx.ml_ctx,
+                                    val,
+                                    (size_t)len);
+        BAIL_ON_TDNF_ERROR(elementInfo->dwError);
     }
     else if(!strcmp(elementInfo->startElement, TAG_NAME_HASH))
     {
@@ -530,6 +854,437 @@ error:
      goto cleanup;
 }
 
+static uint32_t
+TDNFMetalinkReadFileBuffer(
+    FILE *file,
+    char **ppszBuffer,
+    size_t *pnBufferSize
+    )
+{
+    uint32_t dwError = 0;
+    struct stat st = {0};
+    size_t nBufferSize = 0;
+    char *pszBuffer = NULL;
+
+    if (!file || !ppszBuffer || !pnBufferSize)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    if (fstat(fileno(file), &st) == -1)
+    {
+        pr_err("Error getting file information");
+        dwError = errno;
+        BAIL_ON_TDNF_SYSTEM_ERROR_UNCOND(dwError);
+    }
+
+    nBufferSize = (size_t)st.st_size;
+
+    dwError = TDNFAllocateMemory(nBufferSize + 1, sizeof(char), (void **)&pszBuffer);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    if (fread(pszBuffer, 1, nBufferSize, file) != nBufferSize)
+    {
+        pr_err("Failed to read the metalink file.");
+        dwError = errno;
+        BAIL_ON_TDNF_SYSTEM_ERROR_UNCOND(dwError);
+    }
+
+    pszBuffer[nBufferSize] = '\0';
+
+    *ppszBuffer = pszBuffer;
+    *pnBufferSize = nBufferSize;
+
+cleanup:
+    return dwError;
+error:
+    TDNF_SAFE_FREE_MEMORY(pszBuffer);
+    if (ppszBuffer)
+    {
+        *ppszBuffer = NULL;
+    }
+    if (pnBufferSize)
+    {
+        *pnBufferSize = 0;
+    }
+    goto cleanup;
+}
+
+#if !defined(TDNF_METALINK_ZIG_XML) || defined(TDNF_METALINK_ZIG_XML_CROSSCHECK)
+static uint32_t
+TDNFMetalinkParseBufferWithExpat(
+    TDNF_ML_CTX *ml_ctx,
+    const char *pszBuffer,
+    size_t nBufferSize,
+    const char *pszFilename
+    )
+{
+    uint32_t dwError = 0;
+    struct MetalinkElementInfo elementInfo = {0};
+    XML_Parser parser = XML_ParserCreate(NULL);
+
+    if (!ml_ctx || !pszBuffer || IsNullOrEmptyString(pszFilename) || parser == NULL)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    elementInfo.cbCtx.ml_ctx = ml_ctx;
+    elementInfo.cbCtx.filename = pszFilename;
+
+    XML_SetElementHandler(parser, TDNFXmlParseStartElement, TDNFXmlParseEndElement);
+    XML_SetCharacterDataHandler(parser, TDNFXmlParseData);
+    XML_SetUserData(parser, &elementInfo);
+
+    dwError = XML_Parse(parser, pszBuffer, (int)(nBufferSize + 1), XML_TRUE);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    if (elementInfo.dwError != 0)
+    {
+        dwError = elementInfo.dwError;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+cleanup:
+    if (parser != NULL)
+    {
+        XML_ParserFree(parser);
+    }
+    return dwError;
+error:
+    goto cleanup;
+}
+#endif
+
+#ifdef TDNF_METALINK_ZIG_XML
+static uint32_t
+TDNFMetalinkParseBufferWithZig(
+    TDNF_ML_CTX *ml_ctx,
+    const char *pszBuffer,
+    size_t nBufferSize,
+    const char *pszFilename
+    )
+{
+    TDNF_METALINK_CALLBACK_CONTEXT cbCtx = {0};
+    TDNF_METALINK_XML_CALLBACKS callbacks = {
+        .pfnFile = TDNFMetalinkZigParseFile,
+        .pfnSize = TDNFMetalinkZigParseSize,
+        .pfnHash = TDNFMetalinkZigParseHash,
+        .pfnUrl = TDNFMetalinkZigParseUrl,
+    };
+
+    if (!ml_ctx || !pszBuffer || IsNullOrEmptyString(pszFilename))
+    {
+        return ERROR_TDNF_INVALID_PARAMETER;
+    }
+
+    cbCtx.ml_ctx = ml_ctx;
+    cbCtx.filename = pszFilename;
+
+    return TDNFMetalinkXmlParseBuffer(pszBuffer, nBufferSize, &callbacks, &cbCtx);
+}
+#endif
+
+#ifdef TDNF_METALINK_ZIG_XML_CROSSCHECK
+static bool
+TDNFMetalinkStringsEqual(
+    const char *pszLeft,
+    const char *pszRight
+    )
+{
+    if (pszLeft == NULL || pszRight == NULL)
+    {
+        return pszLeft == pszRight;
+    }
+
+    return strcmp(pszLeft, pszRight) == 0;
+}
+
+static const char *
+TDNFMetalinkLogString(
+    const char *pszValue
+    )
+{
+    return pszValue ? pszValue : "(null)";
+}
+
+static void
+TDNFMetalinkCrossCheckLogHeader(
+    bool *pbLoggedHeader,
+    const char *pszFilename
+    )
+{
+    if (!pbLoggedHeader || *pbLoggedHeader)
+    {
+        return;
+    }
+
+    pr_crit("metalink Zig XML cross-check mismatch for %s",
+            TDNFMetalinkLogString(pszFilename));
+    *pbLoggedHeader = true;
+}
+
+static size_t
+TDNFMetalinkListCount(
+    TDNF_ML_LIST *pList
+    )
+{
+    size_t nCount = 0;
+
+    while (pList)
+    {
+        nCount++;
+        pList = pList->next;
+    }
+
+    return nCount;
+}
+
+static void
+TDNFMetalinkCrossCheckCompareHashes(
+    const char *pszFilename,
+    TDNF_ML_HASH_LIST *pExpatHashList,
+    TDNF_ML_HASH_LIST *pZigHashList,
+    bool *pbLoggedHeader
+    )
+{
+    size_t nIndex = 0;
+    size_t nExpatCount = TDNFMetalinkListCount(pExpatHashList);
+    size_t nZigCount = TDNFMetalinkListCount(pZigHashList);
+
+    if (nExpatCount != nZigCount)
+    {
+        TDNFMetalinkCrossCheckLogHeader(pbLoggedHeader, pszFilename);
+        pr_err("  hashes.count: expat=%zu zig=%zu", nExpatCount, nZigCount);
+    }
+
+    while (pExpatHashList || pZigHashList)
+    {
+        TDNF_ML_HASH_INFO *pExpatHash = pExpatHashList ? pExpatHashList->data : NULL;
+        TDNF_ML_HASH_INFO *pZigHash = pZigHashList ? pZigHashList->data : NULL;
+
+        if (!pExpatHashList || !pZigHashList)
+        {
+            TDNFMetalinkCrossCheckLogHeader(pbLoggedHeader, pszFilename);
+            pr_err("  hash[%zu]: expat.type=\"%s\" expat.value=\"%s\" zig.type=\"%s\" zig.value=\"%s\"",
+                   nIndex,
+                   TDNFMetalinkLogString(pExpatHash ? pExpatHash->type : NULL),
+                   TDNFMetalinkLogString(pExpatHash ? pExpatHash->value : NULL),
+                   TDNFMetalinkLogString(pZigHash ? pZigHash->type : NULL),
+                   TDNFMetalinkLogString(pZigHash ? pZigHash->value : NULL));
+        }
+        else
+        {
+            if (!TDNFMetalinkStringsEqual(pExpatHash ? pExpatHash->type : NULL,
+                                          pZigHash ? pZigHash->type : NULL))
+            {
+                TDNFMetalinkCrossCheckLogHeader(pbLoggedHeader, pszFilename);
+                pr_err("  hash[%zu].type: expat=\"%s\" zig=\"%s\"",
+                       nIndex,
+                       TDNFMetalinkLogString(pExpatHash ? pExpatHash->type : NULL),
+                       TDNFMetalinkLogString(pZigHash ? pZigHash->type : NULL));
+            }
+
+            if (!TDNFMetalinkStringsEqual(pExpatHash ? pExpatHash->value : NULL,
+                                          pZigHash ? pZigHash->value : NULL))
+            {
+                TDNFMetalinkCrossCheckLogHeader(pbLoggedHeader, pszFilename);
+                pr_err("  hash[%zu].value: expat=\"%s\" zig=\"%s\"",
+                       nIndex,
+                       TDNFMetalinkLogString(pExpatHash ? pExpatHash->value : NULL),
+                       TDNFMetalinkLogString(pZigHash ? pZigHash->value : NULL));
+            }
+        }
+
+        pExpatHashList = pExpatHashList ? pExpatHashList->next : NULL;
+        pZigHashList = pZigHashList ? pZigHashList->next : NULL;
+        nIndex++;
+    }
+}
+
+static void
+TDNFMetalinkCrossCheckCompareUrls(
+    const char *pszFilename,
+    TDNF_ML_URL_LIST *pExpatUrlList,
+    TDNF_ML_URL_LIST *pZigUrlList,
+    bool *pbLoggedHeader
+    )
+{
+    size_t nIndex = 0;
+    size_t nExpatCount = TDNFMetalinkListCount(pExpatUrlList);
+    size_t nZigCount = TDNFMetalinkListCount(pZigUrlList);
+
+    if (nExpatCount != nZigCount)
+    {
+        TDNFMetalinkCrossCheckLogHeader(pbLoggedHeader, pszFilename);
+        pr_err("  urls.count: expat=%zu zig=%zu", nExpatCount, nZigCount);
+    }
+
+    while (pExpatUrlList || pZigUrlList)
+    {
+        TDNF_ML_URL_INFO *pExpatUrl = pExpatUrlList ? pExpatUrlList->data : NULL;
+        TDNF_ML_URL_INFO *pZigUrl = pZigUrlList ? pZigUrlList->data : NULL;
+
+        if (!pExpatUrlList || !pZigUrlList)
+        {
+            TDNFMetalinkCrossCheckLogHeader(pbLoggedHeader, pszFilename);
+            pr_err("  url[%zu]: expat.protocol=\"%s\" expat.type=\"%s\" expat.location=\"%s\" expat.preference=%d expat.url=\"%s\" zig.protocol=\"%s\" zig.type=\"%s\" zig.location=\"%s\" zig.preference=%d zig.url=\"%s\"",
+                   nIndex,
+                   TDNFMetalinkLogString(pExpatUrl ? pExpatUrl->protocol : NULL),
+                   TDNFMetalinkLogString(pExpatUrl ? pExpatUrl->type : NULL),
+                   TDNFMetalinkLogString(pExpatUrl ? pExpatUrl->location : NULL),
+                   pExpatUrl ? pExpatUrl->preference : 0,
+                   TDNFMetalinkLogString(pExpatUrl ? pExpatUrl->url : NULL),
+                   TDNFMetalinkLogString(pZigUrl ? pZigUrl->protocol : NULL),
+                   TDNFMetalinkLogString(pZigUrl ? pZigUrl->type : NULL),
+                   TDNFMetalinkLogString(pZigUrl ? pZigUrl->location : NULL),
+                   pZigUrl ? pZigUrl->preference : 0,
+                   TDNFMetalinkLogString(pZigUrl ? pZigUrl->url : NULL));
+        }
+        else
+        {
+            if (!TDNFMetalinkStringsEqual(pExpatUrl->protocol, pZigUrl->protocol))
+            {
+                TDNFMetalinkCrossCheckLogHeader(pbLoggedHeader, pszFilename);
+                pr_err("  url[%zu].protocol: expat=\"%s\" zig=\"%s\"",
+                       nIndex,
+                       TDNFMetalinkLogString(pExpatUrl->protocol),
+                       TDNFMetalinkLogString(pZigUrl->protocol));
+            }
+            if (!TDNFMetalinkStringsEqual(pExpatUrl->type, pZigUrl->type))
+            {
+                TDNFMetalinkCrossCheckLogHeader(pbLoggedHeader, pszFilename);
+                pr_err("  url[%zu].type: expat=\"%s\" zig=\"%s\"",
+                       nIndex,
+                       TDNFMetalinkLogString(pExpatUrl->type),
+                       TDNFMetalinkLogString(pZigUrl->type));
+            }
+            if (!TDNFMetalinkStringsEqual(pExpatUrl->location, pZigUrl->location))
+            {
+                TDNFMetalinkCrossCheckLogHeader(pbLoggedHeader, pszFilename);
+                pr_err("  url[%zu].location: expat=\"%s\" zig=\"%s\"",
+                       nIndex,
+                       TDNFMetalinkLogString(pExpatUrl->location),
+                       TDNFMetalinkLogString(pZigUrl->location));
+            }
+            if (pExpatUrl->preference != pZigUrl->preference)
+            {
+                TDNFMetalinkCrossCheckLogHeader(pbLoggedHeader, pszFilename);
+                pr_err("  url[%zu].preference: expat=%d zig=%d",
+                       nIndex,
+                       pExpatUrl->preference,
+                       pZigUrl->preference);
+            }
+            if (!TDNFMetalinkStringsEqual(pExpatUrl->url, pZigUrl->url))
+            {
+                TDNFMetalinkCrossCheckLogHeader(pbLoggedHeader, pszFilename);
+                pr_err("  url[%zu].url: expat=\"%s\" zig=\"%s\"",
+                       nIndex,
+                       TDNFMetalinkLogString(pExpatUrl->url),
+                       TDNFMetalinkLogString(pZigUrl->url));
+            }
+        }
+
+        pExpatUrlList = pExpatUrlList ? pExpatUrlList->next : NULL;
+        pZigUrlList = pZigUrlList ? pZigUrlList->next : NULL;
+        nIndex++;
+    }
+}
+
+static void
+TDNFMetalinkCrossCheckCompareResults(
+    const char *pszFilename,
+    TDNF_ML_CTX *pExpatCtx,
+    TDNF_ML_CTX *pZigCtx
+    )
+{
+    bool bLoggedHeader = false;
+
+    if (!pExpatCtx || !pZigCtx)
+    {
+        return;
+    }
+
+    TDNFSortListOnPreference(&pExpatCtx->urls);
+    TDNFSortListOnPreference(&pZigCtx->urls);
+
+    if (!TDNFMetalinkStringsEqual(pExpatCtx->filename, pZigCtx->filename))
+    {
+        TDNFMetalinkCrossCheckLogHeader(&bLoggedHeader, pszFilename);
+        pr_err("  filename: expat=\"%s\" zig=\"%s\"",
+               TDNFMetalinkLogString(pExpatCtx->filename),
+               TDNFMetalinkLogString(pZigCtx->filename));
+    }
+
+    if (pExpatCtx->size != pZigCtx->size)
+    {
+        TDNFMetalinkCrossCheckLogHeader(&bLoggedHeader, pszFilename);
+        pr_err("  size: expat=%ld zig=%ld",
+               pExpatCtx->size,
+               pZigCtx->size);
+    }
+
+    TDNFMetalinkCrossCheckCompareHashes(
+        pszFilename,
+        pExpatCtx->hashes,
+        pZigCtx->hashes,
+        &bLoggedHeader);
+    TDNFMetalinkCrossCheckCompareUrls(
+        pszFilename,
+        pExpatCtx->urls,
+        pZigCtx->urls,
+        &bLoggedHeader);
+}
+
+static void
+TDNFMetalinkRunZigXmlCrossCheck(
+    TDNF_ML_CTX *pExpatCtx,
+    const char *pszBuffer,
+    size_t nBufferSize,
+    const char *pszFilename
+    )
+{
+    uint32_t dwError = 0;
+    TDNF_ML_CTX *pZigCtx = NULL;
+
+    if (!pExpatCtx || !pszBuffer || IsNullOrEmptyString(pszFilename))
+    {
+        return;
+    }
+
+    dwError = TDNFAllocateMemory(1, sizeof(TDNF_ML_CTX), (void **)&pZigCtx);
+    if (dwError != 0)
+    {
+        pr_err("Unable to allocate metalink Zig XML cross-check context for %s, ERROR: code=%u",
+               pszFilename, dwError);
+        goto cleanup;
+    }
+
+    dwError = TDNFMetalinkParseBufferWithZig(
+                    pZigCtx,
+                    pszBuffer,
+                    nBufferSize,
+                    pszFilename);
+    if (dwError != 0)
+    {
+        pr_crit("metalink Zig XML cross-check parser mismatch for %s",
+                pszFilename);
+        pr_err("  expat=0 zig=%u", dwError);
+        goto cleanup;
+    }
+
+    TDNFMetalinkCrossCheckCompareResults(pszFilename, pExpatCtx, pZigCtx);
+
+cleanup:
+    /* Best-effort debug-only cross-check: keep the temporary Zig parse
+     * result alive until process exit rather than perturb the primary
+     * expat path with extra cleanup failure modes in this PR.
+     */
+    UNUSED(pZigCtx);
+}
+#endif
+
 uint32_t
 TDNFMetalinkParseFile(
     TDNF_ML_CTX *ml_ctx,
@@ -538,59 +1293,33 @@ TDNFMetalinkParseFile(
     )
 {
     uint32_t dwError = 0;
-    struct stat st = {0};
-    size_t file_size = 0;
-    char *buffer = NULL;
-    struct MetalinkElementInfo elementInfo = {0};
+    size_t nBufferSize = 0;
+    char *pszBuffer = NULL;
 
-    XML_Parser parser = XML_ParserCreate(NULL);
-    if(!ml_ctx || (file == NULL) || IsNullOrEmptyString(filename) || (parser == NULL))
+    if(!ml_ctx || (file == NULL) || IsNullOrEmptyString(filename))
     {
         dwError = ERROR_TDNF_INVALID_PARAMETER;
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    elementInfo.ml_ctx = ml_ctx;
-    elementInfo.filename = filename;
-
-    XML_SetElementHandler(parser, TDNFXmlParseStartElement, TDNFXmlParseEndElement);
-    XML_SetCharacterDataHandler(parser, TDNFXmlParseData);
-    XML_SetUserData(parser, &elementInfo);
-
-    // Get file information using fstat
-    if (fstat(fileno(file), &st) == -1) {
-        pr_err("Error getting file information");
-        dwError = errno;
-        BAIL_ON_TDNF_SYSTEM_ERROR_UNCOND(dwError);
-    }
-
-    // Get the file size from the stat structure
-    file_size = st.st_size;
-
-    // Allocate memory for the buffer
-    dwError = TDNFAllocateMemory(file_size + 1, sizeof(char*), (void **)&buffer);
+    dwError = TDNFMetalinkReadFileBuffer(file, &pszBuffer, &nBufferSize);
     BAIL_ON_TDNF_ERROR(dwError);
 
-    // Read the file into the buffer
-    if (fread(buffer, 1, file_size, file) != file_size) {
-        pr_err("Failed to read the metalink file %s.\n", filename);
-        dwError = errno;
-        BAIL_ON_TDNF_SYSTEM_ERROR_UNCOND(dwError);
-    }
-
-    buffer[file_size] = '\0';
-    dwError = XML_Parse(parser, buffer, file_size + 1, XML_TRUE);
+#ifdef TDNF_METALINK_ZIG_XML_CROSSCHECK
+    dwError = TDNFMetalinkParseBufferWithExpat(ml_ctx, pszBuffer, nBufferSize, filename);
     BAIL_ON_TDNF_ERROR(dwError);
 
-    if(elementInfo.dwError != 0)
-    {
-       dwError = elementInfo.dwError;
-       BAIL_ON_TDNF_ERROR(elementInfo.dwError);
-    }
+    TDNFMetalinkRunZigXmlCrossCheck(ml_ctx, pszBuffer, nBufferSize, filename);
+#elif defined(TDNF_METALINK_ZIG_XML)
+    dwError = TDNFMetalinkParseBufferWithZig(ml_ctx, pszBuffer, nBufferSize, filename);
+    BAIL_ON_TDNF_ERROR(dwError);
+#else
+    dwError = TDNFMetalinkParseBufferWithExpat(ml_ctx, pszBuffer, nBufferSize, filename);
+    BAIL_ON_TDNF_ERROR(dwError);
+#endif
 
 cleanup:
-    TDNF_SAFE_FREE_MEMORY(buffer);
-    XML_ParserFree(parser);
+    TDNF_SAFE_FREE_MEMORY(pszBuffer);
     return dwError;
 error:
     goto cleanup;

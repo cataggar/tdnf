@@ -999,6 +999,22 @@ const metalink_v4_fixture =
     \\</metalink>
 ;
 
+const setup_repo_fixture =
+    \\<?xml version="1.0" encoding="utf-8"?>
+    \\<metalink version="3.0" xmlns="http://www.metalinker.org/" type="dynamic" pubdate="Wed, 05 Feb 2020 08:14:56 GMT">
+    \\ <files>
+    \\  <file name="repomd.xml">
+    \\   <size>1234</size>
+    \\   <verification>
+    \\   </verification>
+    \\   <resources maxconnections="1">
+    \\    <url protocol="http" type="file" location="IN" preference="100">http://localhost:8080/photon-test/repodata/repomd.xml</url>
+    \\   </resources>
+    \\  </file>
+    \\ </files>
+    \\</metalink>
+;
+
 const entity_fixture =
     \\<metalink xmlns="urn:ietf:params:xml:ns:metalink">
     \\  <file name="repomd.xml">
@@ -1097,6 +1113,33 @@ test "parses metalink 4.0 fixture with priority ranking" {
     try testing.expectEqualStrings(
         "https://mirror.example.jp/repodata/repomd.xml",
         recorder.urls.items[1].value,
+    );
+}
+
+test "parses generated setup-repo metalink fixture" {
+    const testing = std.testing;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var recorder = Recorder.init(arena.allocator());
+    try testing.expectEqual(@as(u32, 0), parseWithRecorder(setup_repo_fixture, &recorder));
+
+    try testing.expectEqual(@as(usize, 1), recorder.files.items.len);
+    try testing.expectEqual(@as(usize, 1), recorder.sizes.items.len);
+    try testing.expectEqual(@as(usize, 0), recorder.hashes.items.len);
+    try testing.expectEqual(@as(usize, 1), recorder.urls.items.len);
+
+    try testing.expectEqualStrings("repomd.xml", recorder.files.items[0]);
+    try testing.expectEqualStrings("1234", recorder.sizes.items[0]);
+    try expectOptionalString("http", recorder.urls.items[0].protocol);
+    try expectOptionalString("file", recorder.urls.items[0].url_type);
+    try expectOptionalString("IN", recorder.urls.items[0].location);
+    try expectOptionalString("100", recorder.urls.items[0].ranking_attr);
+    try testing.expect(!recorder.urls.items[0].ranking_is_priority);
+    try testing.expectEqualStrings(
+        "http://localhost:8080/photon-test/repodata/repomd.xml",
+        recorder.urls.items[0].value,
     );
 }
 

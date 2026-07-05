@@ -15,6 +15,8 @@
 #include <string.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <ctype.h>
+#include <limits.h>
 #include <unistd.h>
 
 #include <tdnf.h>
@@ -27,6 +29,7 @@
 //libcurl
 #include <curl/curl.h>
 
+#include "xml.h"
 #include "../../common/defines.h"
 #include "../../common/structs.h"
 #include "../../common/prototypes.h"
