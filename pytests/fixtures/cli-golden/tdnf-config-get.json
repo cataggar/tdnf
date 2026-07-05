@@ -1,0 +1,11 @@
+{
+  "argv": [
+    "tdnf-config",
+    "get",
+    "foo",
+    "baseurl"
+  ],
+  "stdout": "http://foo.bar.com",
+  "stderr": "",
+  "retval": 0
+}

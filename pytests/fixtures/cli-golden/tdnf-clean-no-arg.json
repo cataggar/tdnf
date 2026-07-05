@@ -1,0 +1,9 @@
+{
+  "argv": [
+    "tdnf",
+    "clean"
+  ],
+  "stdout": "",
+  "stderr": "Error(903) : Clean requires an option: packages, metadata, dbcache, plugins, expire-cache, all",
+  "retval": 903
+}

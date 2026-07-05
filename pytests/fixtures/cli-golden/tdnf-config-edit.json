@@ -1,0 +1,11 @@
+{
+  "argv": [
+    "tdnf-config",
+    "edit",
+    "foo",
+    "enabled=true"
+  ],
+  "stdout": "",
+  "stderr": "",
+  "retval": 0
+}

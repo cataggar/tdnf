@@ -7,7 +7,6 @@
 #
 
 import os
-import re
 import ssl
 import sys
 import time
@@ -25,6 +24,12 @@ from OpenSSL import crypto
 from urllib.parse import urlparse
 from multiprocessing import Process
 from http.server import SimpleHTTPRequestHandler, HTTPServer
+from cli_testlib import (
+    build_command_env,
+    decorate_tdnf_cmd_for_test,
+    normalize_command_result,
+    split_output_lines,
+)
 
 ARCH = platform.machine()
 
@@ -275,12 +280,13 @@ class TestUtils(object):
         return True, None
 
     def _decorate_tdnf_cmd_for_test(self, cmd, noconfig=False):
-        if cmd[0] in {'tdnf', 'tdnf-config'}:
-            if 'build_dir' in self.config:
-                cmd[0] = os.path.join(self.config['build_dir'], 'bin', cmd[0])
-            if ('-c' not in cmd and '--config' not in cmd and not noconfig):
-                cmd.insert(1, '-c')
-                cmd.insert(2, os.path.join(self.config['repo_path'], 'tdnf.conf'))
+        decorated, executable = decorate_tdnf_cmd_for_test(
+            cmd,
+            self.config,
+            noconfig=noconfig,
+        )
+        cmd[:] = decorated
+        return executable
 
     def _skip_if_valgrind_disabled(self):
         if not self.config['valgrind_enabled']:
@@ -288,7 +294,9 @@ class TestUtils(object):
 
     def run_memcheck(self, cmd):
         self._skip_if_valgrind_disabled()
-        self._decorate_tdnf_cmd_for_test(cmd)
+        executable = self._decorate_tdnf_cmd_for_test(cmd)
+        if executable:
+            cmd[0] = executable
         memcheck_cmd = ['valgrind',
                         '--leak-check=full',
                         '--exit-on-first-error=yes',
@@ -298,36 +306,29 @@ class TestUtils(object):
     def run(self, cmd, cwd=None, noconfig=False):
         if isinstance(cmd, str):
             cmd = cmd.split()
-        self._decorate_tdnf_cmd_for_test(cmd, noconfig)
-        return self._run(cmd, cwd=cwd)
+        executable = self._decorate_tdnf_cmd_for_test(cmd, noconfig)
+        return self._run(cmd, cwd=cwd, executable=executable)
 
-    def _run(self, cmd, retvalonly=False, cwd=None):
+    def _run(self, cmd, retvalonly=False, cwd=None, executable=None):
         use_shell = not isinstance(cmd, list)
         print(cmd)
         process = subprocess.Popen(cmd, shell=use_shell,
+                                   executable=executable,
                                    stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE,
                                    stdin=subprocess.DEVNULL,
-                                   cwd=cwd)
+                                   cwd=cwd,
+                                   env=build_command_env(self.config))
         out, err = process.communicate()
         if retvalonly:
             return {'retval': process.returncode}
 
-        stdout = out.decode().strip()
-        stderr = err.decode().strip()
-        retval = process.returncode
-        capture = re.search(r'^Error\((\d+)\) :', stderr, re.MULTILINE)
-        if capture:
-            retval = int(capture.groups()[0])
+        result = normalize_command_result(process.returncode, out, err)
 
         ret = {}
-        ret['stdout'] = []
-        ret['stderr'] = []
-        if stdout:
-            ret['stdout'] = stdout.split('\n')
-        if stderr:
-            ret['stderr'] = stderr.split('\n')
-        ret['retval'] = retval
+        ret['stdout'] = split_output_lines(result['stdout'])
+        ret['stderr'] = split_output_lines(result['stderr'])
+        ret['retval'] = result['retval']
         return ret
 
     def create_repoconf(self, filename, baseurl, name):

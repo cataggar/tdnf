@@ -1,0 +1,10 @@
+{
+  "argv": [
+    "tdnf",
+    "clean",
+    "abcde"
+  ],
+  "stdout": "",
+  "stderr": "Error(901) : There was no match for the search.",
+  "retval": 901
+}

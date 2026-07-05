@@ -1,0 +1,9 @@
+{
+  "argv": [
+    "tdnf",
+    "--version"
+  ],
+  "stdout": "tdnf: 4.0.0",
+  "stderr": "",
+  "retval": 0
+}

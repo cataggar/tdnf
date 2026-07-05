@@ -1,0 +1,10 @@
+{
+  "argv": [
+    "tdnf",
+    "list",
+    "invalid_package"
+  ],
+  "stdout": "",
+  "stderr": "Error(1011) : No matching packages",
+  "retval": 1011
+}

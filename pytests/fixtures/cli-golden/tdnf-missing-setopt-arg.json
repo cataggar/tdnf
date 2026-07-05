@@ -1,0 +1,9 @@
+{
+  "argv": [
+    "tdnf",
+    "--setopt"
+  ],
+  "stdout": "",
+  "stderr": "Option --setopt requires an argument\nError(909) : Command line error: expected one argument.",
+  "retval": 909
+}
