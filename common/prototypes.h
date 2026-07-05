@@ -274,7 +274,7 @@ int isTrue(const char *str);
 uint32_t
 TDNFGetDigestForFile(
     const char *filename,
-    hash_op *hash,
+    int type,
     uint8_t *digest
     );
 

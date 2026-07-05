@@ -84,7 +84,7 @@ TDNFCheckRepoMDFileHashFromMetalink(
 {
     uint32_t dwError = 0;
     TDNF_ML_HASH_LIST *hashList = NULL;
-    unsigned char digest[EVP_MAX_MD_SIZE] = {0};
+    unsigned char digest[TDNF_MAX_DIGEST_LEN] = {0};
     int hash_Type = -1;
     TDNF_ML_HASH_INFO *currHashInfo = NULL;
 

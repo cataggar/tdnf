@@ -27,6 +27,27 @@ hash_type hashType[] =
         {"sha-512", TDNF_HASH_SHA512}
     };
 
+static uint32_t
+TDNFGetDigestForFileOpenSSL(
+    const char *filename,
+    int type,
+    uint8_t *digest
+    );
+
+#ifdef TDNF_RPMZIG_CHECKSUM
+static uint32_t
+TDNFGetDigestForFileRpmzig(
+    const char *filename,
+    int type,
+    uint8_t *digest
+    );
+#endif
+
+static int
+TDNFIsFipsModeEnabled(
+    void
+    );
+
 uint32_t
 TDNFFileReadAllText(
     const char *pszFileName,
@@ -1020,7 +1041,52 @@ int isTrue(const char *str)
 uint32_t
 TDNFGetDigestForFile(
     const char *filename,
-    hash_op *hash,
+    int type,
+    uint8_t *digest
+    )
+{
+    uint32_t dwError = 0;
+    uint32_t (*pfnGetDigestForFile)(
+        const char *,
+        int,
+        uint8_t *
+        ) = TDNFGetDigestForFileOpenSSL;
+
+    if (IsNullOrEmptyString(filename) || !digest)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    if (type < TDNF_HASH_MD5 || type >= TDNF_HASH_SENTINEL)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    if (type == TDNF_HASH_MD5 && TDNFIsFipsModeEnabled())
+    {
+        pr_err("Digest Init Failed\n");
+        dwError = ERROR_TDNF_FIPS_MODE_FORBIDDEN;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+#ifdef TDNF_RPMZIG_CHECKSUM
+    pfnGetDigestForFile = TDNFGetDigestForFileRpmzig;
+#endif
+    dwError = pfnGetDigestForFile(filename, type, digest);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+cleanup:
+    return dwError;
+error:
+    goto cleanup;
+}
+
+static uint32_t
+TDNFGetDigestForFileOpenSSL(
+    const char *filename,
+    int type,
     uint8_t *digest
     )
 {
@@ -1031,12 +1097,21 @@ TDNFGetDigestForFile(
     EVP_MD_CTX *ctx = NULL;
     const EVP_MD *digest_type = NULL;
     unsigned int digest_length = 0;
+    hash_op *hash = NULL;
 
-    if (IsNullOrEmptyString(filename) || !hash || !digest)
+    if (IsNullOrEmptyString(filename) || !digest)
     {
         dwError = ERROR_TDNF_INVALID_PARAMETER;
         BAIL_ON_TDNF_ERROR(dwError);
     }
+
+    if (type < TDNF_HASH_MD5 || type >= TDNF_HASH_SENTINEL)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    hash = hash_ops + type;
 
     fd = open(filename, O_RDONLY);
     if (fd < 0)
@@ -1068,16 +1143,6 @@ TDNFGetDigestForFile(
     {
         pr_err("Digest Init Failed\n");
         dwError = ERROR_TDNF_CHECKSUM_VALIDATION_FAILED;
-        /* MD5 is not approved in FIPS mode. So, overrriding
-           the dwError to show the right error to the user */
-#if defined(OPENSSL_VERSION_MAJOR) && (OPENSSL_VERSION_MAJOR >= 3)
-        if (EVP_default_properties_is_fips_enabled(NULL) && !strcasecmp(hash->hash_type, "md5"))
-#else
-        if (FIPS_mode() && !strcasecmp(hash->hash_type, "md5"))
-#endif
-        {
-            dwError = ERROR_TDNF_FIPS_MODE_FORBIDDEN;
-        }
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
@@ -1123,6 +1188,119 @@ error:
     goto cleanup;
 }
 
+#ifdef TDNF_RPMZIG_CHECKSUM
+static uint32_t
+TDNFGetDigestForFileRpmzig(
+    const char *filename,
+    int type,
+    uint8_t *digest
+    )
+{
+    uint32_t dwError = 0;
+    int fd = -1;
+    char buf[BUFSIZ] = {0};
+    int length = 0;
+    hash_op *hash = NULL;
+    tdnf_rpmzig_digest_ctx *ctx = NULL;
+    const char *pszRpmzigError = NULL;
+
+    if (IsNullOrEmptyString(filename) || !digest)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    if (type < TDNF_HASH_MD5 || type >= TDNF_HASH_SENTINEL)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    hash = hash_ops + type;
+
+    fd = open(filename, O_RDONLY);
+    if (fd < 0)
+    {
+        pr_err("ERROR: Checksum validating (%s) FAILED\n", filename);
+        dwError = errno;
+        BAIL_ON_TDNF_SYSTEM_ERROR_UNCOND(dwError);
+    }
+
+    ctx = tdnf_rpmzig_digest_open(type);
+    if (!ctx)
+    {
+        pszRpmzigError = tdnf_rpmzig_checksum_last_error();
+        pr_err(
+            "rpmzig digest open failed for %s (%s): %s\n",
+            filename,
+            hash->hash_type,
+            IsNullOrEmptyString(pszRpmzigError) ? "unknown error" : pszRpmzigError
+        );
+        dwError = ERROR_TDNF_CHECKSUM_VALIDATION_FAILED;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    while ((length = read(fd, buf, BUFSIZ - 1)) > 0)
+    {
+        if (tdnf_rpmzig_digest_update(ctx, (const unsigned char *)buf, (size_t)length) != 0)
+        {
+            pszRpmzigError = tdnf_rpmzig_checksum_last_error();
+            pr_err(
+                "rpmzig digest update failed for %s (%s): %s\n",
+                filename,
+                hash->hash_type,
+                IsNullOrEmptyString(pszRpmzigError) ? "unknown error" : pszRpmzigError
+            );
+            dwError = ERROR_TDNF_CHECKSUM_VALIDATION_FAILED;
+            BAIL_ON_TDNF_ERROR(dwError);
+        }
+        memset(buf, 0, BUFSIZ);
+    }
+
+    if (length == -1)
+    {
+        pr_err("Error: Checksum validating (%s) FAILED\n", filename);
+        dwError = errno;
+        BAIL_ON_TDNF_SYSTEM_ERROR(dwError);
+    }
+
+    if (tdnf_rpmzig_digest_final(ctx, digest, hash->length) != 0)
+    {
+        pszRpmzigError = tdnf_rpmzig_checksum_last_error();
+        pr_err(
+            "rpmzig digest final failed for %s (%s): %s\n",
+            filename,
+            hash->hash_type,
+            IsNullOrEmptyString(pszRpmzigError) ? "unknown error" : pszRpmzigError
+        );
+        dwError = ERROR_TDNF_CHECKSUM_VALIDATION_FAILED;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+cleanup:
+    if (fd >= 0)
+    {
+        close(fd);
+    }
+    tdnf_rpmzig_digest_close(ctx);
+    return dwError;
+error:
+    goto cleanup;
+}
+#endif
+
+static int
+TDNFIsFipsModeEnabled(
+    void
+    )
+{
+#if defined(OPENSSL_VERSION_MAJOR) && (OPENSSL_VERSION_MAJOR >= 3)
+    return EVP_default_properties_is_fips_enabled(NULL);
+#else
+    return FIPS_mode();
+#endif
+}
+
 uint32_t
 TDNFCheckHash(
     const char *filename,
@@ -1132,7 +1310,7 @@ TDNFCheckHash(
 {
 
     uint32_t dwError = 0;
-    uint8_t digest_from_file[EVP_MAX_MD_SIZE] = {0};
+    uint8_t digest_from_file[TDNF_MAX_DIGEST_LEN] = {0};
     hash_op *hash = NULL;
 
     if (IsNullOrEmptyString(filename) ||
@@ -1150,7 +1328,7 @@ TDNFCheckHash(
 
     hash = hash_ops + type;
 
-    dwError = TDNFGetDigestForFile(filename, hash, digest_from_file);
+    dwError = TDNFGetDigestForFile(filename, type, digest_from_file);
     BAIL_ON_TDNF_ERROR(dwError);
 
     if (memcmp(digest_from_file, digest, hash->length))
