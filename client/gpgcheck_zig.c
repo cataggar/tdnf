@@ -2,9 +2,9 @@
  * rpmzig primary signature verifier for TDNFGPGCheckPackage.
  *
  * Compiled into libtdnf only when build.zig is invoked with
- * -Drpmzig-verify=true or -Drpmzig-verify-pure-zig=true (both
- * define TDNF_RPMZIG_VERIFY). When neither flag is set this file
- * is not part of the build and libtdnf gains no new dependencies.
+ * -Drpmzig-verify=true (defines TDNF_RPMZIG_VERIFY). When the flag
+ * is unset this file is not part of the build and libtdnf keeps the
+ * historical librpm verification path.
  *
  * Under the flag, this function REPLACES the librpm
  * rpmVerifySignatures path (TDNFGPGCheck) — rpmzig is the sole
@@ -12,20 +12,7 @@
  * set to RPMVSF_MASK_NOSIGNATURES so rpmReadPackageFile runs as a
  * header-only reader.
  *
- * Backend selection (compile-time, no runtime branching):
- *
- *   TDNF_RPMZIG_VERIFY (default rpmzig build)
- *       Dispatches to tdnf_rpmzig_verify_with_keys (gpgme backend
- *       in rpmzig/verify.c). libtdnf links libgpgme.so.11.
- *
- *   TDNF_RPMZIG_VERIFY_PURE_ZIG (plan-pure-zig-pgp.md PR #11)
- *       Dispatches to tdnf_rpmzig_verify_pure (pure-Zig backend in
- *       rpmzig/verify_pure.c plus rpmzig/pgp). verify.c is
- *       excluded from the build; libtdnf does NOT link libgpgme,
- *       libgpg-error, or libassuan. This is the configuration
- *       documented in plan acceptance #3.
- *
- * Trust set (both backends):
+ * Trust set:
  *   - every gpg-pubkey-* installed in the rpmdb (the same keyring
  *     'rpm --import' / TDNFImportGPGKeyFile build up over time)
  *   - the fresh key tdnf just fetched for this repo
@@ -96,7 +83,7 @@ int TDNFRpmzigVerify(
     const void *blobs[MAX_RPMDB_KEYS + 1];
     size_t lens[MAX_RPMDB_KEYS + 1];
     size_t total_keys = 0;
-    int status = TDNF_RPMZIG_VERIFY_GPGME_ERROR;
+    int status = TDNF_RPMZIG_VERIFY_INTERNAL_ERROR;
     int rc = 0;
     size_t i = 0;
 
@@ -149,15 +136,7 @@ int TDNFRpmzigVerify(
     lens[total_keys] = fresh_key_len;
     total_keys++;
 
-#ifdef TDNF_RPMZIG_VERIFY_PURE_ZIG
-    /* Pure-Zig path (plan-pure-zig-pgp.md PR #11): the gpgme
-     * backend is not compiled into this build; route straight to
-     * tdnf_rpmzig_verify_pure. Same keyring, same status codes. */
     (void)tdnf_rpmzig_verify_pure(fh, blobs, lens, total_keys, &status);
-#else
-    /* gpgme backend (default rpmzig build). */
-    (void)tdnf_rpmzig_verify_with_keys(fh, blobs, lens, total_keys, &status);
-#endif
 
     *out_status = status;
     rc = (status == TDNF_RPMZIG_VERIFY_OK) ? 0 : 1;

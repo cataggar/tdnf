@@ -250,7 +250,8 @@ TDNFGPGCheckPackage(
         }
 #ifdef TDNF_RPMZIG_VERIFY
         /* Under -Drpmzig-verify=true, librpm is no longer the
-         * signature verifier — rpmzig + gpgme is. Skip librpm's
+         * signature verifier — rpmzig's pure-Zig path is. Skip
+         * librpm's
          * sig check so rpmReadPackageFile acts as a pure header
          * reader and doesn't fail with RPMRC_NOTTRUSTED on rpms
          * whose keys aren't yet in the librpm-side keyring.
@@ -355,7 +356,7 @@ TDNFGPGCheckPackage(
 
 #ifdef TDNF_RPMZIG_VERIFY
             {
-                int rpmzig_status = TDNF_RPMZIG_VERIFY_GPGME_ERROR;
+                int rpmzig_status = TDNF_RPMZIG_VERIFY_INTERNAL_ERROR;
                 (void)TDNFRpmzigVerify(
                     pszFilePath, pszLocalGPGKey,
                     pTdnf->pArgs ? pTdnf->pArgs->pszInstallRoot : NULL,
@@ -559,4 +560,3 @@ error:
     *ppszKeyLocation = NULL;
     goto cleanup;
 }
-
