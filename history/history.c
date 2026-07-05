@@ -11,10 +11,8 @@
 #include <string.h>
 #include <time.h>
 
-#include <sqlite3.h>
-
 #include "rpmdb.h"
-#include "history.h"
+#include "history_internal.h"
 
 #define check_cond(COND) if(!(COND)) { \
     fprintf(stderr, "check_cond failed in %s line %d\n", \
@@ -1643,6 +1641,11 @@ error:
         return NULL;
     }
     return ctx;
+}
+
+int history_get_current_transaction_id(struct history_ctx *ctx)
+{
+    return ctx->trans_id;
 }
 
 void destroy_history_ctx(struct history_ctx *ctx)

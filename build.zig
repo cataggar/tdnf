@@ -113,6 +113,10 @@ pub fn build(b: *Build) void {
     const prefix = b.install_prefix;
     const libdir = "lib";
     const full_libdir = b.fmt("{s}/{s}", .{ prefix, libdir });
+    // Keep the vendored sqlite dependency resolved in-tree, but do not
+    // switch any shipped artifact away from the current system sqlite3
+    // link path until the later issue #42 PRs.
+    const sqlite_dep = b.dependency("sqlite", .{});
 
     const build_with_rpm_6x = detectRpm6(b);
     if (build_with_rpm_6x) {
@@ -315,6 +319,23 @@ pub fn build(b: *Build) void {
         // The test binary is the consumer, so the sqlite3 link goes
         // here (cf. the same .a-embedding caveat for rpmzig_lib above).
         test_mod.linkSystemLibrary("sqlite3", .{ .use_pkg_config = .yes });
+        const tests = b.addTest(.{ .root_module = test_mod });
+        const run_tests = b.addRunArtifact(tests);
+        zig_test_step.dependOn(&run_tests.step);
+    }
+
+    // Smoke-test the vendored zig-sqlite dependency in isolation before
+    // the later PRs switch any real consumer to it.
+    {
+        const test_mod = b.createModule(.{
+            .root_source_file = b.path("history/sqlite_smoke_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "sqlite", .module = sqlite_dep.module("sqlite") },
+            },
+        });
         const tests = b.addTest(.{ .root_module = test_mod });
         const run_tests = b.addRunArtifact(tests);
         zig_test_step.dependOn(&run_tests.step);

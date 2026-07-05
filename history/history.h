@@ -8,7 +8,7 @@
 
 #pragma once
 
-#include <sqlite3.h>
+#include <time.h>
 
 #include "config.h"
 
@@ -19,14 +19,7 @@
 #define HISTORY_ITEM_TYPE_ADD 1
 #define HISTORY_ITEM_TYPE_REMOVE 2
 
-struct history_ctx
-{
-    sqlite3 *db;
-    int *installed_ids; /* installed ids must be sorted */
-    int installed_count;
-    char *cookie;
-    int trans_id;
-};
+struct history_ctx;
 
 struct history_delta
 {
@@ -62,6 +55,7 @@ struct history_nevra_map
 
 struct history_ctx *create_history_ctx(const char *db_filename);
 void destroy_history_ctx(struct history_ctx *ctx);
+int history_get_current_transaction_id(struct history_ctx *ctx);
 
 /* `root` is the install-root prefix (matches rpm's --root); pass NULL
  * or "" for "/". The rpmdb is read from <root>/var/lib/rpm/rpmdb.sqlite
@@ -96,4 +90,3 @@ int history_replay_auto_flags(struct history_ctx *ctx, int from, int to);
 void history_free_flags_delta(struct history_flags_delta * hfd);
 struct history_flags_delta *
 history_get_flags_delta(struct history_ctx *ctx, int from, int to);
-
