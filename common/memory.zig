@@ -86,11 +86,6 @@ fn freeStringArrayWithCountWithCArrayOps(
     freeWithOps(ops, @ptrCast(ppszArray));
 }
 
-fn systemErrorFromErrno() u32 {
-    const err = c.ERROR_TDNF_SYSTEM_BASE + std.c._errno().*;
-    return @intCast(err);
-}
-
 fn allocateMemoryWithOps(
     ops: AllocOps,
     nNumElements: usize,
@@ -190,54 +185,6 @@ fn safeAllocateStringWithOps(
         if (dwError != 0) {
             return dwError;
         }
-    }
-
-    ppszDst.?.* = pszDst;
-    return 0;
-}
-
-fn allocateStringVPrintfWithOps(
-    ops: AllocOps,
-    ppszDst: ?*?[*:0]u8,
-    pszFmtOpt: ?[*:0]const u8,
-    argListSize: c.va_list,
-    argListWrite: c.va_list,
-) u32 {
-    if (ppszDst == null or pszFmtOpt == null) {
-        setNullOut(?[*:0]u8, ppszDst);
-        return c.ERROR_TDNF_INVALID_PARAMETER;
-    }
-
-    const pszFmt = pszFmtOpt.?;
-    var chDstTest: u8 = 0;
-
-    const nSizeProbe = c.vsnprintf(@ptrCast(&chDstTest), 1, pszFmt, argListSize);
-    if (nSizeProbe <= 0) {
-        setNullOut(?[*:0]u8, ppszDst);
-        return systemErrorFromErrno();
-    }
-
-    const nSize = @as(usize, @intCast(nSizeProbe)) + 1;
-    if (nSize > @as(usize, c.TDNF_DEFAULT_MAX_STRING_LEN)) {
-        setNullOut(?[*:0]u8, ppszDst);
-        return c.ERROR_TDNF_STRING_TOO_LONG;
-    }
-
-    var raw: ?*anyopaque = null;
-    const allocError = allocateMemoryWithOps(ops, 1, nSize, &raw);
-    if (allocError != 0) {
-        setNullOut(?[*:0]u8, ppszDst);
-        return allocError;
-    }
-
-    const bytes: [*]u8 = @ptrCast(raw.?);
-    const pszDst: [*:0]u8 = @ptrCast(bytes);
-
-    const nWritten = c.vsnprintf(@ptrCast(bytes), nSize, pszFmt, argListWrite);
-    if (nWritten <= 0) {
-        setNullOut(?[*:0]u8, ppszDst);
-        freeCStringWithOps(ops, pszDst);
-        return systemErrorFromErrno();
     }
 
     ppszDst.?.* = pszDst;
@@ -351,14 +298,6 @@ export fn TDNFSafeAllocateString(
     return safeAllocateStringWithOps(libc_ops, pszSrc, ppszDst);
 }
 
-export fn TDNFAllocateStringVPrintf(
-    ppszDst: ?*?[*:0]u8,
-    pszFmt: ?[*:0]const u8,
-    argListSize: c.va_list,
-    argListWrite: c.va_list,
-) u32 {
-    return allocateStringVPrintfWithOps(libc_ops, ppszDst, pszFmt, argListSize, argListWrite);
-}
 
 export fn TDNFAllocateStringArray(
     ppszSrc: [*c]?[*:0]u8,
