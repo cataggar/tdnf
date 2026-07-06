@@ -202,11 +202,28 @@ pub fn build(b: *Build) void {
         .files = &.{ "entry.c", "ini.c", "lines.c", "modules.c", "nodes.c", "strutils.c" },
     });
 
-    const jsondump_lib = staticLib(b, target, optimize, .{
-        .name = "jsondump",
-        .root = "jsondump",
-        .files = &.{"jsondump.c"},
-    });
+    const jsondump_lib = blk: {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("jsondump/jsondump.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .pic = true,
+        });
+        mod.addIncludePath(b.path("include"));
+        mod.addIncludePath(b.path("jsondump"));
+        mod.addCSourceFiles(.{
+            .root = b.path("jsondump"),
+            .files = &.{"fmt_shim.c"},
+            .flags = &tdnf_cflags,
+        });
+        const lib = b.addLibrary(.{
+            .name = "jsondump",
+            .linkage = .static,
+            .root_module = mod,
+        });
+        break :blk lib;
+    };
 
     const solv_lib = staticLib(b, target, optimize, .{
         .name = "tdnfsolv",
@@ -454,11 +471,11 @@ pub fn build(b: *Build) void {
     tdnf_so_mod.addCSourceFiles(.{
         .root = b.path("client"),
         .files = &.{
-            "api.c",        "client.c",      "config.c",      "eventdata.c",
-            "goal.c",       "gpgcheck.c",    "init.c",        "packageutils.c",
-            "plugins.c",    "repo.c",        "repoutils.c",   "remoterepo.c",
-            "repolist.c",   "resolve.c",     "rpmtrans.c",    "updateinfo.c",
-            "utils.c",      "history.c",     "varsdir.c",
+            "api.c",      "client.c",   "config.c",    "eventdata.c",
+            "goal.c",     "gpgcheck.c", "init.c",      "packageutils.c",
+            "plugins.c",  "repo.c",     "repoutils.c", "remoterepo.c",
+            "repolist.c", "resolve.c",  "rpmtrans.c",  "updateinfo.c",
+            "utils.c",    "history.c",  "varsdir.c",
         },
         .flags = &tdnf_cflags,
     });
@@ -505,11 +522,11 @@ pub fn build(b: *Build) void {
     cli_so_mod.addCSourceFiles(.{
         .root = b.path("tools/cli/lib"),
         .files = &.{
-            "api.c",                  "help.c",                "installcmd.c",
-            "options.c",              "output.c",              "parseargs.c",
-            "parsecleanargs.c",       "parselistargs.c",       "parsehistoryargs.c",
-            "parserepolistargs.c",    "parserepoqueryargs.c",  "parsereposyncargs.c",
-            "parseupdateinfo.c",      "updateinfocmd.c",
+            "api.c",               "help.c",               "installcmd.c",
+            "options.c",           "output.c",             "parseargs.c",
+            "parsecleanargs.c",    "parselistargs.c",      "parsehistoryargs.c",
+            "parserepolistargs.c", "parserepoqueryargs.c", "parsereposyncargs.c",
+            "parseupdateinfo.c",   "updateinfocmd.c",
         },
         .flags = &tdnf_cflags,
     });
