@@ -100,6 +100,25 @@ pub fn build(b: *Build) void {
         "Plugin install directory (relative to prefix, default: lib/tdnf-plugins)",
     ) orelse "lib/tdnf-plugins";
 
+    // Opt-in: compile the pure-Zig metalink XML parser and use it from
+    // plugins/metalink/utils.c instead of the current expat path. Default
+    // false — expat remains the production/default parser in this PR.
+    const metalink_zig_xml = b.option(
+        bool,
+        "metalink-zig-xml",
+        "Use the pure-Zig metalink XML parser in the metalink plugin (default false)",
+    ) orelse false;
+
+    // Opt-in: parse metalink buffers with both expat and the Zig parser,
+    // keep expat as the returned result, and log any normalization
+    // mismatches. Implies -Dmetalink-zig-xml=true.
+    const metalink_zig_xml_crosscheck = b.option(
+        bool,
+        "metalink-zig-xml-crosscheck",
+        "Cross-check expat and Zig metalink parser results and log diffs; implies -Dmetalink-zig-xml=true",
+    ) orelse false;
+    const metalink_zig_xml_any = metalink_zig_xml or metalink_zig_xml_crosscheck;
+
     // Opt-in: replace librpm's signature verifier (rpmVerifySignatures)
     // with rpmzig's pure-Zig OpenPGP verifier. Compiles
     // client/gpgcheck_zig.c plus rpmzig/verify_pure.c into libtdnf.
@@ -725,6 +744,22 @@ pub fn build(b: *Build) void {
 
     // ----- plugins ----- //
 
+    const metalink_xml_lib = if (metalink_zig_xml_any) blk: {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("plugins/metalink/xml.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .pic = true,
+        });
+        const lib = b.addLibrary(.{
+            .name = "tdnfmetalinkxml",
+            .linkage = .static,
+            .root_module = mod,
+        });
+        break :blk lib;
+    } else null;
+
     const metalink_mod = b.createModule(.{
         .target = target,
         .optimize = optimize,
@@ -733,12 +768,21 @@ pub fn build(b: *Build) void {
     });
     metalink_mod.addIncludePath(b.path("include"));
     metalink_mod.addIncludePath(b.path("plugins/metalink"));
+    if (metalink_zig_xml_any) {
+        metalink_mod.addCMacro("TDNF_METALINK_ZIG_XML", "1");
+    }
+    if (metalink_zig_xml_crosscheck) {
+        metalink_mod.addCMacro("TDNF_METALINK_ZIG_XML_CROSSCHECK", "1");
+    }
     metalink_mod.addCSourceFiles(.{
         .root = b.path("plugins/metalink"),
         .files = &.{ "api.c", "metalink.c", "utils.c", "list.c" },
         .flags = &tdnf_cflags,
     });
     metalink_mod.linkLibrary(libtdnf);
+    if (metalink_xml_lib) |lib| {
+        metalink_mod.linkLibrary(lib);
+    }
     linkSystem(metalink_mod, &.{"expat"});
     const metalink_plugin = b.addLibrary(.{
         .name = "tdnfmetalink",
