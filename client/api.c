@@ -2107,7 +2107,7 @@ TDNFHistoryResolve(
             goto cleanup;
         case HISTORY_CMD_ROLLBACK:
             hd = history_get_delta(ctx, pHistoryArgs->nTo);
-            hfd = history_get_flags_delta(ctx, ctx->trans_id, pHistoryArgs->nTo);
+            hfd = history_get_flags_delta(ctx, history_get_current_transaction_id(ctx), pHistoryArgs->nTo);
             break;
         case HISTORY_CMD_UNDO:
             hd = history_get_delta_range(ctx, pHistoryArgs->nFrom - 1, pHistoryArgs->nTo);
@@ -2496,7 +2496,7 @@ TDNFHistoryGetId(
     dwError = TDNFGetHistoryCtx(pTdnf, &ctx, 1);
     BAIL_ON_TDNF_ERROR(dwError);
 
-    *pnId = ctx->trans_id;
+    *pnId = history_get_current_transaction_id(ctx);
 
 cleanup:
     destroy_history_ctx(ctx);

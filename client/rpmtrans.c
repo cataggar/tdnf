@@ -277,7 +277,7 @@ TDNFRpmExecHistoryTransaction(
         dwError = TDNFGetHistoryCtx(pTdnf, &pHistoryCtx, 0);
         BAIL_ON_TDNF_ERROR(dwError);
 
-        trans_id = pHistoryCtx->trans_id;
+        trans_id = history_get_current_transaction_id(pHistoryCtx);
 
         if (pTdnf->pArgs->nArgc >= 1)
         {
@@ -293,7 +293,7 @@ TDNFRpmExecHistoryTransaction(
 
         /* if no rpm was added/removed no transaction was added yet,
             so we need to create a new transaction for the flags */
-        if (trans_id == pHistoryCtx->trans_id)
+        if (trans_id == history_get_current_transaction_id(pHistoryCtx))
         {
             rc = history_add_transaction(pHistoryCtx, pszCmdLine);
             if (rc != 0)

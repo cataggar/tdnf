@@ -3,7 +3,12 @@
     .version = "4.0.0",
     .fingerprint = 0xd568096fd954d375,
     .minimum_zig_version = "0.16.0",
-    .dependencies = .{},
+    .dependencies = .{
+        .sqlite = .{
+            .url = "https://github.com/cataggar/zig-sqlite/archive/ece9413ea140202696547f402a96df9dc9b89531.tar.gz",
+            .hash = "sqlite-0.4.0-3530100-djiKTqCBAABomylmlMLWtzm9bE_8NQ1O7qVu6l9x6aP1",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",
