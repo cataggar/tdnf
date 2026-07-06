@@ -1,48 +1,25 @@
 /*
- * tdnf-rpm-verify — smoke-test for the rpmzig signature verifiers.
+ * tdnf-rpm-verify — smoke-test for the pure-Zig rpmzig verifier.
  *
- * Two backends are available; the gpgme-backed one is the default,
- * the pure-Zig one (plan-pure-zig-pgp.md PR #5) is selected via
- * --pure. Both share the same --key / --rpmdb / --homedir flags
- * except --homedir is ignored under --pure (the pure verifier has
- * no GPG-home concept; the keyring is built solely from --key
- * and/or --rpmdb).
- *
- * Under -Drpmzig-verify-pure-zig=true (PR #11) the gpgme backend
- * (verify.c) is excluded from the build, the binary always
- * dispatches to the pure-Zig verifier, and --homedir is rejected
- * with a usage error.
- *
- * Three sources of keys (combinable in the --rpmdb + --key case):
- *
- *   tdnf-rpm-verify <file.rpm> [--homedir <dir>]
- *       Verify against an existing GPG home directory (gpgme path
- *       only).
+ * Builds the same in-memory keyring that libtdnf uses under
+ * -Drpmzig-verify=true:
  *
  *   tdnf-rpm-verify <file.rpm> --key <key.asc> [--key <key2.asc> ...]
- *       Load each .asc into a fresh in-memory keyring (gpgme path:
- *       a temp homedir under $TMPDIR; pure path: an array of blobs
- *       in memory).
+ *       Load each .asc into the verifier's in-memory keyring.
  *
  *   tdnf-rpm-verify <file.rpm> --rpmdb [root]
  *       Load every gpg-pubkey-* entry from the rpmdb under [root]
- *       (default "/") into the keyring. Combine with --key to also
- *       include locally-staged keys.
+ *       (default "/") into the keyring.
  *
- *   tdnf-rpm-verify <file.rpm> --pure ...
- *       Run the pure-Zig verifier instead of gpgme. Implies
- *       --key/--rpmdb (no --homedir). This is the only mode under
- *       -Drpmzig-verify-pure-zig=true.
- *
- *   (--homedir is mutually exclusive with --key/--rpmdb and with
- *    --pure.)
+ *   tdnf-rpm-verify <file.rpm> [--key ...] [--rpmdb [root]]
+ *       Combine both sources in one verification run.
  *
  * Exits with:
  *   0 — signature verified OK
  *   1 — rpm not signed
  *   2 — signature present but no matching key in keyring
  *   3 — signature is bad
- *   4 — gpgme/internal error or unexpected status
+ *   4 — internal error or unexpected status
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -95,9 +72,6 @@ int main(int argc, char **argv)
 {
     tdnf_rpm_file *fh = NULL;
     const char *path = NULL;
-#ifndef TDNF_RPMZIG_VERIFY_PURE_ZIG
-    const char *homedir = NULL;
-#endif
     const char *key_paths[MAX_KEYS] = { 0 };
     unsigned char *key_blobs[MAX_KEYS] = { 0 };
     /* parallel array: 1 = blob was allocated by tdnf_rpmdb_pubkeys_*
@@ -107,38 +81,22 @@ int main(int argc, char **argv)
     size_t key_lens[MAX_KEYS] = { 0 };
     size_t key_count = 0;
     int use_rpmdb = 0;
-    int use_pure = 0;
     const char *rpmdb_root = "/";
     int status = 0;
-    int rc = 0;
     int exit_code = 4;
     int i = 0;
     tdnf_rpmdb_pubkeys_iter *it = NULL;
 
     if (argc < 2) {
         fprintf(stderr,
-#ifdef TDNF_RPMZIG_VERIFY_PURE_ZIG
-            "usage: %s <file.rpm> --pure "
+            "usage: %s <file.rpm> "
             "[--key <key.asc> ...] [--rpmdb [root]]\n",
-#else
-            "usage: %s <file.rpm> [--pure] [--homedir <dir>] "
-            "[--key <key.asc> ...] [--rpmdb [root]]\n",
-#endif
             argv[0]);
         return 4;
     }
     path = argv[1];
     for (i = 2; i < argc; i++) {
-        if (strcmp(argv[i], "--homedir") == 0 && i + 1 < argc) {
-#ifdef TDNF_RPMZIG_VERIFY_PURE_ZIG
-            fprintf(stderr,
-                "--homedir is not supported in this build "
-                "(pure-Zig verifier only — use --key/--rpmdb)\n");
-            return 4;
-#else
-            homedir = argv[++i];
-#endif
-        } else if (strcmp(argv[i], "--key") == 0 && i + 1 < argc) {
+        if (strcmp(argv[i], "--key") == 0 && i + 1 < argc) {
             if (key_count >= MAX_KEYS) {
                 fprintf(stderr, "too many --key (max %d)\n", MAX_KEYS);
                 return 4;
@@ -149,39 +107,11 @@ int main(int argc, char **argv)
             if (i + 1 < argc && argv[i + 1][0] != '-') {
                 rpmdb_root = argv[++i];
             }
-        } else if (strcmp(argv[i], "--pure") == 0) {
-            use_pure = 1;
-        } else if (i == 2 && argv[i][0] != '-') {
-#ifdef TDNF_RPMZIG_VERIFY_PURE_ZIG
-            fprintf(stderr,
-                "bare homedir is not supported in this build "
-                "(pure-Zig verifier only — use --key/--rpmdb)\n");
-            return 4;
-#else
-            /* Legacy: bare 2nd arg = homedir, for back-compat with PR #13. */
-            homedir = argv[i];
-#endif
         } else {
             fprintf(stderr, "unknown arg: %s\n", argv[i]);
             return 4;
         }
     }
-#ifdef TDNF_RPMZIG_VERIFY_PURE_ZIG
-    /* gpgme backend is excluded from this build — always use the
-     * pure-Zig verifier. */
-    use_pure = 1;
-#else
-    if (homedir && (key_count > 0 || use_rpmdb)) {
-        fprintf(stderr,
-            "--homedir is mutually exclusive with --key and --rpmdb\n");
-        return 4;
-    }
-    if (use_pure && homedir) {
-        fprintf(stderr,
-            "--pure is mutually exclusive with --homedir (use --key/--rpmdb)\n");
-        return 4;
-    }
-#endif
 
     fh = tdnf_rpm_file_open(path);
     if (!fh) {
@@ -189,7 +119,7 @@ int main(int argc, char **argv)
         return 4;
     }
 
-    printf("Verifier: %s\n", use_pure ? "pure-Zig" : "gpgme");
+    printf("Verifier: pure-Zig\n");
     printf("Signature: %s\n", tdnf_rpm_file_signature_kind(fh));
     fflush(stdout);
 
@@ -230,17 +160,8 @@ int main(int argc, char **argv)
         printf("RpmDB:     %zu key(s) under %s\n", loaded, rpmdb_root);
     }
 
-    if (use_pure) {
-        rc = tdnf_rpmzig_verify_pure(fh,
-            (const void *const *)key_blobs, key_lens, key_count, &status);
-#ifndef TDNF_RPMZIG_VERIFY_PURE_ZIG
-    } else if (key_count > 0) {
-        rc = tdnf_rpmzig_verify_with_keys(fh,
-            (const void *const *)key_blobs, key_lens, key_count, &status);
-    } else {
-        rc = tdnf_rpmzig_verify(fh, homedir, &status);
-#endif
-    }
+    (void)tdnf_rpmzig_verify_pure(fh,
+        (const void *const *)key_blobs, key_lens, key_count, &status);
 
     switch (status) {
         case TDNF_RPMZIG_VERIFY_OK:
@@ -259,14 +180,12 @@ int main(int argc, char **argv)
             printf("Result:    BAD signature\n");
             exit_code = 3;
             break;
-        case TDNF_RPMZIG_VERIFY_GPGME_ERROR:
+        case TDNF_RPMZIG_VERIFY_INTERNAL_ERROR:
         default:
-            printf("Result:    %s\n",
-                use_pure ? "internal error / unsupported input" : "gpgme error");
+            printf("Result:    internal error / unsupported input\n");
             exit_code = 4;
             break;
     }
-    (void)rc;
 
 out:
     if (it) tdnf_rpmdb_pubkeys_close(it);

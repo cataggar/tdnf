@@ -113,40 +113,30 @@ the C ABI in `rpmzig/rpmdb.h` and `rpmzig/verify.h`):
 - **`.rpm` file parser** (T2): `tdnf_rpm_file_*` — opens a
   `.rpm`, parses lead + signature header + main header, walks
   the cpio payload via `std.compress.{flate,zstd,xz}`.
-- **Signature verifier** (T3): `tdnf_rpmzig_verify`,
-  `tdnf_rpmzig_verify_with_keys`, plus a libtdnf-side wrapper
-  `TDNFRpmzigVerify` in `client/gpgcheck_zig.c`. Backed by
-  gpgme by default; under `-Drpmzig-verify-pure-zig=true` the
-  shim dispatches instead to the pure-Zig
-  `tdnf_rpmzig_verify_pure` (rpmzig/pgp/*.zig — see
+- **Signature verifier** (T3): `tdnf_rpmzig_verify_pure`, plus a
+  libtdnf-side wrapper `TDNFRpmzigVerify` in
+  `client/gpgcheck_zig.c`. Backed entirely by the pure-Zig
+  OpenPGP verifier in `rpmzig/pgp/*.zig` (see
   plan-pure-zig-pgp.md, issue #14).
 
 The verifier is **opt-in via `zig build -Drpmzig-verify=true`**.
-Under the flag, libtdnf links `libgpgme.so.11` and the rpmzig
-path replaces librpm's `rpmVerifySignatures` entirely
-(`rpmts` runs with `RPMVSF_MASK_NOSIGNATURES`). Default builds
-keep the librpm verify path and don't link gpgme.
-
-Setting `-Drpmzig-verify-pure-zig=true` (which implies
-`-Drpmzig-verify=true`) flips libtdnf to the pure-Zig OpenPGP
-verifier (rpmzig/pgp/*.zig — see plan-pure-zig-pgp.md). gpgme
-is fully unlinked under this flag: `ldd libtdnf.so` shows no
-`libgpgme.so.11`, no `libgpg-error.so.0`, no `libassuan.so.0`.
-The gpgme path remains the default under `-Drpmzig-verify=true`
-alone. Build matrix:
+Under the flag, libtdnf uses the pure-Zig OpenPGP verifier and
+the rpmzig path replaces librpm's `rpmVerifySignatures`
+entirely (`rpmts` runs with `RPMVSF_MASK_NOSIGNATURES`).
+Default builds keep the librpm verify path. The rpmzig-enabled
+build does **not** link `libgpgme.so.11`, `libgpg-error.so.0`,
+or `libassuan.so.0`. Build matrix:
 
 | Flag                              | Verifier                | Links gpgme? |
 |-----------------------------------|-------------------------|--------------|
 | (default)                         | librpm primary          | no           |
-| `-Drpmzig-verify=true`            | rpmzig + gpgme primary  | yes          |
-| `-Drpmzig-verify-pure-zig=true`   | rpmzig + pure-Zig primary | **no**     |
+| `-Drpmzig-verify=true`            | rpmzig + pure-Zig primary | **no**     |
 
 Smoke-test consumers under `libexec/tdnf/`:
 `tdnf-rpmdb-count`, `tdnf-rpmdb-list`, `tdnf-rpmdb-pubkeys`,
 `tdnf-rpm-info`, `tdnf-rpm-files`, `tdnf-rpm-verify` (the last
-supports `--key`, `--rpmdb [root]`, `--homedir`, and `--pure`;
-under `-Drpmzig-verify-pure-zig=true` only `--key` / `--rpmdb`
-are available — `--homedir` and the gpgme backend are excluded).
+supports `--key` and `--rpmdb [root]`, using the same pure-Zig
+verification path as `-Drpmzig-verify=true`).
 
 After T3, librpm in libtdnf is purely the
 **transaction-execution backend** — the same role it plays in

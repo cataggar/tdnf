@@ -3,14 +3,12 @@
  *
  * Bridges the C-side `tdnf_rpm_file` to the Zig-side
  * `rpmzig_verify_detached` (declared in pgp/verify.zig via `export
- * fn`). Stores no state, holds no gpgme handle — `<gpgme.h>` is
- * intentionally absent so this file can be compiled into builds that
- * have no gpgme available.
+ * fn`). Stores no state and adds no extra crypto runtime dependency
+ * beyond the Zig-side verifier already linked into rpmzig_lib.
  *
  * Status codes returned via *out_status are the same
- * TDNF_RPMZIG_VERIFY_* set used by the gpgme path; the
- * GPGME_ERROR=4 slot doubles as the pure-Zig path's "internal
- * error" until PR #6+ reduce the unsupported-input surface to zero.
+ * TDNF_RPMZIG_VERIFY_* set; INTERNAL_ERROR=4 is the catch-all for
+ * unsupported or otherwise unexpected verifier input.
  */
 
 #include <stdio.h>
@@ -40,7 +38,7 @@ int tdnf_rpmzig_verify_pure(
     int status = 0;
 
     if (!fh || !out_status) return -1;
-    *out_status = TDNF_RPMZIG_VERIFY_GPGME_ERROR;
+    *out_status = TDNF_RPMZIG_VERIFY_INTERNAL_ERROR;
 
     rc = tdnf_rpm_file_signed_range(fh,
         &sig_bytes, &sig_len,

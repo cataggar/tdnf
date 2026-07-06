@@ -26,7 +26,7 @@ Fixture provenance:
 
   * Keypair generated freshly each run via `cryptography`'s
     ed25519 primitives. No private material lands on disk.
-  * EdDSALegacy fixture was cross-checked against gpgme's verdict
+  * EdDSALegacy fixture was cross-checked against GnuPG's verdict
     on a parallel `gpg --detach-sign --digest-algo SHA512` output
     using the same private key before commit (see commit message).
   * Native Ed25519 fixture is synthesised — no upstream tool ships

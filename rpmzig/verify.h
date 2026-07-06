@@ -1,9 +1,8 @@
 /*
- * GPG signature verification API for .rpm files (T3).
+ * Pure-Zig OpenPGP signature verification API for .rpm files (T3).
  *
- * Companion to rpmdb.h. The verifier itself lives in
- * rpmzig/verify.c so it can use the gpgme C API directly without
- * going through Zig FFI gymnastics.
+ * Companion to rpmdb.h. The C shim in rpmzig/verify_pure.c bridges
+ * `tdnf_rpm_file` into the Zig verifier under rpmzig/pgp/.
  */
 #ifndef _TDNF_RPMZIG_VERIFY_H_
 #define _TDNF_RPMZIG_VERIFY_H_
@@ -15,84 +14,27 @@ extern "C" {
 #endif
 
 enum {
-    TDNF_RPMZIG_VERIFY_OK            = 0,
-    TDNF_RPMZIG_VERIFY_NO_SIG        = 1,
-    TDNF_RPMZIG_VERIFY_NO_KEY        = 2,
-    TDNF_RPMZIG_VERIFY_BAD           = 3,
-    TDNF_RPMZIG_VERIFY_GPGME_ERROR   = 4,
+    TDNF_RPMZIG_VERIFY_OK             = 0,
+    TDNF_RPMZIG_VERIFY_NO_SIG         = 1,
+    TDNF_RPMZIG_VERIFY_NO_KEY         = 2,
+    TDNF_RPMZIG_VERIFY_BAD            = 3,
+    TDNF_RPMZIG_VERIFY_INTERNAL_ERROR = 4,
 };
 
 /**
- * Verify the GPG signature on a .rpm file. `gpg_homedir` is a path
- * to a directory containing GPG keys (set via `gpg --homedir
- * <dir> --import <key.pub>`); pass NULL or "" to use gpgme's
- * default (typically $GNUPGHOME or ~/.gnupg).
- *
- * On success writes a TDNF_RPMZIG_VERIFY_* status into *out_status.
- * Returns 0 when *out_status == TDNF_RPMZIG_VERIFY_OK, non-zero
- * otherwise (the value isn't itself a status code; it just lets
- * callers test "did verification succeed?" with `if (rc)`).
- */
-int tdnf_rpmzig_verify(
-    tdnf_rpm_file *fh,
-    const char *gpg_homedir,
-    int *out_status
-);
-
-/**
- * Verify the GPG signature on a .rpm file using an in-memory
- * keyring built from `key_blobs`. Each blob is an ASCII-armored or
- * binary OpenPGP public key (the same bytes you'd hand to `gpg
- * --import`).
- *
- * Behaviour, in order:
- *   1. Create a fresh temporary GPG home directory under $TMPDIR.
- *   2. Import every supplied blob via gpgme_op_import.
- *   3. Verify the rpm's signature against that keyring.
- *   4. Remove the temporary directory before returning.
- *
- * This matches what client/gpgcheck.c does today through
- * rpmKeyringAddKey + rpmReadPackageFile, but with rpmzig + gpgme
- * instead of librpm. It's the kernel of T3 PR #3, which will swap
- * the librpm path in TDNFGPGCheckPackage for this function.
- *
- * Status codes are the same TDNF_RPMZIG_VERIFY_* set.
- *
- * Pass `key_count = 0` and `key_blobs = NULL` to verify against an
- * empty keyring (useful for negative tests).
- */
-int tdnf_rpmzig_verify_with_keys(
-    tdnf_rpm_file *fh,
-    const void *const *key_blobs,
-    const size_t *key_lens,
-    size_t key_count,
-    int *out_status
-);
-
-/**
  * Verify the GPG signature on a .rpm file using a pure-Zig verifier
- * (no gpgme). `key_blobs[]` is an array of `key_count` OpenPGP
- * public-key blobs (armored or binary); each entry is `key_lens[i]`
- * bytes long.
+ * against an in-memory keyring. `key_blobs[]` is an array of
+ * `key_count` OpenPGP public-key blobs (armored or binary); each
+ * entry is `key_lens[i]` bytes long.
  *
- * This is the kernel of plan-pure-zig-pgp.md / PR #5. PR #7 wires it
- * alongside the gpgme path as a log-only cross-check; PR #10 promotes
- * disagreement to an error; PR #11 makes pure-Zig the only path
- * under -Drpmzig-verify-pure-zig=true.
- *
- * PR #5 limitations (intentionally narrow scope):
- *   - RSA only. ECDSA / Ed25519 land in PRs #8 / #9.
- *   - SHA-256 / SHA-512 only.
- *   - Binary signature type (0x00) only.
- *   - Subkey trust without binding-sig verification. PR #6 closes
- *     this gap.
- * Out-of-scope cases return TDNF_RPMZIG_VERIFY_GPGME_ERROR (numeric
- * 4, repurposed as "internal error" on the pure path). Subsequent
- * PRs reduce that surface to zero.
+ * Supported algorithms and policy match the Zig implementation in
+ * `rpmzig/pgp/verify.zig` (currently RSA, ECDSA P-256/P-384, and
+ * Ed25519 in both native and EdDSALegacy wire formats). Unsupported,
+ * malformed, or otherwise unexpected cases return
+ * TDNF_RPMZIG_VERIFY_INTERNAL_ERROR (numeric 4).
  *
  * On success writes a TDNF_RPMZIG_VERIFY_* status into *out_status.
- * Returns 0 on OK, non-zero otherwise (same convention as the gpgme
- * variants above).
+ * Returns 0 on OK, non-zero otherwise.
  */
 int tdnf_rpmzig_verify_pure(
     tdnf_rpm_file *fh,
