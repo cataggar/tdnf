@@ -186,6 +186,8 @@ pub fn build(b: *Build) void {
         .CMAKE_BINARY_DIR = b.fmt("{s}/zig-out", .{b.build_root.path.?}),
     });
 
+    const zig_test_step = b.step("test", "Run Zig unit tests");
+
     // ----- static libraries ----- //
 
     const common_lib = staticLib(b, target, optimize, .{
@@ -261,8 +263,7 @@ pub fn build(b: *Build) void {
         test_mod.linkSystemLibrary("sqlite3", .{ .use_pkg_config = .yes });
         const tests = b.addTest(.{ .root_module = test_mod });
         const run_tests = b.addRunArtifact(tests);
-        const test_step = b.step("test", "Run rpmzig Zig unit tests");
-        test_step.dependOn(&run_tests.step);
+        zig_test_step.dependOn(&run_tests.step);
     }
 
     // tdnf-rpmdb-count: smoke-test exe for the rpmzig C ABI.
@@ -620,6 +621,19 @@ pub fn build(b: *Build) void {
     });
     hardenExe(jsondump_test_exe);
     b.installArtifact(jsondump_test_exe);
+
+    {
+        const test_mod = b.createModule(.{
+            .root_source_file = b.path("plugins/metalink/xml.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        test_mod.addIncludePath(b.path("plugins/metalink"));
+        const tests = b.addTest(.{ .root_module = test_mod });
+        const run_tests = b.addRunArtifact(tests);
+        zig_test_step.dependOn(&run_tests.step);
+    }
 
     // ----- plugins ----- //
 
