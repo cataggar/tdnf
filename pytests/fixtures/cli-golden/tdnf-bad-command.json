@@ -1,0 +1,9 @@
+{
+  "argv": [
+    "tdnf",
+    "definitely-not-a-command"
+  ],
+  "stdout": "No such command: definitely-not-a-command. Please use /usr/bin/tdnf --help",
+  "stderr": "Error(912) : Please check your command",
+  "retval": 912
+}

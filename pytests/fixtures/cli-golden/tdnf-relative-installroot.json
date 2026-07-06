@@ -1,0 +1,11 @@
+{
+  "argv": [
+    "tdnf",
+    "--installroot",
+    "relative-root",
+    "list"
+  ],
+  "stdout": "Install root must be an absolute path.",
+  "stderr": "Error(1622) : Invalid argument",
+  "retval": 1622
+}

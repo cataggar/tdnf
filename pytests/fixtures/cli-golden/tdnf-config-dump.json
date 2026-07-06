@@ -1,0 +1,11 @@
+{
+  "argv": [
+    "tdnf-config",
+    "-j",
+    "dump",
+    "foo"
+  ],
+  "stdout": "{\"foo\":{\"name\":\"Foo\",\"baseurl\":\"http://foo.bar.com\",\"enabled\":\"0\"}}",
+  "stderr": "",
+  "retval": 0
+}

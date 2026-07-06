@@ -1,0 +1,11 @@
+{
+  "argv": [
+    "tdnf-config",
+    "remove",
+    "foo",
+    "gpgcheck"
+  ],
+  "stdout": "",
+  "stderr": "",
+  "retval": 0
+}

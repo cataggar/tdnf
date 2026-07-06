@@ -1,0 +1,9 @@
+{
+  "argv": [
+    "tdnf",
+    "provides"
+  ],
+  "stdout": "",
+  "stderr": "Error(907) : Need an item to match.",
+  "retval": 907
+}

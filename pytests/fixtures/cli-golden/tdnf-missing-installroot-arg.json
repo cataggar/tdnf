@@ -1,0 +1,9 @@
+{
+  "argv": [
+    "tdnf",
+    "--installroot"
+  ],
+  "stdout": "",
+  "stderr": "Option --installroot requires an argument\nError(909) : Command line error: expected one argument.",
+  "retval": 909
+}

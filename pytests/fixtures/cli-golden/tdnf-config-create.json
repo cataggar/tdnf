@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "tdnf-config",
+    "create",
+    "foo",
+    "name=Foo",
+    "baseurl=http://foo.bar.com",
+    "enabled=1"
+  ],
+  "stdout": "",
+  "stderr": "",
+  "retval": 0
+}

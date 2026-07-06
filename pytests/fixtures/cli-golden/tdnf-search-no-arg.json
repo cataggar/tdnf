@@ -1,0 +1,9 @@
+{
+  "argv": [
+    "tdnf",
+    "search"
+  ],
+  "stdout": "",
+  "stderr": "Error(1599) : No matches found",
+  "retval": 1599
+}

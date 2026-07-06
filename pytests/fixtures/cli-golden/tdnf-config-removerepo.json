@@ -1,0 +1,10 @@
+{
+  "argv": [
+    "tdnf-config",
+    "removerepo",
+    "foo"
+  ],
+  "stdout": "",
+  "stderr": "",
+  "retval": 0
+}
