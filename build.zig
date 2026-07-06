@@ -110,6 +110,16 @@ pub fn build(b: *Build) void {
         "Replace librpm signature verification with rpmzig's pure-Zig OpenPGP verifier (default false)",
     ) orelse false;
 
+    // Opt-in: use the rpmzig pure-Zig digest engine (rpmzig/checksum.zig)
+    // in common/utils.c for package/metalink checksum verification
+    // instead of openssl/libcrypto. Default false — does not change
+    // observable behaviour.
+    const rpmzig_checksum = b.option(
+        bool,
+        "rpmzig-checksum",
+        "Use the rpmzig digest engine in common/utils.c for checksum verification (default false)",
+    ) orelse false;
+
     const prefix = b.install_prefix;
     const libdir = "lib";
     const full_libdir = b.fmt("{s}/{s}", .{ prefix, libdir });
@@ -216,6 +226,9 @@ pub fn build(b: *Build) void {
         });
         break :blk lib;
     };
+    if (rpmzig_checksum) {
+        common_lib.root_module.addCMacro("TDNF_RPMZIG_CHECKSUM", "1");
+    }
 
     const llconf_lib = staticLib(b, target, optimize, .{
         .name = "tdnfllconf",

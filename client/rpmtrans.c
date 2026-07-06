@@ -795,7 +795,7 @@ TDNFTransAddInstallPkg(
     PTDNF_CACHED_RPM_ENTRY pRpmCache = NULL;
     const char* pszPackageLocation = NULL;
     const char* pszPkgName = NULL;
-    uint8_t digest_from_file[EVP_MAX_MD_SIZE] = {0};
+    uint8_t digest_from_file[TDNF_MAX_DIGEST_LEN] = {0};
     hash_op *hash = NULL;
     int nSize = 0;
 
@@ -897,7 +897,7 @@ TDNFTransAddInstallPkg(
     if(pInfo->pbChecksum != NULL) {
         hash = hash_ops + pInfo->nChecksumType;
 
-        dwError = TDNFGetDigestForFile(pszFilePath, hash, digest_from_file);
+        dwError = TDNFGetDigestForFile(pszFilePath, pInfo->nChecksumType, digest_from_file);
         BAIL_ON_TDNF_ERROR(dwError);
 
         if (memcmp(digest_from_file, pInfo->pbChecksum, hash->length))

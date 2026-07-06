@@ -21,6 +21,7 @@
     } while(0)
 
 #define TDNF_DEFAULT_MAX_STRING_LEN       16384000
+#define TDNF_MAX_DIGEST_LEN               64
 
 /*
  * creating this under /var/run because /var/run/lock doesn't exist
