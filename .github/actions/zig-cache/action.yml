@@ -60,7 +60,15 @@ runs:
           echo "[zig-cache] refusing to put local cache inside GITHUB_WORKSPACE: $LOCAL" >&2
           exit 1 ;;
         esac
-        mkdir -p "$GLOBAL" "$LOCAL"
+        # Zig 0.16.0's package fetcher fails with
+        # "failed to create temporary zip file: FileNotFound" the first
+        # time it fetches a .zip-based dependency into a brand-new global
+        # cache dir, because it expects `<global-cache-dir>/tmp` to
+        # already exist rather than creating it on demand (verified by
+        # reproducing locally: a fresh cache dir fails, one that already
+        # has a `tmp/` subdir succeeds). Pre-create it here so this
+        # doesn't bite the first CI run against a fresh cache.
+        mkdir -p "$GLOBAL" "$GLOBAL/tmp" "$LOCAL" "$LOCAL/tmp"
         {
           echo "ZIG_GLOBAL_CACHE_DIR=$GLOBAL"
           echo "ZIG_LOCAL_CACHE_DIR=$LOCAL"
