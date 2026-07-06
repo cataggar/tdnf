@@ -309,6 +309,24 @@ pub fn build(b: *Build) void {
         zig_test_step.dependOn(&run_tests.step);
     }
 
+    const history_zig_lib = blk: {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("history/history_zig.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .pic = true,
+            .imports = &.{
+                .{ .name = "sqlite", .module = sqlite_dep.module("sqlite") },
+            },
+        });
+        const lib = b.addLibrary(.{
+            .name = "tdnfhistoryzig",
+            .linkage = .static,
+            .root_module = mod,
+        });
+        break :blk lib;
+    };
 
     // ----- rpmzig (Zig-side librpm replacement, see plan-replace-librpm.md) //
 
@@ -370,6 +388,30 @@ pub fn build(b: *Build) void {
         });
         const tests = b.addTest(.{ .root_module = test_mod });
         const run_tests = b.addRunArtifact(tests);
+        zig_test_step.dependOn(&run_tests.step);
+    }
+
+    // Build and exercise the standalone Zig history backend in
+    // isolation; do not wire it into the shipped artifacts yet.
+    {
+        const test_mod = b.createModule(.{
+            .root_source_file = b.path("history/history_zig_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "sqlite", .module = sqlite_dep.module("sqlite") },
+            },
+        });
+        const tests = b.addTest(.{ .root_module = test_mod });
+        const run_tests = b.addRunArtifact(tests);
+        const history_zig_test_step = b.step(
+            "history-zig-test",
+            "Run standalone Zig history backend unit tests",
+        );
+        history_zig_test_step.dependOn(&history_zig_lib.step);
+        history_zig_test_step.dependOn(&run_tests.step);
+        zig_test_step.dependOn(&history_zig_lib.step);
         zig_test_step.dependOn(&run_tests.step);
     }
 
