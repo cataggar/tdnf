@@ -491,6 +491,7 @@ const cpio = @import("cpio.zig");
 // build time, which in turn instantiates any `export fn` it declares.
 comptime {
     _ = @import("pgp/verify.zig");
+    _ = @import("checksum.zig");
 }
 
 /// Opaque handle wrapping a parsed RpmFile and its allocator.
@@ -816,5 +817,5 @@ test {
     _ = @import("pgp/signature.zig");
     _ = @import("pgp/verify.zig");
     _ = @import("pgp/keyring.zig");
+    _ = @import("checksum.zig");
 }
-
