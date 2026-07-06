@@ -190,11 +190,28 @@ pub fn build(b: *Build) void {
 
     // ----- static libraries ----- //
 
-    const common_lib = staticLib(b, target, optimize, .{
-        .name = "common",
-        .root = "common",
-        .files = &.{ "memory.c", "strings.c", "utils.c", "log.c", "lock.c" },
-    });
+    const common_lib = blk: {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("common/memory.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .pic = true,
+        });
+        mod.addIncludePath(b.path("include"));
+        mod.addIncludePath(b.path("common"));
+        mod.addCSourceFiles(.{
+            .root = b.path("common"),
+            .files = &.{ "memory_printf_shim.c", "strings.c", "utils.c", "log.c", "lock.c" },
+            .flags = &tdnf_cflags,
+        });
+        const lib = b.addLibrary(.{
+            .name = "common",
+            .linkage = .static,
+            .root_module = mod,
+        });
+        break :blk lib;
+    };
 
     const llconf_lib = staticLib(b, target, optimize, .{
         .name = "tdnfllconf",
@@ -236,6 +253,26 @@ pub fn build(b: *Build) void {
         .root = "history",
         .files = &.{"history.c"},
     });
+
+    {
+        const test_mod = b.createModule(.{
+            .root_source_file = b.path("common/memory.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        test_mod.addIncludePath(b.path("include"));
+        test_mod.addIncludePath(b.path("common"));
+        test_mod.addCSourceFiles(.{
+            .root = b.path("common"),
+            .files = &.{ "memory_printf_shim.c", "memory_test_shim.c" },
+            .flags = &tdnf_cflags,
+        });
+        const tests = b.addTest(.{ .root_module = test_mod });
+        const run_tests = b.addRunArtifact(tests);
+        zig_test_step.dependOn(&run_tests.step);
+    }
+
 
     // ----- rpmzig (Zig-side librpm replacement, see plan-replace-librpm.md) //
 
