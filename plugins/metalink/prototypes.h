@@ -23,51 +23,6 @@ TDNFMetalinkFree(
     TDNF_ML_CTX *ml_ctx
     );
 
-char *
-TDNFSearchTag(
-    const char **attr,
-    const char *type
-    );
-
-void
-TDNFXmlParseStartElement(
-    void *userData,
-    const char *name,
-    const char **attrs
-    );
-
-void
-TDNFXmlParseData(
-    void *userData,
-    const char *val,
-    int len
-    );
-
-void
-TDNFXmlParseEndElement(
-    void *userData,
-    const char *name
-    );
-
-uint32_t
-TDNFParseFileTag(
-    void *userData
-    );
-
-uint32_t
-TDNFParseHashTag(
-    void *userData,
-    const char *val,
-    int len
-    );
-
-uint32_t
-TDNFParseUrlTag(
-    void *userData,
-    const char *val,
-    int len
-    );
-
 uint32_t
 TDNFCheckRepoMDFileHashFromMetalink(
     const char *pszFile,
