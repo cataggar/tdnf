@@ -704,7 +704,7 @@ pub fn build(b: *Build) void {
             "api.c",               "help.c",               "installcmd.c",
             "options.c",           "output.c",             "parseargs.c",
             "parselistargs.c",     "parsehistoryargs.c",
-            "parserepolistargs.c", "parserepoqueryargs.c", "parsereposyncargs.c",
+            "parserepoqueryargs.c", "parsereposyncargs.c",
             "parseupdateinfo.c",   "updateinfocmd.c",
         },
         .flags = &tdnf_cflags,
