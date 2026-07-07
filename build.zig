@@ -712,7 +712,7 @@ pub fn build(b: *Build) void {
         .files = &.{
             "api.c",               "help.c",               "installcmd.c",
             "options.c",           "output.c",             "parseargs.c",
-            "parsecleanargs.c",    "parselistargs.c",      "parsehistoryargs.c",
+            "parselistargs.c",     "parsehistoryargs.c",
             "parserepolistargs.c", "parserepoqueryargs.c", "parsereposyncargs.c",
             "parseupdateinfo.c",   "updateinfocmd.c",
         },
