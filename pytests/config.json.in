@@ -7,7 +7,7 @@
     "build_dir": "@CMAKE_BINARY_DIR@",
     "small_cache_path": "@CMAKE_CURRENT_BINARY_DIR@/small_cache/",
     "bin_dir": "@CMAKE_BINARY_DIR@/bin",
-    "plugin_path": "@CMAKE_BINARY_DIR@/plugins/lib",
+    "plugin_path": "@PLUGIN_PATH@",
     "automatic_script": "@CMAKE_SOURCE_DIR@/bin/tdnf-automatic",
     "automatic_conf": "@CMAKE_SOURCE_DIR@/etc/tdnf/automatic.conf",
     "sglversion_pkgname": "tdnf-test-one",

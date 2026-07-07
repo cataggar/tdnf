@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <file name="repomd.xml">
+    <size>4096</size>
+    <hash type="sha256">feed-face</hash>
+    <url priority="1" location="US" protocol="https" type="https">https://cdn.example.com/repodata/repomd.xml</url>
+    <url priority="25" location="JP">https://mirror.example.jp/repodata/repomd.xml</url>
+  </file>
+</metalink>

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<metalink version="3.0" xmlns="http://www.metalinker.org/" type="dynamic" pubdate="Wed, 05 Feb 2020 08:14:56 GMT">
+ <files>
+  <file name="repomd.xml">
+   <size>1234</size>
+   <verification>
+   </verification>
+   <resources maxconnections="1">
+    <url protocol="http" type="file" location="IN" preference="100">http://localhost:8080/photon-test/repodata/repomd.xml</url>
+   </resources>
+  </file>
+ </files>
+</metalink>

@@ -12,6 +12,9 @@ if [ $# -ne 2 ]; then
     exit 1
 fi
 
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+METALINK_FIXTURE=${SCRIPT_DIR}/../fixtures/metalink/photon-setup.xml
+
 function fix_dir_perms() {
   chmod 755 ${TEST_REPO_DIR}
   find ${TEST_REPO_DIR} -type d -exec chmod 0755 {} \;
@@ -195,21 +198,8 @@ repodir=${TEST_REPO_DIR}/yum.repos.d
 cachedir=${TEST_REPO_DIR}/cache/tdnf
 EOF
 
-cat << EOF > ${PUBLISH_PATH}/metalink
-<?xml version="1.0" encoding="utf-8"?>
-<metalink version="3.0" xmlns="http://www.metalinker.org/" type="dynamic" pubdate="Wed, 05 Feb 2020 08:14:56 GMT">
- <files>
-  <file name="repomd.xml">
-   <size>1234</size>
-   <verification>
-   </verification>
-   <resources maxconnections="1">
-    <url protocol="http" type="file" location="IN" preference="100">http://localhost:8080/photon-test/repodata/repomd.xml</url>
-   </resources>
-  </file>
- </files>
-</metalink>
-EOF
+cat "${METALINK_FIXTURE}" > "${PUBLISH_PATH}/metalink"
+check_err "Failed to install metalink fixture."
 
 cp ${REPO_SRC_DIR}/automatic.conf ${TEST_REPO_DIR}
 
