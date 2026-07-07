@@ -1,9 +1,5 @@
 #pragma once
 
-#include <openssl/sha.h>
-#include <openssl/md5.h>
-#include <openssl/evp.h>
-
 typedef struct _KEYVALUE_
 {
     char *pszKey;

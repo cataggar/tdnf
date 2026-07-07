@@ -8,8 +8,8 @@ manager built on `libsolv`, `librpm` and `libcurl`. It ships a public C library
 
 The build is driven by **Zig 0.16+** (no CMake — migrated to `build.zig`).
 The host needs `librpm-dev`, `libsolv-dev`, `libcurl4-openssl-dev`,
-`libexpat1-dev`, `libssl-dev`, `libgpgme-dev`, `libpopt-dev`
-(Debian/Ubuntu names — `*-devel` on rpm distros).
+`libexpat1-dev`, `libsqlite3-dev`, `libgpgme-dev`,
+`libpopt-dev` (Debian/Ubuntu names — `*-devel` on rpm distros).
 
 ```sh
 # build + install into ./out

@@ -27,9 +27,7 @@
 
 #include <tdnf.h>
 #include "../llconf/nodes.h"
-#ifdef TDNF_RPMZIG_CHECKSUM
 #include "../rpmzig/checksum.h"
-#endif
 
 #include <tdnftypes.h>
 #include <tdnferror.h>
