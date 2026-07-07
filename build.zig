@@ -350,6 +350,25 @@ pub fn build(b: *Build) void {
         break :blk lib;
     };
 
+    const cli_zig_lib = blk: {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("tools/cli/lib/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .pic = true,
+        });
+        mod.addIncludePath(b.path("include"));
+        mod.addIncludePath(b.path("tools/cli"));
+        mod.addIncludePath(b.path("tools/cli/lib"));
+        const lib = b.addLibrary(.{
+            .name = "tdnfclizig",
+            .linkage = .static,
+            .root_module = mod,
+        });
+        break :blk lib;
+    };
+
     // ----- rpmzig (Zig-side librpm replacement, see plan-replace-librpm.md) //
 
     const rpmzig_lib = blk: {
@@ -391,6 +410,21 @@ pub fn build(b: *Build) void {
         // The test binary is the consumer, so the sqlite3 link goes
         // here (cf. the same .a-embedding caveat for rpmzig_lib above).
         test_mod.linkSystemLibrary("sqlite3", .{ .use_pkg_config = .yes });
+        const tests = b.addTest(.{ .root_module = test_mod });
+        const run_tests = b.addRunArtifact(tests);
+        zig_test_step.dependOn(&run_tests.step);
+    }
+
+    {
+        const test_mod = b.createModule(.{
+            .root_source_file = b.path("tools/cli/lib/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        test_mod.addIncludePath(b.path("include"));
+        test_mod.addIncludePath(b.path("tools/cli"));
+        test_mod.addIncludePath(b.path("tools/cli/lib"));
         const tests = b.addTest(.{ .root_module = test_mod });
         const run_tests = b.addRunArtifact(tests);
         zig_test_step.dependOn(&run_tests.step);
@@ -684,6 +718,7 @@ pub fn build(b: *Build) void {
         },
         .flags = &tdnf_cflags,
     });
+    cli_so_mod.linkLibrary(cli_zig_lib);
     cli_so_mod.linkLibrary(jsondump_lib);
 
     const libtdnfcli = b.addLibrary(.{

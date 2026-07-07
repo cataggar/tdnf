@@ -9,6 +9,49 @@
 #pragma once
 
 //parseargs.c
+void
+TDNFCliArgParseReset(
+    void
+    );
+
+void
+TDNFCliArgParseSetOptErr(
+    int nValue
+    );
+
+char*
+TDNFCliArgParseOptArg(
+    void
+    );
+
+int
+TDNFCliArgParseOptInd(
+    void
+    );
+
+int
+TDNFCliArgParseOptOpt(
+    void
+    );
+
+int
+TDNFCliArgParseLongOnly(
+    int argc,
+    char **argv,
+    const char *pszShortOptions,
+    const struct option *pstOptions,
+    int *pnOptionIndex
+    );
+
+int
+TDNFCliArgParseLong(
+    int argc,
+    char **argv,
+    const char *pszShortOptions,
+    const struct option *pstOptions,
+    int *pnOptionIndex
+    );
+
 uint32_t
 TDNFCopyOptions(
     PTDNF_CMD_ARGS pOptionArgs,

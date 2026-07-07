@@ -135,6 +135,7 @@ TDNFCliParseArgs(
     int nOptionIndex = 0;
     int nOption = 0;
     int nIndex = 0;
+    int nArgIndex = 0;
     const char* pszDefaultInstallRoot = "/";
 
     if(!ppCmdArgs)
@@ -170,11 +171,10 @@ TDNFCliParseArgs(
 
     pCmdArgs->nRpmVerbosity = -1;
 
-    opterr = 0;//tell getopt to not print errors
+    TDNFCliArgParseReset();
     while (1)
     {
-
-            nOption = getopt_long_only (
+            nOption = TDNFCliArgParseLongOnly(
                           argc,
                           argv,
                           "46bCc:d:e:hi:qvxy",
@@ -188,7 +188,7 @@ TDNFCliParseArgs(
                 case 0:
                     dwError = ParseOption(
                                   pstOptions[nOptionIndex].name,
-                                  optarg,
+                                  TDNFCliArgParseOptArg(),
                                   pCmdArgs);
                     BAIL_ON_CLI_ERROR(dwError);
                 break;
@@ -198,7 +198,7 @@ TDNFCliParseArgs(
                 case 'c':
                     dwError = ParseOption(
                                   "config",
-                                  optarg,
+                                  TDNFCliArgParseOptArg(),
                                   pCmdArgs);
                     BAIL_ON_CLI_ERROR(dwError);
                 break;
@@ -213,7 +213,7 @@ TDNFCliParseArgs(
                 case 'i':
                     dwError = ParseOption(
                                   "installroot",
-                                  optarg,
+                                  TDNFCliArgParseOptArg(),
                                   pCmdArgs);
                     BAIL_ON_CLI_ERROR(dwError);
                 break;
@@ -236,8 +236,8 @@ TDNFCliParseArgs(
                 break;
                 case '?':
                     dwError = HandleOptionsError(
-                                  argv[optind-1],
-                                  optarg,
+                                  argv[TDNFCliArgParseOptInd()-1],
+                                  TDNFCliArgParseOptArg(),
                                   pstOptions);
                     BAIL_ON_CLI_ERROR(dwError);
                 //TODO: Handle unknown option, incomplete options
@@ -261,25 +261,26 @@ TDNFCliParseArgs(
     BAIL_ON_CLI_ERROR(dwError);
 
     //Collect extra args
-    if (optind < argc)
+    nArgIndex = TDNFCliArgParseOptInd();
+    if (nArgIndex < argc)
     {
-        pCmdArgs->nCmdCount = argc - optind;
+        pCmdArgs->nCmdCount = argc - nArgIndex;
         dwError = TDNFAllocateMemory(
                       pCmdArgs->nCmdCount + 1,
                       sizeof(char*),
                       (void**)&pCmdArgs->ppszCmds);
         BAIL_ON_CLI_ERROR(dwError);
 
-        while (optind < argc)
+        while (nArgIndex < argc)
         {
-            if (argv[optind][0] == 0) {
+            if (argv[nArgIndex][0] == 0) {
                 pr_err("argument is empty string\n");
                 dwError = ERROR_TDNF_INVALID_PARAMETER;
                 BAIL_ON_CLI_ERROR(dwError);
             }
 
             dwError = TDNFAllocateString(
-                          argv[optind++],
+                          argv[nArgIndex++],
                           &pCmdArgs->ppszCmds[nIndex++]);
             BAIL_ON_CLI_ERROR(dwError);
         }
