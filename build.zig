@@ -138,6 +138,15 @@ pub fn build(b: *Build) void {
         "rpmzig-checksum",
         "Use the rpmzig digest engine in common/utils.c for checksum verification (default false)",
     ) orelse false;
+    // Opt-in: compute digests with both openssl and rpmzig, keep
+    // openssl authoritative, and log any helper failures or byte
+    // mismatches. Implies -Drpmzig-checksum=true.
+    const rpmzig_checksum_crosscheck = b.option(
+        bool,
+        "rpmzig-checksum-crosscheck",
+        "Cross-check openssl and rpmzig checksum results in common/utils.c and log mismatches; implies -Drpmzig-checksum=true",
+    ) orelse false;
+    const rpmzig_checksum_any = rpmzig_checksum or rpmzig_checksum_crosscheck;
 
     const prefix = b.install_prefix;
     const libdir = "lib";
@@ -267,8 +276,11 @@ pub fn build(b: *Build) void {
         });
         break :blk lib;
     };
-    if (rpmzig_checksum) {
+    if (rpmzig_checksum_any) {
         common_lib.root_module.addCMacro("TDNF_RPMZIG_CHECKSUM", "1");
+    }
+    if (rpmzig_checksum_crosscheck) {
+        common_lib.root_module.addCMacro("TDNF_RPMZIG_CHECKSUM_CROSSCHECK", "1");
     }
 
     const llconf_lib = staticLib(b, target, optimize, .{
