@@ -9,9 +9,11 @@ const c = @cImport({
     @cInclude("getopt.h");
 });
 const argparse = @import("argparse.zig");
+const parsecleanargs = @import("parsecleanargs.zig");
 
 comptime {
     _ = argparse;
+    _ = parsecleanargs;
 }
 
 test "TDNFCliArgParseReset clears getopt state" {
