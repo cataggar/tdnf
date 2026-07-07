@@ -96,6 +96,7 @@ out/
 /plugins/metalink/config.h
 /plugins/repogpgcheck/config.h
 /pytests/mount-small-cache
+/pytests/config.json
 
 # cores
 core*
