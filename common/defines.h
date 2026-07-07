@@ -21,7 +21,11 @@
     } while(0)
 
 #define TDNF_DEFAULT_MAX_STRING_LEN       16384000
-#define TDNF_MAX_DIGEST_LEN               64
+#define TDNF_MD5_DIGEST_LEN               16
+#define TDNF_SHA1_DIGEST_LEN              20
+#define TDNF_SHA256_DIGEST_LEN            32
+#define TDNF_SHA512_DIGEST_LEN            64
+#define TDNF_MAX_DIGEST_LEN               TDNF_SHA512_DIGEST_LEN
 
 /*
  * creating this under /var/run because /var/run/lock doesn't exist

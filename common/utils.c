@@ -10,10 +10,10 @@
 
 hash_op hash_ops[TDNF_HASH_SENTINEL] =
     {
-       [TDNF_HASH_MD5]    = {"md5", MD5_DIGEST_LENGTH},
-       [TDNF_HASH_SHA1]   = {"sha1", SHA_DIGEST_LENGTH},
-       [TDNF_HASH_SHA256] = {"sha256", SHA256_DIGEST_LENGTH},
-       [TDNF_HASH_SHA512] = {"sha512", SHA512_DIGEST_LENGTH},
+       [TDNF_HASH_MD5]    = {"md5", TDNF_MD5_DIGEST_LEN},
+       [TDNF_HASH_SHA1]   = {"sha1", TDNF_SHA1_DIGEST_LEN},
+       [TDNF_HASH_SHA256] = {"sha256", TDNF_SHA256_DIGEST_LEN},
+       [TDNF_HASH_SHA512] = {"sha512", TDNF_SHA512_DIGEST_LEN},
     };
 
 hash_type hashType[] =
@@ -28,30 +28,11 @@ hash_type hashType[] =
     };
 
 static uint32_t
-TDNFGetDigestForFileOpenSSL(
-    const char *filename,
-    int type,
-    uint8_t *digest
-    );
-
-#ifdef TDNF_RPMZIG_CHECKSUM
-#ifndef TDNF_RPMZIG_CHECKSUM_CROSSCHECK
-static uint32_t
 TDNFGetDigestForFileRpmzig(
     const char *filename,
     int type,
     uint8_t *digest
     );
-#endif
-
-static uint32_t
-TDNFGetDigestForFileRpmzigInternal(
-    const char *filename,
-    int type,
-    uint8_t *digest,
-    int nLogErrors
-    );
-#endif
 
 static int
 TDNFIsFipsModeEnabled(
@@ -1056,17 +1037,6 @@ TDNFGetDigestForFile(
     )
 {
     uint32_t dwError = 0;
-#if defined(TDNF_RPMZIG_CHECKSUM) && defined(TDNF_RPMZIG_CHECKSUM_CROSSCHECK)
-    uint8_t digest_rpmzig[TDNF_MAX_DIGEST_LEN] = {0};
-    const char *pszRpmzigError = NULL;
-    hash_op *hash = NULL;
-#else
-    uint32_t (*pfnGetDigestForFile)(
-        const char *,
-        int,
-        uint8_t *
-        ) = TDNFGetDigestForFileOpenSSL;
-#endif
 
     if (IsNullOrEmptyString(filename) || !digest)
     {
@@ -1087,41 +1057,8 @@ TDNFGetDigestForFile(
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-#if defined(TDNF_RPMZIG_CHECKSUM) && defined(TDNF_RPMZIG_CHECKSUM_CROSSCHECK)
-    hash = hash_ops + type;
-
-    dwError = TDNFGetDigestForFileOpenSSL(filename, type, digest);
+    dwError = TDNFGetDigestForFileRpmzig(filename, type, digest);
     BAIL_ON_TDNF_ERROR(dwError);
-
-    dwError = TDNFGetDigestForFileRpmzigInternal(filename, type, digest_rpmzig, 0);
-    if (dwError)
-    {
-        pszRpmzigError = tdnf_rpmzig_checksum_last_error();
-        pr_err(
-            "rpmzig-checksum cross-check helper failed for %s (%s): %s\n",
-            filename,
-            hash->hash_type,
-            IsNullOrEmptyString(pszRpmzigError) ? "unknown error" : pszRpmzigError
-        );
-        dwError = 0;
-        goto cleanup;
-    }
-
-    if (memcmp(digest, digest_rpmzig, hash->length))
-    {
-        pr_err(
-            "rpmzig-checksum cross-check mismatch for %s (%s)\n",
-            filename,
-            hash->hash_type
-        );
-    }
-#else
-#ifdef TDNF_RPMZIG_CHECKSUM
-    pfnGetDigestForFile = TDNFGetDigestForFileRpmzig;
-#endif
-    dwError = pfnGetDigestForFile(filename, type, digest);
-    BAIL_ON_TDNF_ERROR(dwError);
-#endif
 
 cleanup:
     return dwError;
@@ -1129,130 +1066,11 @@ error:
     goto cleanup;
 }
 
-static uint32_t
-TDNFGetDigestForFileOpenSSL(
-    const char *filename,
-    int type,
-    uint8_t *digest
-    )
-{
-    uint32_t dwError = 0;
-    int fd = -1;
-    char buf[BUFSIZ] = {0};
-    int length = 0;
-    EVP_MD_CTX *ctx = NULL;
-    const EVP_MD *digest_type = NULL;
-    unsigned int digest_length = 0;
-    hash_op *hash = NULL;
-
-    if (IsNullOrEmptyString(filename) || !digest)
-    {
-        dwError = ERROR_TDNF_INVALID_PARAMETER;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    if (type < TDNF_HASH_MD5 || type >= TDNF_HASH_SENTINEL)
-    {
-        dwError = ERROR_TDNF_INVALID_PARAMETER;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    hash = hash_ops + type;
-
-    fd = open(filename, O_RDONLY);
-    if (fd < 0)
-    {
-        pr_err("ERROR: Checksum validating (%s) FAILED\n", filename);
-        dwError = errno;
-        BAIL_ON_TDNF_SYSTEM_ERROR_UNCOND(dwError);
-    }
-
-    digest_type = EVP_get_digestbyname(hash->hash_type);
-
-    if (!digest_type)
-    {
-        pr_err("Unknown message digest %s\n", hash->hash_type);
-        dwError = ERROR_TDNF_INVALID_PARAMETER;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    ctx = EVP_MD_CTX_create();
-    if (!ctx)
-    {
-        pr_err("Context Create Failed\n");
-        dwError = ERROR_TDNF_CHECKSUM_VALIDATION_FAILED;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    dwError = EVP_DigestInit_ex(ctx, digest_type, NULL);
-    if (!dwError)
-    {
-        pr_err("Digest Init Failed\n");
-        dwError = ERROR_TDNF_CHECKSUM_VALIDATION_FAILED;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    while ((length = read(fd, buf, BUFSIZ - 1)) > 0)
-    {
-        dwError = EVP_DigestUpdate(ctx, buf, length);
-        if (!dwError)
-        {
-            pr_err("Digest Update Failed\n");
-            dwError = ERROR_TDNF_CHECKSUM_VALIDATION_FAILED;
-            BAIL_ON_TDNF_ERROR(dwError);
-        }
-        memset(buf, 0, BUFSIZ);
-    }
-
-    if (length == -1)
-    {
-        pr_err("Error: Checksum validating (%s) FAILED\n", filename);
-        dwError = errno;
-        BAIL_ON_TDNF_SYSTEM_ERROR(dwError);
-    }
-
-    dwError = EVP_DigestFinal_ex(ctx, digest, &digest_length);
-    if (!dwError)
-    {
-        pr_err("Digest Final Failed\n");
-        dwError = ERROR_TDNF_CHECKSUM_VALIDATION_FAILED;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-    dwError = 0;
-
-cleanup:
-    if (fd >= 0)
-    {
-        close(fd);
-    }
-    if (ctx)
-    {
-        EVP_MD_CTX_destroy(ctx);
-    }
-    return dwError;
-error:
-    goto cleanup;
-}
-
-#ifdef TDNF_RPMZIG_CHECKSUM
-#ifndef TDNF_RPMZIG_CHECKSUM_CROSSCHECK
 static uint32_t
 TDNFGetDigestForFileRpmzig(
     const char *filename,
     int type,
     uint8_t *digest
-    )
-{
-    return TDNFGetDigestForFileRpmzigInternal(filename, type, digest, 1);
-}
-#endif
-
-static uint32_t
-TDNFGetDigestForFileRpmzigInternal(
-    const char *filename,
-    int type,
-    uint8_t *digest,
-    int nLogErrors
     )
 {
     uint32_t dwError = 0;
@@ -1289,15 +1107,12 @@ TDNFGetDigestForFileRpmzigInternal(
     if (!ctx)
     {
         pszRpmzigError = tdnf_rpmzig_checksum_last_error();
-        if (nLogErrors)
-        {
-            pr_err(
-                "rpmzig digest open failed for %s (%s): %s\n",
-                filename,
-                hash->hash_type,
-                IsNullOrEmptyString(pszRpmzigError) ? "unknown error" : pszRpmzigError
-            );
-        }
+        pr_err(
+            "rpmzig digest open failed for %s (%s): %s\n",
+            filename,
+            hash->hash_type,
+            IsNullOrEmptyString(pszRpmzigError) ? "unknown error" : pszRpmzigError
+        );
         dwError = ERROR_TDNF_CHECKSUM_VALIDATION_FAILED;
         BAIL_ON_TDNF_ERROR(dwError);
     }
@@ -1307,15 +1122,12 @@ TDNFGetDigestForFileRpmzigInternal(
         if (tdnf_rpmzig_digest_update(ctx, (const unsigned char *)buf, (size_t)length) != 0)
         {
             pszRpmzigError = tdnf_rpmzig_checksum_last_error();
-            if (nLogErrors)
-            {
-                pr_err(
-                    "rpmzig digest update failed for %s (%s): %s\n",
-                    filename,
-                    hash->hash_type,
-                    IsNullOrEmptyString(pszRpmzigError) ? "unknown error" : pszRpmzigError
-                );
-            }
+            pr_err(
+                "rpmzig digest update failed for %s (%s): %s\n",
+                filename,
+                hash->hash_type,
+                IsNullOrEmptyString(pszRpmzigError) ? "unknown error" : pszRpmzigError
+            );
             dwError = ERROR_TDNF_CHECKSUM_VALIDATION_FAILED;
             BAIL_ON_TDNF_ERROR(dwError);
         }
@@ -1332,15 +1144,12 @@ TDNFGetDigestForFileRpmzigInternal(
     if (tdnf_rpmzig_digest_final(ctx, digest, hash->length) != 0)
     {
         pszRpmzigError = tdnf_rpmzig_checksum_last_error();
-        if (nLogErrors)
-        {
-            pr_err(
-                "rpmzig digest final failed for %s (%s): %s\n",
-                filename,
-                hash->hash_type,
-                IsNullOrEmptyString(pszRpmzigError) ? "unknown error" : pszRpmzigError
-            );
-        }
+        pr_err(
+            "rpmzig digest final failed for %s (%s): %s\n",
+            filename,
+            hash->hash_type,
+            IsNullOrEmptyString(pszRpmzigError) ? "unknown error" : pszRpmzigError
+        );
         dwError = ERROR_TDNF_CHECKSUM_VALIDATION_FAILED;
         BAIL_ON_TDNF_ERROR(dwError);
     }
@@ -1355,18 +1164,32 @@ cleanup:
 error:
     goto cleanup;
 }
-#endif
 
 static int
 TDNFIsFipsModeEnabled(
     void
     )
 {
-#if defined(OPENSSL_VERSION_MAJOR) && (OPENSSL_VERSION_MAJOR >= 3)
-    return EVP_default_properties_is_fips_enabled(NULL);
-#else
-    return FIPS_mode();
-#endif
+    uint32_t dwError = 0;
+    char *pszFipsMode = NULL;
+    const char *pszFipsValue = NULL;
+    int nFipsModeEnabled = 0;
+
+    dwError = TDNFFileReadAllText("/proc/sys/crypto/fips_enabled", &pszFipsMode, NULL);
+    if (dwError)
+    {
+        goto cleanup;
+    }
+
+    pszFipsValue = TDNFLeftTrim(pszFipsMode);
+    if (!IsNullOrEmptyString(pszFipsValue) && pszFipsValue[0] == '1')
+    {
+        nFipsModeEnabled = 1;
+    }
+
+cleanup:
+    TDNF_SAFE_FREE_MEMORY(pszFipsMode);
+    return nFipsModeEnabled;
 }
 
 uint32_t

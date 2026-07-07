@@ -10,7 +10,7 @@ names; equivalent `*-devel` packages on rpm distros):
 
 ```
 librpm-dev libsolv-dev libcurl4-openssl-dev libexpat1-dev \
-libssl-dev libgpgme-dev libpopt-dev pkg-config
+libsqlite3-dev libgpgme-dev libpopt-dev pkg-config
 ```
 
 Then:
