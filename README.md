@@ -10,7 +10,7 @@ names; equivalent `*-devel` packages on rpm distros):
 
 ```
 librpm-dev libsolv-dev libcurl4-openssl-dev libexpat1-dev \
-libssl-dev libsqlite3-dev libgpgme-dev libpopt-dev pkg-config
+libssl-dev libgpgme-dev libpopt-dev pkg-config
 ```
 
 Then:
@@ -67,4 +67,3 @@ zig build check
 
 `ci/coverity.sh` wraps `zig build` with `cov-build`. It generates an
 HTML report under `build-coverity/html/`.
-

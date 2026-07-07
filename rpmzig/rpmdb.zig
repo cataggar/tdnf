@@ -16,10 +16,11 @@
 //! `tdnf_rpmdb_string_free`.
 
 const std = @import("std");
+const sqlite = @import("sqlite");
 const header = @import("header.zig");
 
-const c = @cImport({
-    @cInclude("sqlite3.h");
+const c = sqlite.c;
+const libc = @cImport({
     @cInclude("stdlib.h");
 });
 
@@ -175,7 +176,7 @@ export fn tdnf_rpmdb_cookie(root: ?[*:0]const u8) ?[*:0]u8 {
         setError("cookie format buffer too small", .{});
         return null;
     };
-    const out = c.malloc(text.len + 1) orelse {
+    const out = libc.malloc(text.len + 1) orelse {
         setError("out of memory", .{});
         return null;
     };
@@ -297,7 +298,7 @@ export fn tdnf_rpmdb_iter_next_nevra(it: ?*Iter, nevra_out: ?*[*:0]u8) i32 {
             return -1;
         };
         // Re-allocate with a trailing NUL so the caller gets a C string.
-        const zptr = c.malloc(nevra.len + 1) orelse {
+        const zptr = libc.malloc(nevra.len + 1) orelse {
             std.heap.c_allocator.free(nevra);
             setError("out of memory", .{});
             return -1;
@@ -314,7 +315,7 @@ export fn tdnf_rpmdb_iter_next_nevra(it: ?*Iter, nevra_out: ?*[*:0]u8) i32 {
 /// Free a string returned by an iterator. (Wraps `free(3)` so callers
 /// don't have to think about which allocator we used.)
 export fn tdnf_rpmdb_string_free(s: ?[*:0]u8) void {
-    if (s) |p| c.free(@ptrCast(p));
+    if (s) |p| libc.free(@ptrCast(p));
 }
 
 // -------------------------------------------------------------------
@@ -455,7 +456,7 @@ export fn tdnf_rpmdb_pubkeys_next(
         if (key_len_out) |p| p.* = desc.len;
         if (keyid_out) |p| {
             const id_z = dupZ(keyid) orelse {
-                c.free(@ptrCast(out.*));
+                libc.free(@ptrCast(out.*));
                 return -1;
             };
             p.* = id_z;
@@ -467,7 +468,7 @@ export fn tdnf_rpmdb_pubkeys_next(
 /// Helper: malloc + copy + NUL-terminate. Returns null and sets
 /// last-error on allocation failure.
 fn dupZ(src: []const u8) ?[*:0]u8 {
-    const ptr = c.malloc(src.len + 1) orelse {
+    const ptr = libc.malloc(src.len + 1) orelse {
         setError("out of memory", .{});
         return null;
     };
@@ -552,7 +553,7 @@ export fn tdnf_rpm_file_nevra(fh: ?*FileHandle) ?[*:0]u8 {
     };
     defer std.heap.c_allocator.free(nevra);
 
-    const out = c.malloc(nevra.len + 1) orelse {
+    const out = libc.malloc(nevra.len + 1) orelse {
         setError("out of memory", .{});
         return null;
     };
@@ -669,7 +670,7 @@ export fn tdnf_rpm_file_decompress_payload(
     };
     defer std.heap.c_allocator.free(bytes);
 
-    const buf = c.malloc(bytes.len) orelse {
+    const buf = libc.malloc(bytes.len) orelse {
         setError("out of memory", .{});
         return -1;
     };
@@ -721,7 +722,7 @@ export fn tdnf_rpm_file_files_open(fh: ?*FileHandle) ?*FilesIter {
 export fn tdnf_rpm_file_files_close(it: ?*FilesIter) void {
     const i = it orelse return;
     std.heap.c_allocator.free(i.cpio_bytes);
-    if (i.name_scratch) |p| c.free(@ptrCast(p));
+    if (i.name_scratch) |p| libc.free(@ptrCast(p));
     std.heap.c_allocator.destroy(i);
 }
 
@@ -752,8 +753,8 @@ export fn tdnf_rpm_file_files_next(
     // Stash a NUL-terminated copy in the iterator's scratch.
     const needed = entry.name.len + 1;
     if (i.name_scratch == null or i.name_scratch_cap < needed) {
-        if (i.name_scratch) |p| c.free(@ptrCast(p));
-        const buf = c.malloc(needed) orelse {
+        if (i.name_scratch) |p| libc.free(@ptrCast(p));
+        const buf = libc.malloc(needed) orelse {
             i.name_scratch = null;
             i.name_scratch_cap = 0;
             setError("out of memory", .{});

@@ -8,8 +8,8 @@ manager built on `libsolv`, `librpm` and `libcurl`. It ships a public C library
 
 The build is driven by **Zig 0.16+** (no CMake — migrated to `build.zig`).
 The host needs `librpm-dev`, `libsolv-dev`, `libcurl4-openssl-dev`,
-`libexpat1-dev`, `libssl-dev`, `libsqlite3-dev`, `libgpgme-dev`,
-`libpopt-dev` (Debian/Ubuntu names — `*-devel` on rpm distros).
+`libexpat1-dev`, `libssl-dev`, `libgpgme-dev`, `libpopt-dev`
+(Debian/Ubuntu names — `*-devel` on rpm distros).
 
 ```sh
 # build + install into ./out
@@ -143,14 +143,13 @@ After T3, librpm in libtdnf is purely the
 `dnf5`. T4 (transaction execution) is intentionally out of
 scope.
 
-**Adding sqlite3- or gpgme-using Zig code:** don't put
-`mod.linkSystemLibrary("sqlite3", …)` or
+**Adding gpgme-using Zig code:** don't put
 `mod.linkSystemLibrary("gpgme", …)` on a static-library module —
-that embeds `libsqlite3.so` / `libgpgme.so` *inside* the
-resulting `.a` and tdnf-side consumers fail to link. Instead,
-leave the static lib symbol-naked and add `linkSystemLibrary` on
-every executable / shared lib that links it. Same pattern is
-used throughout `build.zig` for `history_lib` and `rpmzig_lib`.
+that embeds `libgpgme.so` inside the resulting `.a` and
+tdnf-side consumers fail to link. Vendored
+`cataggar/zig-sqlite` is safe to import from static libraries;
+`history_lib` and `rpmzig_lib` now compile SQLite in-tree and do
+not rely on a system `-lsqlite3` link.
 
 ## C code conventions
 

@@ -32,7 +32,6 @@ jobs:
             libcurl4-openssl-dev \
             libexpat1-dev \
             libssl-dev \
-            libsqlite3-dev \
             libgpgme-dev \
             libpopt-dev \
             pkg-config
