@@ -254,7 +254,7 @@ pub fn build(b: *Build) void {
 
     const common_lib = blk: {
         const mod = b.createModule(.{
-            .root_source_file = b.path("common/memory.zig"),
+            .root_source_file = b.path("common/common.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
@@ -264,7 +264,7 @@ pub fn build(b: *Build) void {
         mod.addIncludePath(b.path("common"));
         mod.addCSourceFiles(.{
             .root = b.path("common"),
-            .files = &.{ "memory_printf_shim.c", "strings.c", "utils.c", "log.c", "lock.c" },
+            .files = &.{ "memory_printf_shim.c", "log_shim.c", "strings.c", "utils.c" },
             .flags = &tdnf_cflags,
         });
         const lib = b.addLibrary(.{
@@ -337,7 +337,7 @@ pub fn build(b: *Build) void {
 
     {
         const test_mod = b.createModule(.{
-            .root_source_file = b.path("common/memory.zig"),
+            .root_source_file = b.path("common/common.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
@@ -346,7 +346,7 @@ pub fn build(b: *Build) void {
         test_mod.addIncludePath(b.path("common"));
         test_mod.addCSourceFiles(.{
             .root = b.path("common"),
-            .files = &.{ "memory_printf_shim.c", "memory_test_shim.c" },
+            .files = &.{ "memory_printf_shim.c", "memory_test_shim.c", "log_shim.c" },
             .flags = &tdnf_cflags,
         });
         const tests = b.addTest(.{ .root_module = test_mod });
