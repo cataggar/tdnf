@@ -218,6 +218,7 @@ pub fn build(b: *Build) void {
         .{ .key = "CMAKE_SOURCE_DIR", .value = b.build_root.path.? },
         .{ .key = "CMAKE_CURRENT_BINARY_DIR", .value = abs_prefix },
         .{ .key = "CMAKE_BINARY_DIR", .value = abs_prefix },
+        .{ .key = "PLUGIN_PATH", .value = b.fmt("{s}/{s}", .{ abs_prefix, plugin_dir_rel }) },
     });
 
     // ----- generated text files (autoconf_at style: @VAR@ only) ----- //

@@ -159,9 +159,11 @@ error:
 
 static void
 TDNFMetalinkHashFree(
-    TDNF_ML_HASH_INFO *ml_hash_info
+    void *pData
     )
 {
+    TDNF_ML_HASH_INFO *ml_hash_info = pData;
+
     if (!ml_hash_info)
     {
         return;
@@ -174,9 +176,11 @@ TDNFMetalinkHashFree(
 
 static void
 TDNFMetalinkUrlFree(
-    TDNF_ML_URL_INFO *ml_url_info
+    void *pData
     )
 {
+    TDNF_ML_URL_INFO *ml_url_info = pData;
+
     if (!ml_url_info)
     {
         return;
@@ -588,11 +592,6 @@ TDNFMetalinkZigParseUrl(
         return ERROR_TDNF_INVALID_PARAMETER;
     }
 
-    if (nValueLength <= MIN_URL_LENGTH)
-    {
-        return 0;
-    }
-
     return TDNFMetalinkParseUrlValue(
                 pCbCtx->ml_ctx,
                 pszProtocol,
@@ -614,8 +613,8 @@ TDNFMetalinkFree(
         return;
 
     TDNF_SAFE_FREE_MEMORY(ml_ctx->filename);
-    TDNFDeleteList(&ml_ctx->hashes, (TDNF_ML_FREE_FUNC)TDNFMetalinkHashFree);
-    TDNFDeleteList(&ml_ctx->urls, (TDNF_ML_FREE_FUNC)TDNFMetalinkUrlFree);
+    TDNFDeleteList(&ml_ctx->hashes, TDNFMetalinkHashFree);
+    TDNFDeleteList(&ml_ctx->urls, TDNFMetalinkUrlFree);
     TDNF_SAFE_FREE_MEMORY(ml_ctx);
 }
 
