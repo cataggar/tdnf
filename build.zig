@@ -162,9 +162,7 @@ pub fn build(b: *Build) void {
         prefix
     else
         b.pathJoin(&.{ b.build_root.path.?, prefix });
-    // Keep the vendored sqlite dependency resolved in-tree, but do not
-    // switch any shipped artifact away from the current system sqlite3
-    // link path until the later issue #42 PRs.
+    // Vendored sqlite backs the Zig-side history and rpmdb code paths.
     const sqlite_dep = b.dependency("sqlite", .{});
 
     const build_with_rpm_6x = detectRpm6(b);
@@ -318,11 +316,24 @@ pub fn build(b: *Build) void {
         .files = &.{ "tdnfpackage.c", "tdnfpool.c", "tdnfquery.c", "tdnfrepo.c", "simplequery.c" },
     });
 
-    const history_lib = staticLib(b, target, optimize, .{
-        .name = "tdnfhistory",
-        .root = "history",
-        .files = &.{"history.c"},
-    });
+    const history_lib = blk: {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("history/history_zig.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .pic = true,
+            .imports = &.{
+                .{ .name = "sqlite", .module = sqlite_dep.module("sqlite") },
+            },
+        });
+        const lib = b.addLibrary(.{
+            .name = "tdnfhistory",
+            .linkage = .static,
+            .root_module = mod,
+        });
+        break :blk lib;
+    };
 
     {
         const test_mod = b.createModule(.{
@@ -343,24 +354,7 @@ pub fn build(b: *Build) void {
         zig_test_step.dependOn(&run_tests.step);
     }
 
-    const history_zig_lib = blk: {
-        const mod = b.createModule(.{
-            .root_source_file = b.path("history/history_zig.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .pic = true,
-            .imports = &.{
-                .{ .name = "sqlite", .module = sqlite_dep.module("sqlite") },
-            },
-        });
-        const lib = b.addLibrary(.{
-            .name = "tdnfhistoryzig",
-            .linkage = .static,
-            .root_module = mod,
-        });
-        break :blk lib;
-    };
+    const history_zig_lib = history_lib;
 
     const cli_zig_lib = blk: {
         const mod = b.createModule(.{
@@ -390,12 +384,10 @@ pub fn build(b: *Build) void {
             .optimize = optimize,
             .link_libc = true,
             .pic = true,
+            .imports = &.{
+                .{ .name = "sqlite", .module = sqlite_dep.module("sqlite") },
+            },
         });
-        // No linkSystemLibrary on the static lib itself — that would
-        // embed sqlite3.so into the .a. Headers are reachable via
-        // link_libc = true (sqlite3.h lives on libc's include path on
-        // every distro tdnf cares about). Actual -lsqlite3 link
-        // happens at each consumer (libtdnf, tdnf-rpmdb-count, …).
         const lib = b.addLibrary(.{
             .name = "tdnfrpmzig",
             .linkage = .static,
@@ -403,11 +395,6 @@ pub fn build(b: *Build) void {
         });
         break :blk lib;
     };
-
-    // history/history.c now calls into rpmzig's iterator instead of
-    // librpm's rpmdb iterator; expose the C header on history_lib's
-    // include path.
-    history_lib.root_module.addIncludePath(b.path("rpmzig"));
 
     // `zig build test` runs the rpmzig Zig unit tests (currently just
     // path-building; the FFI surface is smoke-tested via
@@ -418,10 +405,10 @@ pub fn build(b: *Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
+            .imports = &.{
+                .{ .name = "sqlite", .module = sqlite_dep.module("sqlite") },
+            },
         });
-        // The test binary is the consumer, so the sqlite3 link goes
-        // here (cf. the same .a-embedding caveat for rpmzig_lib above).
-        test_mod.linkSystemLibrary("sqlite3", .{ .use_pkg_config = .yes });
         const tests = b.addTest(.{ .root_module = test_mod });
         const run_tests = b.addRunArtifact(tests);
         zig_test_step.dependOn(&run_tests.step);
@@ -442,8 +429,7 @@ pub fn build(b: *Build) void {
         zig_test_step.dependOn(&run_tests.step);
     }
 
-    // Smoke-test the vendored zig-sqlite dependency in isolation before
-    // the later PRs switch any real consumer to it.
+    // Smoke-test the vendored zig-sqlite dependency in isolation.
     {
         const test_mod = b.createModule(.{
             .root_source_file = b.path("history/sqlite_smoke_test.zig"),
@@ -459,8 +445,7 @@ pub fn build(b: *Build) void {
         zig_test_step.dependOn(&run_tests.step);
     }
 
-    // Build and exercise the standalone Zig history backend in
-    // isolation; do not wire it into the shipped artifacts yet.
+    // Build and exercise the Zig history backend unit tests.
     {
         const test_mod = b.createModule(.{
             .root_source_file = b.path("history/history_zig_test.zig"),
@@ -498,7 +483,6 @@ pub fn build(b: *Build) void {
             .flags = &tdnf_cflags,
         });
         mod.linkLibrary(rpmzig_lib);
-        linkSystem(mod, &.{"sqlite3"});
         const exe = b.addExecutable(.{
             .name = "tdnf-rpmdb-count",
             .root_module = mod,
@@ -525,7 +509,6 @@ pub fn build(b: *Build) void {
             .flags = &tdnf_cflags,
         });
         mod.linkLibrary(rpmzig_lib);
-        linkSystem(mod, &.{"sqlite3"});
         const exe = b.addExecutable(.{
             .name = "tdnf-rpmdb-list",
             .root_module = mod,
@@ -552,7 +535,6 @@ pub fn build(b: *Build) void {
             .flags = &tdnf_cflags,
         });
         mod.linkLibrary(rpmzig_lib);
-        linkSystem(mod, &.{"sqlite3"});
         const exe = b.addExecutable(.{
             .name = "tdnf-rpm-info",
             .root_module = mod,
@@ -580,7 +562,6 @@ pub fn build(b: *Build) void {
             .flags = &tdnf_cflags,
         });
         mod.linkLibrary(rpmzig_lib);
-        linkSystem(mod, &.{"sqlite3"});
         const exe = b.addExecutable(.{
             .name = "tdnf-rpmdb-pubkeys",
             .root_module = mod,
@@ -608,7 +589,6 @@ pub fn build(b: *Build) void {
             .flags = &tdnf_cflags,
         });
         mod.linkLibrary(rpmzig_lib);
-        linkSystem(mod, &.{"sqlite3"});
         const exe = b.addExecutable(.{
             .name = "tdnf-rpm-files",
             .root_module = mod,
@@ -637,7 +617,6 @@ pub fn build(b: *Build) void {
             .flags = &tdnf_cflags,
         });
         mod.linkLibrary(rpmzig_lib);
-        linkSystem(mod, &.{"sqlite3"});
         const exe = b.addExecutable(.{
             .name = "tdnf-rpm-verify",
             .root_module = mod,
@@ -699,7 +678,7 @@ pub fn build(b: *Build) void {
     tdnf_so_mod.linkLibrary(history_lib);
     tdnf_so_mod.linkLibrary(llconf_lib);
     tdnf_so_mod.linkLibrary(rpmzig_lib);
-    linkSystem(tdnf_so_mod, &.{ "rpm", "libsolv", "libsolvext", "libcurl", "openssl", "sqlite3" });
+    linkSystem(tdnf_so_mod, &.{ "rpm", "libsolv", "libsolvext", "libcurl", "openssl" });
 
     const libtdnf = b.addLibrary(.{
         .name = "tdnf",
@@ -759,7 +738,6 @@ pub fn build(b: *Build) void {
     });
     tdnf_mod.linkLibrary(libtdnfcli);
     tdnf_mod.linkLibrary(libtdnf);
-    linkSystem(tdnf_mod, &.{"sqlite3"});
     const tdnf_exe = b.addExecutable(.{
         .name = "tdnf",
         .root_module = tdnf_mod,
@@ -790,8 +768,8 @@ pub fn build(b: *Build) void {
     hardenExe(tdnf_config_exe);
     b.installArtifact(tdnf_config_exe);
 
-    // tdnf-history-util — librpm-free as of T1 PR #5; only links the
-    // rpmzig static lib + sqlite3 + the history static lib.
+    // tdnf-history-util — librpm-free as of T1 PR #5; links the
+    // vendored-SQLite history and rpmzig static libs.
     const history_util_mod = b.createModule(.{
         .target = target,
         .optimize = optimize,
@@ -807,7 +785,6 @@ pub fn build(b: *Build) void {
     });
     history_util_mod.linkLibrary(history_lib);
     history_util_mod.linkLibrary(rpmzig_lib);
-    linkSystem(history_util_mod, &.{"sqlite3"});
     const history_util_exe = b.addExecutable(.{
         .name = "tdnf-history-util",
         .root_module = history_util_mod,
