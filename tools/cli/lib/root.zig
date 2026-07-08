@@ -11,15 +11,19 @@ const c = @cImport({
 const argparse = @import("argparse.zig");
 const parsecleanargs = @import("parsecleanargs.zig");
 const parsehistoryargs = @import("parsehistoryargs.zig");
+const parselistargs = @import("parselistargs.zig");
 const parserepolistargs = @import("parserepolistargs.zig");
 const parsereposyncargs = @import("parsereposyncargs.zig");
+const parseupdateinfo = @import("parseupdateinfo.zig");
 
 comptime {
     _ = argparse;
     _ = parsecleanargs;
     _ = parsehistoryargs;
+    _ = parselistargs;
     _ = parserepolistargs;
     _ = parsereposyncargs;
+    _ = parseupdateinfo;
 }
 
 test "TDNFCliArgParseReset clears getopt state" {
