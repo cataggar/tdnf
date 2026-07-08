@@ -13,6 +13,7 @@ const parsecleanargs = @import("parsecleanargs.zig");
 const parsehistoryargs = @import("parsehistoryargs.zig");
 const parselistargs = @import("parselistargs.zig");
 const parserepolistargs = @import("parserepolistargs.zig");
+const parserepoqueryargs = @import("parserepoqueryargs.zig");
 const parsereposyncargs = @import("parsereposyncargs.zig");
 const parseupdateinfo = @import("parseupdateinfo.zig");
 
@@ -22,6 +23,7 @@ comptime {
     _ = parsehistoryargs;
     _ = parselistargs;
     _ = parserepolistargs;
+    _ = parserepoqueryargs;
     _ = parsereposyncargs;
     _ = parseupdateinfo;
 }
