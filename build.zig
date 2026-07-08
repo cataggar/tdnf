@@ -248,11 +248,6 @@ pub fn build(b: *Build) void {
         });
         mod.addIncludePath(b.path("include"));
         mod.addIncludePath(b.path("llconf"));
-        mod.addCSourceFiles(.{
-            .root = b.path("llconf"),
-            .files = &.{ "ini.c", "lines.c", "strutils.c" },
-            .flags = &tdnf_cflags,
-        });
         const lib = b.addLibrary(.{
             .name = "tdnfllconf",
             .linkage = .static,
