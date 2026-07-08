@@ -26,6 +26,7 @@ const c = @cImport({
     @cInclude("tdnferror.h");
     @cInclude("tdnf-common-defines.h");
     @cInclude("../llconf/nodes.h");
+    @cInclude("../rpmzig/checksum.h");
     @cInclude("defines.h");
     @cInclude("structs.h");
     @cInclude("prototypes.h");
@@ -39,6 +40,25 @@ extern fn TDNFSplitStringToArray(pszBuf: ?[*:0]const u8, pszSep: ?[*:0]const u8,
 extern fn log_console(nLogLevel: c_int, pszFormat: [*:0]const u8, ...) void;
 extern fn fgets(s: [*c]u8, n: c_int, stream: [*c]c.FILE) [*c]u8;
 extern fn realpath(name: [*c]const u8, resolved: [*c]u8) [*c]u8;
+
+const hash_sentinel: usize = @intCast(c.TDNF_HASH_SENTINEL);
+
+export var hash_ops: [hash_sentinel]c.hash_op = .{
+    .{ .hash_type = "md5", .length = c.TDNF_MD5_DIGEST_LEN },
+    .{ .hash_type = "sha1", .length = c.TDNF_SHA1_DIGEST_LEN },
+    .{ .hash_type = "sha256", .length = c.TDNF_SHA256_DIGEST_LEN },
+    .{ .hash_type = "sha512", .length = c.TDNF_SHA512_DIGEST_LEN },
+};
+
+export var hashType: [7]c.hash_type = .{
+    .{ .hash_name = "md5", .hash_value = c.TDNF_HASH_MD5 },
+    .{ .hash_name = "sha1", .hash_value = c.TDNF_HASH_SHA1 },
+    .{ .hash_name = "sha-1", .hash_value = c.TDNF_HASH_SHA1 },
+    .{ .hash_name = "sha256", .hash_value = c.TDNF_HASH_SHA256 },
+    .{ .hash_name = "sha-256", .hash_value = c.TDNF_HASH_SHA256 },
+    .{ .hash_name = "sha512", .hash_value = c.TDNF_HASH_SHA512 },
+    .{ .hash_name = "sha-512", .hash_value = c.TDNF_HASH_SHA512 },
+};
 
 fn getErrno() c_int {
     return c.__errno_location().*;
@@ -119,6 +139,110 @@ fn isAlphaNum(ch: u8) bool {
 
 fn isSpace(ch: u8) bool {
     return c.isspace(@as(c_int, ch)) != 0;
+}
+
+fn isSupportedHashType(hash_type: c_int) bool {
+    return hash_type >= c.TDNF_HASH_MD5 and hash_type < c.TDNF_HASH_SENTINEL;
+}
+
+fn getHashOp(hash_type: c_int) *c.hash_op {
+    return &hash_ops[@as(usize, @intCast(hash_type))];
+}
+
+fn rpmzigErrorOrUnknown() [*:0]const u8 {
+    const pszError = c.tdnf_rpmzig_checksum_last_error();
+    return if (pszError[0] == 0) "unknown error" else pszError;
+}
+
+fn tdnfIsFipsModeEnabled() c_int {
+    var pszFipsMode: ?[*:0]u8 = null;
+    defer freeCString(pszFipsMode);
+
+    if (TDNFFileReadAllText("/proc/sys/crypto/fips_enabled", &pszFipsMode, null) != 0) {
+        return 0;
+    }
+
+    const pszFipsValue = TDNFLeftTrim(@ptrCast(pszFipsMode));
+    if (!isNullOrEmptyString(pszFipsValue) and pszFipsValue.?[0] == '1') {
+        return 1;
+    }
+
+    return 0;
+}
+
+fn tdnfGetDigestForFileRpmzig(
+    filenameOpt: ?[*:0]const u8,
+    hash_type: c_int,
+    digest: ?[*]u8,
+) u32 {
+    var fp: [*c]c.FILE = null;
+    var ctx: ?*c.tdnf_rpmzig_digest_ctx = null;
+    var buf = [_]u8{0} ** c.BUFSIZ;
+
+    if (isNullOrEmptyString(filenameOpt) or digest == null or !isSupportedHashType(hash_type)) {
+        return c.ERROR_TDNF_INVALID_PARAMETER;
+    }
+
+    const filename = filenameOpt.?;
+    const hash = getHashOp(hash_type);
+
+    fp = c.fopen(@ptrCast(filename), "r");
+    if (fp == null) {
+        log_console(c.LOG_ERR, "ERROR: Checksum validating (%s) FAILED\n", filename);
+        return systemError(getErrno());
+    }
+    defer _ = c.fclose(fp);
+
+    ctx = c.tdnf_rpmzig_digest_open(hash_type);
+    if (ctx == null) {
+        log_console(
+            c.LOG_ERR,
+            "rpmzig digest open failed for %s (%s): %s\n",
+            filename,
+            hash.hash_type,
+            rpmzigErrorOrUnknown(),
+        );
+        return c.ERROR_TDNF_CHECKSUM_VALIDATION_FAILED;
+    }
+    defer c.tdnf_rpmzig_digest_close(ctx);
+    while (true) {
+        const length = c.fread(@ptrCast(&buf[0]), 1, c.BUFSIZ - 1, fp);
+        if (length > 0) {
+            const chunk_len: usize = length;
+            if (c.tdnf_rpmzig_digest_update(ctx, &buf[0], chunk_len) != 0) {
+                log_console(
+                    c.LOG_ERR,
+                    "rpmzig digest update failed for %s (%s): %s\n",
+                    filename,
+                    hash.hash_type,
+                    rpmzigErrorOrUnknown(),
+                );
+                return c.ERROR_TDNF_CHECKSUM_VALIDATION_FAILED;
+            }
+            @memset(buf[0..], 0);
+            continue;
+        }
+
+        if (c.ferror(fp) != 0) {
+            log_console(c.LOG_ERR, "Error: Checksum validating (%s) FAILED\n", filename);
+            return systemError(getErrno());
+        }
+
+        break;
+    }
+
+    if (c.tdnf_rpmzig_digest_final(ctx, digest, hash.length) != 0) {
+        log_console(
+            c.LOG_ERR,
+            "rpmzig digest final failed for %s (%s): %s\n",
+            filename,
+            hash.hash_type,
+            rpmzigErrorOrUnknown(),
+        );
+        return c.ERROR_TDNF_CHECKSUM_VALIDATION_FAILED;
+    }
+
+    return 0;
 }
 
 export fn TDNFFileReadAllText(
@@ -923,4 +1047,194 @@ export fn TDNFStrIsValidRepoName(strOpt: ?[*:0]const u8) c_int {
     }
 
     return if (str[0] == 0) 1 else 0;
+}
+
+export fn TDNFGetDigestForFile(
+    filenameOpt: ?[*:0]const u8,
+    hash_type: c_int,
+    digest: ?[*]u8,
+) u32 {
+    if (isNullOrEmptyString(filenameOpt) or digest == null or !isSupportedHashType(hash_type)) {
+        return c.ERROR_TDNF_INVALID_PARAMETER;
+    }
+
+    if (hash_type == c.TDNF_HASH_MD5 and tdnfIsFipsModeEnabled() != 0) {
+        log_console(c.LOG_ERR, "Digest Init Failed\n");
+        return c.ERROR_TDNF_FIPS_MODE_FORBIDDEN;
+    }
+
+    return tdnfGetDigestForFileRpmzig(filenameOpt, hash_type, digest);
+}
+
+export fn TDNFCheckHash(
+    filenameOpt: ?[*:0]const u8,
+    digest: ?[*]const u8,
+    hash_type: c_int,
+) u32 {
+    var digest_from_file = [_]u8{0} ** c.TDNF_MAX_DIGEST_LEN;
+
+    if (isNullOrEmptyString(filenameOpt) or digest == null or !isSupportedHashType(hash_type)) {
+        return c.ERROR_TDNF_INVALID_PARAMETER;
+    }
+
+    const filename = filenameOpt.?;
+    const hash = getHashOp(hash_type);
+    const hash_len: usize = @intCast(hash.length);
+
+    const dwError = TDNFGetDigestForFile(filename, hash_type, digest_from_file[0..].ptr);
+    if (dwError != 0) {
+        return dwError;
+    }
+
+    if (!std.mem.eql(u8, digest_from_file[0..hash_len], digest.?[0..hash_len])) {
+        log_console(c.LOG_ERR, "Error: Validating Checksum (%s) FAILED (digest mismatch)\n", filename);
+        return c.ERROR_TDNF_CHECKSUM_VALIDATION_FAILED;
+    }
+
+    return 0;
+}
+
+export fn TDNFCheckHexDigest(
+    hex_digestOpt: ?[*:0]const u8,
+    digest_length: c_int,
+) u32 {
+    if (isNullOrEmptyString(hex_digestOpt) or digest_length <= 0) {
+        return 0;
+    }
+
+    const hex_digest = std.mem.span(hex_digestOpt.?);
+    for (hex_digest) |digit| {
+        if (c.isxdigit(@as(c_int, digit)) == 0) {
+            return 0;
+        }
+    }
+
+    return if (hex_digest.len == @as(usize, @intCast(digest_length * 2))) 1 else 0;
+}
+
+export fn TDNFHexToUint(
+    hex_digestOpt: ?[*:0]const u8,
+    uintValue: ?*u8,
+) u32 {
+    var buf = [_:0]u8{ 0, 0, 0 };
+
+    if (isNullOrEmptyString(hex_digestOpt) or uintValue == null) {
+        return c.ERROR_TDNF_INVALID_PARAMETER;
+    }
+
+    const hex_digest = hex_digestOpt.?;
+    buf[0] = hex_digest[0];
+    buf[1] = hex_digest[1];
+
+    c.__errno_location().* = 0;
+    const value = c.strtoul(@ptrCast(&buf), null, 16);
+    if (getErrno() != 0) {
+        log_console(c.LOG_ERR, "Error: strtoul call failed\n");
+        return systemError(getErrno());
+    }
+
+    uintValue.?.* = @intCast(value & 0xff);
+    return 0;
+}
+
+export fn TDNFChecksumFromHexDigest(
+    hex_digestOpt: ?[*:0]const u8,
+    ppdigest: ?[*]u8,
+) u32 {
+    var raw: ?*anyopaque = null;
+    var uintValue: u8 = 0;
+
+    if (isNullOrEmptyString(hex_digestOpt) or ppdigest == null) {
+        return c.ERROR_TDNF_INVALID_PARAMETER;
+    }
+
+    const hex_digest = std.mem.span(hex_digestOpt.?);
+    const digest_len = hex_digest.len / 2;
+    const dwError = TDNFAllocateMemory(1, digest_len, &raw);
+    if (dwError != 0) {
+        return dwError;
+    }
+    defer TDNFFreeMemory(raw);
+
+    const pdigest: [*]u8 = @ptrCast(raw.?);
+    var i: usize = 0;
+    while (i < hex_digest.len) : (i += 2) {
+        const convertError = TDNFHexToUint(hex_digestOpt.? + i, &uintValue);
+        if (convertError != 0) {
+            return convertError;
+        }
+        pdigest[i >> 1] = uintValue;
+    }
+
+    @memcpy(ppdigest.?[0..digest_len], pdigest[0..digest_len]);
+    return 0;
+}
+
+fn expectedDigestBytes(comptime expected_hex: []const u8) [c.TDNF_MAX_DIGEST_LEN]u8 {
+    var expected = [_]u8{0} ** c.TDNF_MAX_DIGEST_LEN;
+    _ = std.fmt.hexToBytes(expected[0 .. expected_hex.len / 2], expected_hex) catch unreachable;
+    return expected;
+}
+
+fn expectFileDigest(filename: [*:0]const u8, hash_type: c_int, comptime expected_hex: []const u8) !void {
+    var actual = [_]u8{0} ** c.TDNF_MAX_DIGEST_LEN;
+    const expected = expectedDigestBytes(expected_hex);
+    const hash_len: usize = @intCast(getHashOp(hash_type).length);
+
+    try std.testing.expectEqual(@as(u32, 0), TDNFGetDigestForFile(filename, hash_type, actual[0..].ptr));
+    try std.testing.expectEqualSlices(u8, expected[0..hash_len], actual[0..hash_len]);
+    try std.testing.expectEqual(@as(u32, 0), TDNFCheckHash(filename, expected[0..hash_len].ptr, hash_type));
+}
+
+test "checksum helpers validate hex digests and byte conversion" {
+    try std.testing.expectEqual(@as(u32, 1), TDNFCheckHexDigest("0011aaff", 4));
+    try std.testing.expectEqual(@as(u32, 0), TDNFCheckHexDigest("0011aafg", 4));
+    try std.testing.expectEqual(@as(u32, 0), TDNFCheckHexDigest("0011aaff", 3));
+
+    var byte: u8 = 0;
+    try std.testing.expectEqual(@as(u32, 0), TDNFHexToUint("0f", &byte));
+    try std.testing.expectEqual(@as(u8, 0x0f), byte);
+
+    var digest = [_]u8{0} ** c.TDNF_MAX_DIGEST_LEN;
+    try std.testing.expectEqual(@as(u32, 0), TDNFChecksumFromHexDigest("0011aaff", digest[0..].ptr));
+    try std.testing.expectEqualSlices(u8, &.{ 0x00, 0x11, 0xaa, 0xff }, digest[0..4]);
+}
+
+test "TDNFGetDigestForFile and TDNFCheckHash use the checksum ABI" {
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    var rel_path_buf: [128]u8 = undefined;
+    const rel_path = try std.fmt.bufPrint(&rel_path_buf, ".zig-cache/tmp/{s}/input.txt", .{tmp_dir.sub_path});
+
+    var filename_buf: [129:0]u8 = [_:0]u8{0} ** 129;
+    @memcpy(filename_buf[0..rel_path.len], rel_path);
+    const filename: [*:0]const u8 = @ptrCast(&filename_buf);
+
+    const fp = c.fopen(filename, "w");
+    try std.testing.expect(fp != null);
+    defer _ = c.fclose(fp);
+    try std.testing.expectEqual(@as(usize, 3), c.fwrite("abc", 1, 3, fp));
+    try std.testing.expectEqual(@as(c_int, 0), c.fflush(fp));
+
+    try expectFileDigest(filename, c.TDNF_HASH_SHA1, "a9993e364706816aba3e25717850c26c9cd0d89d");
+    try expectFileDigest(filename, c.TDNF_HASH_SHA256, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    try expectFileDigest(
+        filename,
+        c.TDNF_HASH_SHA512,
+        "ddaf35a193617abacc417349ae204131" ++
+            "12e6fa4e89a97ea20a9eeee64b55d39a" ++
+            "2192992a274fc1a836ba3c23a3feebbd" ++
+            "454d4423643ce80e2a9ac94fa54ca49f",
+    );
+
+    if (tdnfIsFipsModeEnabled() != 0) {
+        var digest = [_]u8{0} ** c.TDNF_MAX_DIGEST_LEN;
+        try std.testing.expectEqual(
+            @as(u32, c.ERROR_TDNF_FIPS_MODE_FORBIDDEN),
+            TDNFGetDigestForFile(filename, c.TDNF_HASH_MD5, digest[0..].ptr),
+        );
+    } else {
+        try expectFileDigest(filename, c.TDNF_HASH_MD5, "900150983cd24fb0d6963f7d28e17f72");
+    }
 }

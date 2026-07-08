@@ -227,7 +227,7 @@ pub fn build(b: *Build) void {
         mod.addIncludePath(b.path("common"));
         mod.addCSourceFiles(.{
             .root = b.path("common"),
-            .files = &.{ "memory_printf_shim.c", "log_shim.c", "joinpath_shim.c", "utils.c" },
+            .files = &.{ "memory_printf_shim.c", "log_shim.c", "joinpath_shim.c" },
             .flags = &tdnf_cflags,
         });
         const lib = b.addLibrary(.{
@@ -292,25 +292,6 @@ pub fn build(b: *Build) void {
         break :blk lib;
     };
 
-    {
-        const test_mod = b.createModule(.{
-            .root_source_file = b.path("common/common.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        });
-        test_mod.addIncludePath(b.path("include"));
-        test_mod.addIncludePath(b.path("common"));
-        test_mod.addCSourceFiles(.{
-            .root = b.path("common"),
-            .files = &.{ "memory_printf_shim.c", "memory_test_shim.c", "log_shim.c", "joinpath_shim.c", "utils_test_shim.c" },
-            .flags = &tdnf_cflags,
-        });
-        const tests = b.addTest(.{ .root_module = test_mod });
-        const run_tests = b.addRunArtifact(tests);
-        zig_test_step.dependOn(&run_tests.step);
-    }
-
     const history_zig_lib = history_lib;
 
     const cli_zig_lib = blk: {
@@ -353,6 +334,26 @@ pub fn build(b: *Build) void {
         });
         break :blk lib;
     };
+
+    {
+        const test_mod = b.createModule(.{
+            .root_source_file = b.path("common/common.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        test_mod.addIncludePath(b.path("include"));
+        test_mod.addIncludePath(b.path("common"));
+        test_mod.addCSourceFiles(.{
+            .root = b.path("common"),
+            .files = &.{ "memory_printf_shim.c", "memory_test_shim.c", "log_shim.c", "joinpath_shim.c", "utils_test_shim.c" },
+            .flags = &tdnf_cflags,
+        });
+        test_mod.linkLibrary(rpmzig_lib);
+        const tests = b.addTest(.{ .root_module = test_mod });
+        const run_tests = b.addRunArtifact(tests);
+        zig_test_step.dependOn(&run_tests.step);
+    }
 
     // `zig build test` runs the rpmzig Zig unit tests (currently just
     // path-building; the FFI surface is smoke-tested via
