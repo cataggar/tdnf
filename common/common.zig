@@ -11,4 +11,5 @@ comptime {
     _ = @import("log.zig");
     _ = @import("lock.zig");
     _ = @import("strings.zig");
+    _ = @import("utils.zig");
 }

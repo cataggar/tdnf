@@ -227,7 +227,7 @@ pub fn build(b: *Build) void {
         mod.addIncludePath(b.path("common"));
         mod.addCSourceFiles(.{
             .root = b.path("common"),
-            .files = &.{ "memory_printf_shim.c", "log_shim.c", "utils.c" },
+            .files = &.{ "memory_printf_shim.c", "log_shim.c", "joinpath_shim.c", "utils.c" },
             .flags = &tdnf_cflags,
         });
         const lib = b.addLibrary(.{
@@ -303,7 +303,7 @@ pub fn build(b: *Build) void {
         test_mod.addIncludePath(b.path("common"));
         test_mod.addCSourceFiles(.{
             .root = b.path("common"),
-            .files = &.{ "memory_printf_shim.c", "memory_test_shim.c", "log_shim.c" },
+            .files = &.{ "memory_printf_shim.c", "memory_test_shim.c", "log_shim.c", "joinpath_shim.c", "utils_test_shim.c" },
             .flags = &tdnf_cflags,
         });
         const tests = b.addTest(.{ .root_module = test_mod });
