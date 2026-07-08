@@ -1,0 +1,285 @@
+Usage: tdnf [options] COMMAND
+
+Common Options
+--4, -4                    Resolve to IPv4 addresses only
+                           Example: tdnf -4 install package
+--6, -6                    Resolve to IPv6 addresses only
+                           Example: tdnf -6 install package
+--alldeps                  Download all dependencies (requires --downloadonly or --urls)
+                           Example: tdnf --downloadonly --alldeps install package
+--allowerasing             Allow erasing of installed packages to resolve dependencies
+                           Example: tdnf --allowerasing install pkg
+--assumeno                 Answer 'no' to all questions
+                           Example: tdnf --assumeno remove package
+-y, --assumeyes            Answer 'yes' to all questions
+                           Example: tdnf -y install package
+-b, --best                 Try the best available package versions
+                           Example: tdnf --best install package
+--builddeps                Install build dependencies
+                           Example: tdnf --builddeps install package
+-C, --cacheonly            Run entirely from cache, don't update
+                           Example: tdnf -C install package
+-c, --config <file>        Path to configuration file
+                           Example: tdnf -c /etc/tdnf/tdnf.conf install package
+-d, --debuglevel <level>   Debug output level (emergency|alert|critical|error|warning|notice|info|debug)
+                           Example: tdnf -d debug install package
+--debugsolver              Enable debug output for dependency solver
+                           Example: tdnf --debugsolver install pkg
+--disableexcludes          Disable excludes from tdnf.conf
+                           Example: tdnf --disableexcludes install
+--disableplugin <name>     Disable plugins by name
+                           Example: tdnf --disableplugin=versionlock install package
+--disablerepo <repoid>     Disable repositories by id
+                           Example: tdnf --disablerepo=updates install package
+--downloaddir <dir>        Directory to store downloaded packages (requires --downloadonly)
+                           Example: tdnf --downloadonly --downloaddir=/tmp/pkgs install
+--downloadonly             Download packages only, do not install
+                           Example: tdnf --downloadonly install pkg
+
+--urls                     Print package URLs only, do not download or install
+                           Example: tdnf --urls install pkg
+--enablerepo <repoid>      Enable repositories by id
+                           Example: tdnf --enablerepo=updates install
+--enableplugin <name>      Enable plugins by name
+                           Example: tdnf --enableplugin=versionlock install package
+--exclude <pkg1,pkg2,...>  Exclude packages by name
+                           Example: tdnf --exclude=linux* install
+--forcearch <arch>         Force architecture (x86_64|aarch64|noarch)
+                           Example: tdnf --forcearch=x86_64 install
+-h, --help                 Show this help message
+                           Example: tdnf --help
+-i, --installroot <path>   Set install root path (must be absolute)
+                           Example: tdnf -i /mnt/chroot install pkg
+-j, --json                 Output in JSON format
+                           Example: tdnf --json list installed
+--noautoremove             Do not remove automatically installed dependencies
+                           Example: tdnf --noautoremove remove pkg
+--nodeps                   Skip dependency checks (requires --downloadonly or --urls)
+                           Example: tdnf --downloadonly --nodeps install package
+--nogpgcheck               Skip GPG signature checks
+                           Example: tdnf --nogpgcheck install pkg
+--nocligpgcheck            Skip GPG signature checks for command line rpms
+                           Example: tdnf --nocligpgcheck install http://foo.bar.com/package.rpm
+--noplugins                Disable all plugins
+                           Example: tdnf --noplugins install package
+-q, --quiet                Quiet operation
+                           Example: tdnf -q install package
+--reboot-required          Check if reboot is required after transaction
+                           Example: tdnf --reboot-required install package
+--refresh                  Refresh repository metadata before operation
+                           Example: tdnf --refresh install package
+--releasever <version>     Set release version
+                           Example: tdnf --releasever=5.0 install pkg
+--repo <repoid>            Enable only this repository
+                           Example: tdnf --repo=base install pkg
+--repofromdir <id>,<dir>   Add repository from directory
+                           Example: tdnf --repofromdir=local,/path/to/repo install package
+--repofrompath <id>,<path> Add repository from path
+                           Example: tdnf --repofrompath=local,/mnt/repo install package
+--repoid <repoid>          Same as --repo
+                           Example: tdnf --repoid=base install pkg
+--rpmdefine <macro>        Define RPM macro
+                           Example: tdnf --rpmdefine='_dbpath <path>' install package
+--rpmverbosity <level>     RPM verbosity level (emergency|alert|critical|error|warning|notice|info|debug)
+                           Example: tdnf --rpmverbosity=debug install package
+--sec-severity <level>     Filter by security severity (Critical|Important|Moderate|Low)
+                           Example: tdnf updateinfo --sec-severity=Critical
+--security                 Only show security updates
+                           Example: tdnf --security update
+--setopt <option>=<value>  Set configuration option
+                           Example: tdnf --setopt=keepcache=1 install package
+--skip-broken              Skip packages with broken dependencies
+                           Example: tdnf --skip-broken install pkg
+--skipconflicts            Skip packages with conflicts
+                           Example: tdnf --skipconflicts install pkg
+--skipdigest               Skip package digest verification
+                           Example: tdnf --skipdigest install pkg
+--skipsignature            Skip package signature verification
+                           Example: tdnf --skipsignature install
+--skipobsoletes            Skip obsolete packages
+                           Example: tdnf --skipobsoletes install
+--source                   Operate on source packages
+                           Example: tdnf --source install package
+--testonly                 Run transaction in test mode only
+                           Example: tdnf --testonly install package
+-v, --verbose              Verbose operation
+                           Example: tdnf -v install package
+--version                  Show version information
+                           Example: tdnf --version
+
+Repoquery Select Options
+--available                Show only available packages
+                           Example: tdnf repoquery --available pkg
+--duplicates               Show duplicate packages
+                           Example: tdnf repoquery --duplicates
+--extras                   Show packages not in any repository
+                           Example: tdnf repoquery --extras
+--file <file>              Query packages that own the file
+                           Example: tdnf repoquery --file=/usr/bin/bash
+--installed                Show only installed packages
+                           Example: tdnf repoquery --installed pkg
+--userinstalled            Show only user-installed packages
+                           Example: tdnf repoquery --userinstalled
+--upgrades                 Show only upgradeable packages
+                           Example: tdnf repoquery --upgrades
+--downgrades               Show only downgradeable packages
+                           Example: tdnf repoquery --downgrades
+--whatconflicts <cap>      Find packages that conflict with capability
+                           Example: tdnf repoquery --whatconflicts=package
+--whatdepends <cap>        Find packages that depend on capability
+                           Example: tdnf repoquery --whatdepends=glibc
+--whatenhances <cap>       Find packages that enhance capability
+                           Example: tdnf repoquery --whatenhances=package
+--whatobsoletes <cap>      Find packages that obsolete capability
+                           Example: tdnf repoquery --whatobsoletes=package
+--whatprovides <cap>       Find packages that provide capability
+                           Example: tdnf repoquery --whatprovides=/usr/bin/bash
+--whatrecommends <cap>     Find packages that recommend capability
+                           Example: tdnf repoquery --whatrecommends=package
+--whatrequires <cap>       Find packages that require capability
+                           Example: tdnf repoquery --whatrequires=glibc
+--whatsuggests <cap>       Find packages that suggest capability
+                           Example: tdnf repoquery --whatsuggests=package
+--whatsupplements <cap>    Find packages that supplement capability
+                           Example: tdnf repoquery --whatsupplements=package
+
+Repoquery Query Options
+--changelogs               Show package changelogs
+                           Example: tdnf repoquery --changelogs pkg
+--conflicts                Show package conflicts
+                           Example: tdnf repoquery --conflicts pkg
+--depends                  Show package dependencies
+                           Example: tdnf repoquery --depends package
+--enhances                 Show packages enhanced by this package
+                           Example: tdnf repoquery --enhances pkg
+--list                     List files in package
+                           Example: tdnf repoquery --list package
+--location                 Show package location
+                           Example: tdnf repoquery --location pkg
+--obsoletes                Show packages obsoleted by this package
+                           Example: tdnf repoquery --obsoletes pkg
+--provides                 Show capabilities provided by package
+                           Example: tdnf repoquery --provides package
+--qf <fmt>                 Use custom query format
+                           Example: tdnf repoquery --qf='%{name}-%{version}' package
+--recommends               Show packages recommended by this package
+                           Example: tdnf repoquery --recommends pkg
+--requires                 Show package requirements
+                           Example: tdnf repoquery --requires pkg
+--requires-pre             Show pre-requisites
+                           Example: tdnf repoquery --requires-pre pkg
+--suggests                 Show packages suggested by this package
+                           Example: tdnf repoquery --suggests pkg
+--source                   Show source package
+                           Example: tdnf repoquery --source package
+--supplements              Show packages supplemented by this package
+                           Example: tdnf repoquery --supplements pkg
+
+Reposync Options
+--arch <arch>              Sync packages for specific architecture (can be specified multiple times)
+                           Example: tdnf reposync --arch=x86_64 --arch=noarch
+--delete                   Delete local packages not in repository
+                           Example: tdnf reposync --delete
+--download-metadata        Download repository metadata
+                           Example: tdnf reposync --download-metadata
+--download-path <dir>      Directory to download packages to
+                           Example: tdnf reposync --download-path=/mnt/repo
+--gpgcheck                 Enable GPG signature checking
+                           Example: tdnf reposync --gpgcheck
+--metadata-path <dir>      Directory to store metadata
+                           Example: tdnf reposync --metadata-path=/mnt/repo/metadata
+--newest-only              Download only newest packages
+                           Example: tdnf reposync --newest-only
+--norepopath               Do not create repository directory structure
+                           Example: tdnf reposync --norepopath
+--source                   Sync source packages
+                           Example: tdnf reposync --source
+--urls                     Show URLs instead of downloading
+                           Example: tdnf reposync --urls
+
+List and Updateinfo Scope Options
+--all                      Show all packages/advisories
+                           Example: tdnf list --all
+--downgrades               Show downgradeable packages
+                           Example: tdnf list --downgrades
+--info                     Show detailed advisory information
+                           Example: tdnf updateinfo --info
+--recent                   Show recent packages/advisories
+                           Example: tdnf list --recent
+--summary                  Show advisory summary
+                           Example: tdnf updateinfo --summary
+--updates                  Show updateable packages
+                           Example: tdnf list --updates
+
+History Options
+--from <id>                Start from transaction ID
+                           Example: tdnf history list --from=10
+--reverse                  Show history in reverse order
+                           Example: tdnf history list --reverse
+--to <id>                  End at transaction ID
+                           Example: tdnf history list --to=20
+
+List of Main Commands
+autoerase                  Same as 'autoremove'
+                           Example: tdnf autoerase
+autoremove                 Remove automatically installed dependencies
+                           Example: tdnf autoremove
+check                      Check repositories for problems
+                           Example: tdnf check
+check-local <dir>          Check local RPM folder for problems
+                           Example: tdnf check-local /path/to/rpms
+check-update               Check for available package upgrades
+                           Example: tdnf check-update
+clean <type>               Remove cached data (packages|metadata|dbcache|plugins|expire-cache|all|expire-cache|all)
+                           Example: tdnf clean all
+count                      Count packages
+                           Example: tdnf count
+distro-sync                Synchronize installed packages to latest available versions
+                           Example: tdnf distro-sync
+downgrade <pkg>            Downgrade a package
+                           Example: tdnf downgrade package-1.0
+erase <pkg>                Remove a package or packages from your system
+                           Example: tdnf erase package
+help                       Display this help message
+                           Example: tdnf help
+history <cmd>              History commands (init|update|list|rollback|undo|redo|id)
+                           Example: tdnf history list
+                           Example: tdnf history id
+info <pkg>                 Display details about a package or group of packages
+                           Example: tdnf info package
+install <pkg>              Install a package or packages on your system
+                           Example: tdnf install package
+list <pkg>                 List a package or groups of packages
+                           Example: tdnf list installed
+makecache                  Generate the metadata cache
+                           Example: tdnf makecache
+mark <action> <pkg>        Mark package(s) (install|remove)
+                           Example: tdnf mark install package
+provides <cap>             Same as 'whatprovides'
+                           Example: tdnf provides /usr/bin/bash
+whatprovides <cap>         Find what package provides the given value
+                           Example: tdnf whatprovides /usr/bin/bash
+reinstall <pkg>            Reinstall a package
+                           Example: tdnf reinstall package
+remove <pkg>               Remove a package or packages from your system
+                           Example: tdnf remove package
+repolist [filter]          Display the configured software repositories (all|enabled|disabled)
+                           Example: tdnf repolist all
+repoquery <pkg>            Query repositories
+                           Example: tdnf repoquery --list package
+reposync                   Download all packages from one or more repositories to a directory
+                           Example: tdnf reposync --download-path=/mnt/repo
+search <term>              Search package details for the given string
+                           Example: tdnf search bash
+update <pkg>               Upgrade a package or packages on your system (same as 'upgrade')
+                           Example: tdnf update package
+update-to <pkg-version>    Same as 'upgrade-to'
+                           Example: tdnf update-to package-1.0
+updateinfo [mode]          Display advisories about packages (all|info|summary)
+                           Example: tdnf updateinfo summary
+upgrade <pkg>              Upgrade a package or packages on your system
+                           Example: tdnf upgrade package
+upgrade-to <pkg-version>   Upgrade a package on your system to the specified version
+                           Example: tdnf upgrade-to package-1.0-1.ph5
+
+Please refer to https://github.com/vmware/tdnf/wiki for documentation.

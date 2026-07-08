@@ -9,6 +9,9 @@ const c = @cImport({
     @cInclude("getopt.h");
 });
 const argparse = @import("argparse.zig");
+const help = @import("help.zig");
+const options = @import("options.zig");
+const parseargs = @import("parseargs.zig");
 const parsecleanargs = @import("parsecleanargs.zig");
 const parsehistoryargs = @import("parsehistoryargs.zig");
 const parselistargs = @import("parselistargs.zig");
@@ -19,6 +22,9 @@ const parseupdateinfo = @import("parseupdateinfo.zig");
 
 comptime {
     _ = argparse;
+    _ = help;
+    _ = options;
+    _ = parseargs;
     _ = parsecleanargs;
     _ = parsehistoryargs;
     _ = parselistargs;

@@ -410,6 +410,9 @@ pub fn build(b: *Build) void {
         test_mod.addIncludePath(b.path("llconf"));
         test_mod.addIncludePath(b.path("tools/cli"));
         test_mod.addIncludePath(b.path("tools/cli/lib"));
+        test_mod.linkLibrary(common_lib);
+        test_mod.linkLibrary(llconf_lib);
+        test_mod.linkLibrary(rpmzig_lib);
         const tests = b.addTest(.{ .root_module = test_mod });
         const run_tests = b.addRunArtifact(tests);
         zig_test_step.dependOn(&run_tests.step);
@@ -687,9 +690,7 @@ pub fn build(b: *Build) void {
     cli_so_mod.addCSourceFiles(.{
         .root = b.path("tools/cli/lib"),
         .files = &.{
-            "api.c",               "help.c",               "installcmd.c",
-            "options.c",           "output.c",             "parseargs.c",
-            "updateinfocmd.c",
+            "api.c", "installcmd.c", "output.c", "updateinfocmd.c",
         },
         .flags = &tdnf_cflags,
     });
