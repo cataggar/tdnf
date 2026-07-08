@@ -10,4 +10,7 @@ comptime {
     _ = @import("nodes.zig");
     _ = @import("entry.zig");
     _ = @import("modules.zig");
+    _ = @import("lines.zig");
+    _ = @import("strutils.zig");
+    _ = @import("ini.zig");
 }
