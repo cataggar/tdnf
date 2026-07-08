@@ -662,8 +662,7 @@ pub fn build(b: *Build) void {
         .files = &.{
             "api.c",               "help.c",               "installcmd.c",
             "options.c",           "output.c",             "parseargs.c",
-            "parselistargs.c",     "parserepoqueryargs.c",
-            "parseupdateinfo.c",   "updateinfocmd.c",
+            "parserepoqueryargs.c", "updateinfocmd.c",
         },
         .flags = &tdnf_cflags,
     });
