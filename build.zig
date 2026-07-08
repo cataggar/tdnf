@@ -315,6 +315,7 @@ pub fn build(b: *Build) void {
             .pic = true,
         });
         mod.addIncludePath(b.path("include"));
+        mod.addIncludePath(b.path("jsondump"));
         mod.addIncludePath(b.path("llconf"));
         mod.addIncludePath(b.path("tools/cli"));
         mod.addIncludePath(b.path("tools/cli/lib"));
@@ -407,10 +408,12 @@ pub fn build(b: *Build) void {
             .link_libc = true,
         });
         test_mod.addIncludePath(b.path("include"));
+        test_mod.addIncludePath(b.path("jsondump"));
         test_mod.addIncludePath(b.path("llconf"));
         test_mod.addIncludePath(b.path("tools/cli"));
         test_mod.addIncludePath(b.path("tools/cli/lib"));
         test_mod.linkLibrary(common_lib);
+        test_mod.linkLibrary(jsondump_lib);
         test_mod.linkLibrary(llconf_lib);
         test_mod.linkLibrary(rpmzig_lib);
         const tests = b.addTest(.{ .root_module = test_mod });
@@ -690,7 +693,7 @@ pub fn build(b: *Build) void {
     cli_so_mod.addCSourceFiles(.{
         .root = b.path("tools/cli/lib"),
         .files = &.{
-            "api.c", "installcmd.c", "output.c", "updateinfocmd.c",
+            "api.c", "installcmd.c",
         },
         .flags = &tdnf_cflags,
     });
