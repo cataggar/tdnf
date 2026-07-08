@@ -250,7 +250,7 @@ pub fn build(b: *Build) void {
         mod.addIncludePath(b.path("llconf"));
         mod.addCSourceFiles(.{
             .root = b.path("llconf"),
-            .files = &.{ "ini.c", "lines.c", "modules.c", "strutils.c" },
+            .files = &.{ "ini.c", "lines.c", "strutils.c" },
             .flags = &tdnf_cflags,
         });
         const lib = b.addLibrary(.{
