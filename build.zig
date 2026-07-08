@@ -227,7 +227,7 @@ pub fn build(b: *Build) void {
         mod.addIncludePath(b.path("common"));
         mod.addCSourceFiles(.{
             .root = b.path("common"),
-            .files = &.{ "memory_printf_shim.c", "log_shim.c", "strings.c", "utils.c" },
+            .files = &.{ "memory_printf_shim.c", "log_shim.c", "utils.c" },
             .flags = &tdnf_cflags,
         });
         const lib = b.addLibrary(.{
@@ -658,11 +658,10 @@ pub fn build(b: *Build) void {
     cli_so_mod.addCSourceFiles(.{
         .root = b.path("tools/cli/lib"),
         .files = &.{
-            "api.c",               "help.c",               "installcmd.c",
-            "options.c",           "output.c",             "parseargs.c",
-            "parselistargs.c",     "parsehistoryargs.c",
-            "parserepoqueryargs.c", "parsereposyncargs.c",
-            "parseupdateinfo.c",   "updateinfocmd.c",
+            "api.c",               "help.c",             "installcmd.c",
+            "options.c",           "output.c",           "parseargs.c",
+            "parselistargs.c",     "parsehistoryargs.c", "parserepoqueryargs.c",
+            "parsereposyncargs.c", "parseupdateinfo.c",  "updateinfocmd.c",
         },
         .flags = &tdnf_cflags,
     });
