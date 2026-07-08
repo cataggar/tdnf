@@ -9,4 +9,5 @@
 comptime {
     _ = @import("nodes.zig");
     _ = @import("entry.zig");
+    _ = @import("modules.zig");
 }
