@@ -322,6 +322,7 @@ pub fn build(b: *Build) void {
             .pic = true,
         });
         mod.addIncludePath(b.path("include"));
+        mod.addIncludePath(b.path("llconf"));
         mod.addIncludePath(b.path("tools/cli"));
         mod.addIncludePath(b.path("tools/cli/lib"));
         const lib = b.addLibrary(.{
@@ -379,6 +380,7 @@ pub fn build(b: *Build) void {
             .link_libc = true,
         });
         test_mod.addIncludePath(b.path("include"));
+        test_mod.addIncludePath(b.path("llconf"));
         test_mod.addIncludePath(b.path("tools/cli"));
         test_mod.addIncludePath(b.path("tools/cli/lib"));
         const tests = b.addTest(.{ .root_module = test_mod });
@@ -658,10 +660,10 @@ pub fn build(b: *Build) void {
     cli_so_mod.addCSourceFiles(.{
         .root = b.path("tools/cli/lib"),
         .files = &.{
-            "api.c",               "help.c",             "installcmd.c",
-            "options.c",           "output.c",           "parseargs.c",
-            "parselistargs.c",     "parsehistoryargs.c", "parserepoqueryargs.c",
-            "parsereposyncargs.c", "parseupdateinfo.c",  "updateinfocmd.c",
+            "api.c",               "help.c",               "installcmd.c",
+            "options.c",           "output.c",             "parseargs.c",
+            "parselistargs.c",     "parserepoqueryargs.c",
+            "parseupdateinfo.c",   "updateinfocmd.c",
         },
         .flags = &tdnf_cflags,
     });
