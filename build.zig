@@ -418,6 +418,23 @@ pub fn build(b: *Build) void {
         zig_test_step.dependOn(&run_tests.step);
     }
 
+    {
+        const test_mod = b.createModule(.{
+            .root_source_file = b.path("tools/config/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        test_mod.addIncludePath(b.path("."));
+        test_mod.addIncludePath(b.path("include"));
+        test_mod.linkLibrary(llconf_lib);
+        test_mod.linkLibrary(jsondump_lib);
+        linkSystem(test_mod, &.{"dl"});
+        const tests = b.addTest(.{ .root_module = test_mod });
+        const run_tests = b.addRunArtifact(tests);
+        zig_test_step.dependOn(&run_tests.step);
+    }
+
     // Smoke-test the vendored zig-sqlite dependency in isolation.
     {
         const test_mod = b.createModule(.{
@@ -732,17 +749,14 @@ pub fn build(b: *Build) void {
 
     // tdnf-config
     const tdnf_config_mod = b.createModule(.{
+        .root_source_file = b.path("tools/config/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
         .pic = true,
     });
+    tdnf_config_mod.addIncludePath(b.path("."));
     tdnf_config_mod.addIncludePath(b.path("include"));
-    tdnf_config_mod.addCSourceFiles(.{
-        .root = b.path("tools/config"),
-        .files = &.{"main.c"},
-        .flags = &tdnf_cflags,
-    });
     tdnf_config_mod.linkLibrary(llconf_lib);
     tdnf_config_mod.linkLibrary(jsondump_lib);
     linkSystem(tdnf_config_mod, &.{"dl"});
