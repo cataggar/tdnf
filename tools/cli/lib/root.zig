@@ -11,6 +11,7 @@ const c = @cImport({
 const argparse = @import("argparse.zig");
 const help = @import("help.zig");
 const options = @import("options.zig");
+const output = @import("output.zig");
 const parseargs = @import("parseargs.zig");
 const parsecleanargs = @import("parsecleanargs.zig");
 const parsehistoryargs = @import("parsehistoryargs.zig");
@@ -19,11 +20,13 @@ const parserepolistargs = @import("parserepolistargs.zig");
 const parserepoqueryargs = @import("parserepoqueryargs.zig");
 const parsereposyncargs = @import("parsereposyncargs.zig");
 const parseupdateinfo = @import("parseupdateinfo.zig");
+const updateinfocmd = @import("updateinfocmd.zig");
 
 comptime {
     _ = argparse;
     _ = help;
     _ = options;
+    _ = output;
     _ = parseargs;
     _ = parsecleanargs;
     _ = parsehistoryargs;
@@ -32,6 +35,7 @@ comptime {
     _ = parserepoqueryargs;
     _ = parsereposyncargs;
     _ = parseupdateinfo;
+    _ = updateinfocmd;
 }
 
 test "TDNFCliArgParseReset clears getopt state" {
