@@ -238,11 +238,28 @@ pub fn build(b: *Build) void {
         break :blk lib;
     };
 
-    const llconf_lib = staticLib(b, target, optimize, .{
-        .name = "tdnfllconf",
-        .root = "llconf",
-        .files = &.{ "entry.c", "ini.c", "lines.c", "modules.c", "nodes.c", "strutils.c" },
-    });
+    const llconf_lib = blk: {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("llconf/llconf.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .pic = true,
+        });
+        mod.addIncludePath(b.path("include"));
+        mod.addIncludePath(b.path("llconf"));
+        mod.addCSourceFiles(.{
+            .root = b.path("llconf"),
+            .files = &.{ "ini.c", "lines.c", "modules.c", "strutils.c" },
+            .flags = &tdnf_cflags,
+        });
+        const lib = b.addLibrary(.{
+            .name = "tdnfllconf",
+            .linkage = .static,
+            .root_module = mod,
+        });
+        break :blk lib;
+    };
 
     const jsondump_lib = blk: {
         const mod = b.createModule(.{
@@ -350,6 +367,20 @@ pub fn build(b: *Build) void {
             .flags = &tdnf_cflags,
         });
         test_mod.linkLibrary(rpmzig_lib);
+        const tests = b.addTest(.{ .root_module = test_mod });
+        const run_tests = b.addRunArtifact(tests);
+        zig_test_step.dependOn(&run_tests.step);
+    }
+
+    {
+        const test_mod = b.createModule(.{
+            .root_source_file = b.path("llconf/llconf.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        test_mod.addIncludePath(b.path("include"));
+        test_mod.addIncludePath(b.path("llconf"));
         const tests = b.addTest(.{ .root_module = test_mod });
         const run_tests = b.addRunArtifact(tests);
         zig_test_step.dependOn(&run_tests.step);
