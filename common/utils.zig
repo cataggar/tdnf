@@ -635,7 +635,7 @@ export fn TDNFYesOrNo(pArgs: c.PTDNF_CMD_ARGS, pszQuestionOpt: ?[*:0]const u8, p
 }
 
 export fn TDNFUriIsRemote(pszKeyUrlOpt: ?[*:0]const u8, pnRemote: ?*c_int) u32 {
-    const remotes = [_]?[*:0]const u8{ "http://", "https://", "ftp://", "ftps://", null };
+    const remotes = [_]?[*:0]const u8{ "http://", "https://", null };
     var i: usize = 0;
 
     if (pnRemote == null or isNullOrEmptyString(pszKeyUrlOpt)) {
@@ -659,7 +659,7 @@ export fn TDNFUriIsRemote(pszKeyUrlOpt: ?[*:0]const u8, pnRemote: ?*c_int) u32 {
 }
 
 export fn TDNFPathFromUri(pszKeyUrlOpt: ?[*:0]const u8, ppszPath: ?*?[*:0]u8) u32 {
-    const protocols = [_]?[*:0]const u8{ "http://", "https://", "ftp://", "ftps://", "file://", null };
+    const protocols = [_]?[*:0]const u8{ "http://", "https://", "file://", null };
     var pszPathTmp: ?[*:0]u8 = null;
     var i: usize = 0;
     var nOffset: usize = 0;

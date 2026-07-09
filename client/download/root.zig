@@ -728,9 +728,6 @@ fn chooseTransport(uri: Uri, request: DownloadRequest) !DownloadTransport {
         }
         return .std_http;
     }
-    if (schemeEq(uri.scheme, "ftp") or schemeEq(uri.scheme, "ftps")) {
-        return error.UnsupportedConfiguration;
-    }
     return error.InvalidUrl;
 }
 

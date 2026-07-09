@@ -8,7 +8,6 @@
 
 #pragma once
 
-#include <curl/curl.h>
 #include <rpm/rpmts.h>
 
 #ifdef __cplusplus

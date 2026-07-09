@@ -29,15 +29,6 @@ typedef enum
         }                                                          \
     } while(0)
 
-#define BAIL_ON_TDNF_CURL_ERROR(dwError) \
-    do {                                                           \
-        if (dwError)                                               \
-        {                                                          \
-            dwError = ERROR_TDNF_CURL_BASE + dwError;              \
-            goto error;                                            \
-        }                                                          \
-    } while(0)
-
 #define STR_IS_TRUE(s) ((s) && (!strcmp((s), "1") || !strcasecmp((s), "true")))
 
 #define TDNF_UNKNOWN_ERROR_STRING "Unknown error"
@@ -140,4 +131,3 @@ typedef void (*TDNF_ML_FREE_FUNC) (void* data);
 #define TAG_NAME_SIZE "size"
 #define TAG_NAME_HASH "hash"
 #define TAG_NAME_URL  "url"
-

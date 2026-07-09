@@ -45,9 +45,6 @@
 #include <rpm/rpmcli.h>
 #include <rpm/rpmtypes.h>
 
-//libcurl
-#include <curl/curl.h>
-
 #include "../history/history.h"
 
 #include <tdnf.h>
