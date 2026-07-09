@@ -8,6 +8,10 @@
             .url = "https://github.com/cataggar/zig-sqlite/archive/ece9413ea140202696547f402a96df9dc9b89531.tar.gz",
             .hash = "sqlite-0.4.0-3530100-djiKTqCBAABomylmlMLWtzm9bE_8NQ1O7qVu6l9x6aP1",
         },
+        .tls = .{
+            .url = "https://github.com/cataggar/tls.zig/archive/2621e411af81c8b4d8fa5aaae08b9b183a80bb46.tar.gz",
+            .hash = "tls-0.1.0-ER2e0vpTBgCVdP6tvFCii9_PFjATLb23ht2_xbGy5mYU",
+        },
     },
     .paths = .{
         "build.zig",
