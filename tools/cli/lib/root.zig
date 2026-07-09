@@ -9,6 +9,7 @@ const c = @cImport({
     @cInclude("getopt.h");
 });
 const argparse = @import("argparse.zig");
+const api = @import("api.zig");
 const help = @import("help.zig");
 const options = @import("options.zig");
 const output = @import("output.zig");
@@ -25,6 +26,7 @@ const updateinfocmd = @import("updateinfocmd.zig");
 
 comptime {
     _ = argparse;
+    _ = api;
     _ = help;
     _ = options;
     _ = output;
