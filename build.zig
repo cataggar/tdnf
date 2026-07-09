@@ -710,7 +710,7 @@ pub fn build(b: *Build) void {
     cli_so_mod.addCSourceFiles(.{
         .root = b.path("tools/cli/lib"),
         .files = &.{
-            "api.c", "installcmd.c",
+            "api.c",
         },
         .flags = &tdnf_cflags,
     });

@@ -12,6 +12,7 @@ const argparse = @import("argparse.zig");
 const help = @import("help.zig");
 const options = @import("options.zig");
 const output = @import("output.zig");
+const installcmd = @import("installcmd.zig");
 const parseargs = @import("parseargs.zig");
 const parsecleanargs = @import("parsecleanargs.zig");
 const parsehistoryargs = @import("parsehistoryargs.zig");
@@ -27,6 +28,7 @@ comptime {
     _ = help;
     _ = options;
     _ = output;
+    _ = installcmd;
     _ = parseargs;
     _ = parsecleanargs;
     _ = parsehistoryargs;
