@@ -126,6 +126,7 @@ pub fn build(b: *Build) void {
         b.pathJoin(&.{ b.build_root.path.?, prefix });
     // Vendored sqlite backs the Zig-side history and rpmdb code paths.
     const sqlite_dep = b.dependency("sqlite", .{});
+    const tls_dep = b.dependency("tls", .{});
 
     const build_with_rpm_6x = detectRpm6(b);
     if (build_with_rpm_6x) {
@@ -327,6 +328,27 @@ pub fn build(b: *Build) void {
         break :blk lib;
     };
 
+    const download_zig_lib = blk: {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("client/download/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .pic = true,
+            .imports = &.{
+                .{ .name = "tls", .module = tls_dep.module("tls") },
+            },
+        });
+        mod.addIncludePath(b.path("include"));
+        const lib = b.addLibrary(.{
+            .name = "tdnfdownloadzig",
+            .linkage = .static,
+            .root_module = mod,
+        });
+        break :blk lib;
+    };
+    b.getInstallStep().dependOn(&download_zig_lib.step);
+
     {
         const test_mod = b.createModule(.{
             .root_source_file = b.path("common/common.zig"),
@@ -428,6 +450,22 @@ pub fn build(b: *Build) void {
                 .{ .name = "sqlite", .module = sqlite_dep.module("sqlite") },
             },
         });
+        const tests = b.addTest(.{ .root_module = test_mod });
+        const run_tests = b.addRunArtifact(tests);
+        zig_test_step.dependOn(&run_tests.step);
+    }
+
+    {
+        const test_mod = b.createModule(.{
+            .root_source_file = b.path("client/download/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "tls", .module = tls_dep.module("tls") },
+            },
+        });
+        test_mod.addIncludePath(b.path("include"));
         const tests = b.addTest(.{ .root_module = test_mod });
         const run_tests = b.addRunArtifact(tests);
         zig_test_step.dependOn(&run_tests.step);
