@@ -9,12 +9,12 @@
 #include "includes.h"
 
 static int
-progress_cb(
+progress_cb_impl(
     void *pUserData,
-    curl_off_t dlTotal,
-    curl_off_t dlNow,
-    curl_off_t ulTotal,
-    curl_off_t ulNow
+    int64_t dlTotal,
+    int64_t dlNow,
+    int64_t ulTotal,
+    int64_t ulNow
     )
 {
     uint32_t dPercent;
@@ -59,6 +59,63 @@ progress_cb(
     return 0;
 }
 
+static int
+progress_cb(
+    void *pUserData,
+    curl_off_t dlTotal,
+    curl_off_t dlNow,
+    curl_off_t ulTotal,
+    curl_off_t ulNow
+    )
+{
+    return progress_cb_impl(
+               pUserData,
+               (int64_t)dlTotal,
+               (int64_t)dlNow,
+               (int64_t)ulTotal,
+               (int64_t)ulNow);
+}
+
+#ifdef TDNF_ZIG_DOWNLOAD
+static int
+zig_progress_cb(
+    void *pUserData,
+    int64_t dlTotal,
+    int64_t dlNow,
+    int64_t ulTotal,
+    int64_t ulNow
+    )
+{
+    return progress_cb_impl(pUserData, dlTotal, dlNow, ulTotal, ulNow);
+}
+#endif
+
+static uint32_t
+set_progress_cb_data(
+    const char *pszData,
+    pcb_data **ppData
+    )
+{
+    uint32_t dwError = 0;
+    static pcb_data pData;
+
+    if(!ppData || IsNullOrEmptyString(pszData))
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    memset(&pData, 0, sizeof(pcb_data));
+    strncpy(pData.pszData, pszData, sizeof(pData.pszData) - 1);
+    *ppData = &pData;
+
+cleanup:
+    return dwError;
+
+error:
+    goto cleanup;
+}
+
 static uint32_t
 set_progress_cb(
     CURL *pCurl,
@@ -66,7 +123,7 @@ set_progress_cb(
     )
 {
     uint32_t dwError = 0;
-    static pcb_data pData;
+    pcb_data *pData = NULL;
 
     if(!pCurl || IsNullOrEmptyString(pszData))
     {
@@ -74,13 +131,14 @@ set_progress_cb(
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
+    dwError = set_progress_cb_data(pszData, &pData);
+    BAIL_ON_TDNF_ERROR(dwError);
+
     dwError = curl_easy_setopt(pCurl, CURLOPT_XFERINFOFUNCTION, progress_cb);
     BAIL_ON_TDNF_CURL_ERROR(dwError);
 
-    memset(&pData, 0, sizeof(pcb_data));
-    strncpy(pData.pszData, pszData, sizeof(pData.pszData) - 1);
     /* coverity[bad_sizeof] */
-    dwError = curl_easy_setopt(pCurl, CURLOPT_XFERINFODATA, &pData);
+    dwError = curl_easy_setopt(pCurl, CURLOPT_XFERINFODATA, pData);
     BAIL_ON_TDNF_CURL_ERROR(dwError);
 
     dwError = curl_easy_setopt(pCurl, CURLOPT_NOPROGRESS, 0L);
@@ -92,6 +150,110 @@ cleanup:
 error:
     goto cleanup;
 }
+
+#ifdef TDNF_ZIG_DOWNLOAD
+static int
+TDNFUseCurlDownloadFallback(
+    const char *pszFileUrl
+    )
+{
+    return !strncasecmp(pszFileUrl, "ftp://", 6) ||
+           !strncasecmp(pszFileUrl, "ftps://", 7);
+}
+
+static int
+TDNFZigDownloadErrorIsFatal(
+    uint32_t dwError,
+    long lStatus
+    )
+{
+    if (lStatus >= 400)
+    {
+        return 1;
+    }
+
+    switch(dwError)
+    {
+        case ERROR_TDNF_CALL_NOT_SUPPORTED:
+        case ERROR_TDNF_INVALID_PARAMETER:
+        case ERROR_TDNF_URL_INVALID:
+        case ERROR_TDNF_SET_SSL_SETTINGS:
+        case ERROR_TDNF_OPERATION_ABORTED:
+        case ERROR_TDNF_OUT_OF_MEMORY:
+            return 1;
+        default:
+            break;
+    }
+
+    return 0;
+}
+
+static uint32_t
+TDNFPrepareZigDownloadRequest(
+    PTDNF pTdnf,
+    PTDNF_REPO_DATA pRepo,
+    const char *pszFileUrl,
+    const char *pszFileTmp,
+    const char *pszProgressData,
+    TDNF_ZIG_DOWNLOAD_REQUEST *pRequest,
+    int *pnNoOutput
+    )
+{
+    uint32_t dwError = 0;
+    pcb_data *pProgressData = NULL;
+
+    if(!pTdnf ||
+       !pTdnf->pArgs ||
+       !pTdnf->pConf ||
+       !pRepo ||
+       IsNullOrEmptyString(pszFileUrl) ||
+       IsNullOrEmptyString(pszFileTmp) ||
+       !pRequest ||
+       !pnNoOutput)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    memset(pRequest, 0, sizeof(*pRequest));
+    pRequest->pszUrl = pszFileUrl;
+    pRequest->pszDestination = pszFileTmp;
+    pRequest->pszUserAgent = pTdnf->pConf->pszUserAgentHeader;
+    pRequest->pszProxy = pTdnf->pConf->pszProxy;
+    pRequest->pszProxyUserPwd = pTdnf->pConf->pszProxyUserPass;
+    pRequest->pszUserName = pRepo->pszUser;
+    pRequest->pszPassword = pRepo->pszPass;
+    pRequest->pszSSLCaCert = pRepo->pszSSLCaCert;
+    pRequest->pszSSLClientCert = pRepo->pszSSLClientCert;
+    pRequest->pszSSLClientKey = pRepo->pszSSLClientKey;
+    pRequest->nSSLVerify = pRepo->nSSLVerify ? 1 : 0;
+    pRequest->nConnectTimeout = (long)pTdnf->pConf->nConnectTimeout;
+    pRequest->nTimeout = (long)pRepo->nTimeout;
+    pRequest->nLowSpeedLimit = (long)pRepo->nMinrate;
+    pRequest->nLowSpeedTime = (long)pRepo->nTimeout;
+    pRequest->nMaxRecvSpeed = (long)pRepo->nThrottle;
+
+    *pnNoOutput = 1;
+    if (!pTdnf->pArgs->nQuiet && pszProgressData != NULL)
+    {
+        if (isatty(STDOUT_FILENO) || pTdnf->pArgs->nVerbose)
+        {
+            dwError = set_progress_cb_data(pszProgressData, &pProgressData);
+            BAIL_ON_TDNF_ERROR(dwError);
+
+            pRequest->pfnProgress = zig_progress_cb;
+            pRequest->pProgressData = pProgressData;
+            *pnNoOutput = 0;
+        }
+    }
+
+cleanup:
+    return dwError;
+
+error:
+    goto cleanup;
+}
+#endif
 
 
 uint32_t
@@ -168,6 +330,10 @@ TDNFDownloadFile(
     long lStatus = 0;
     int i;
     int nNoOutput = 1;
+#ifdef TDNF_ZIG_DOWNLOAD
+    int nUseZigDownload = 0;
+    TDNF_ZIG_DOWNLOAD_REQUEST request = {0};
+#endif
 
     /* TDNFFetchRemoteGPGKey sends pszProgressData as NULL */
     if(!pTdnf ||
@@ -179,73 +345,131 @@ TDNFDownloadFile(
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    pCurl = curl_easy_init();
-    if(!pCurl)
-    {
-        dwError = ERROR_TDNF_CURL_INIT;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    dwError = TDNFRepoGetUserPass(pTdnf, pRepo, &pszUserPass);
-    BAIL_ON_TDNF_ERROR(dwError);
-
-    if(!IsNullOrEmptyString(pszUserPass))
-    {
-        dwError = curl_easy_setopt(
-                      pCurl,
-                      CURLOPT_USERPWD,
-                      pszUserPass);
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    if(!IsNullOrEmptyString(pTdnf->pConf->pszUserAgentHeader))
-    {
-        dwError = curl_easy_setopt(
-                      pCurl,
-                      CURLOPT_USERAGENT,
-                      pTdnf->pConf->pszUserAgentHeader);
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    dwError = TDNFRepoApplyProxySettings(pTdnf->pConf, pCurl);
-    BAIL_ON_TDNF_ERROR(dwError);
-
-    dwError = TDNFRepoApplyDownloadSettings(pRepo, pCurl);
-    BAIL_ON_TDNF_ERROR(dwError);
-
-    dwError = TDNFRepoApplySSLSettings(pRepo, pCurl);
-    BAIL_ON_TDNF_ERROR(dwError);
-
-    dwError = curl_easy_setopt(pCurl, CURLOPT_URL, pszFileUrl);
-    BAIL_ON_TDNF_CURL_ERROR(dwError);
-
-    dwError = curl_easy_setopt(pCurl, CURLOPT_FOLLOWLOCATION, 1L);
-    BAIL_ON_TDNF_CURL_ERROR(dwError);
-
-    if (pTdnf->pConf->nConnectTimeout > 0)
-    {
-        curl_easy_setopt(pCurl, CURLOPT_CONNECTTIMEOUT,
-                          (long)pTdnf->pConf->nConnectTimeout);
-    }
-
-    if (!pTdnf->pArgs->nQuiet && pszProgressData != NULL)
-    {
-        //print progress only if tty or verbose is specified.
-        if (isatty(STDOUT_FILENO) || pTdnf->pArgs->nVerbose)
-        {
-            dwError = set_progress_cb(pCurl, pszProgressData);
-            BAIL_ON_TDNF_ERROR(dwError);
-            nNoOutput = 0;
-        }
-    }
-
     dwError = TDNFAllocateStringPrintf(&pszFileTmp,
                                        "%s.tmp",
                                        pszFile);
     BAIL_ON_TDNF_ERROR(dwError);
 
+#ifdef TDNF_ZIG_DOWNLOAD
+    if (!TDNFUseCurlDownloadFallback(pszFileUrl))
+    {
+        nUseZigDownload = 1;
+        dwError = TDNFPrepareZigDownloadRequest(
+                      pTdnf,
+                      pRepo,
+                      pszFileUrl,
+                      pszFileTmp,
+                      pszProgressData,
+                      &request,
+                      &nNoOutput);
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+#endif
+
+#ifdef TDNF_ZIG_DOWNLOAD
+    if (!nUseZigDownload)
+#endif
+    {
+        pCurl = curl_easy_init();
+        if(!pCurl)
+        {
+            dwError = ERROR_TDNF_CURL_INIT;
+            BAIL_ON_TDNF_ERROR(dwError);
+        }
+
+        dwError = TDNFRepoGetUserPass(pTdnf, pRepo, &pszUserPass);
+        BAIL_ON_TDNF_ERROR(dwError);
+
+        if(!IsNullOrEmptyString(pszUserPass))
+        {
+            dwError = curl_easy_setopt(
+                          pCurl,
+                          CURLOPT_USERPWD,
+                          pszUserPass);
+            BAIL_ON_TDNF_ERROR(dwError);
+        }
+
+        if(!IsNullOrEmptyString(pTdnf->pConf->pszUserAgentHeader))
+        {
+            dwError = curl_easy_setopt(
+                          pCurl,
+                          CURLOPT_USERAGENT,
+                          pTdnf->pConf->pszUserAgentHeader);
+            BAIL_ON_TDNF_ERROR(dwError);
+        }
+
+        dwError = TDNFRepoApplyProxySettings(pTdnf->pConf, pCurl);
+        BAIL_ON_TDNF_ERROR(dwError);
+
+        dwError = TDNFRepoApplyDownloadSettings(pRepo, pCurl);
+        BAIL_ON_TDNF_ERROR(dwError);
+
+        dwError = TDNFRepoApplySSLSettings(pRepo, pCurl);
+        BAIL_ON_TDNF_ERROR(dwError);
+
+        dwError = curl_easy_setopt(pCurl, CURLOPT_URL, pszFileUrl);
+        BAIL_ON_TDNF_CURL_ERROR(dwError);
+
+        dwError = curl_easy_setopt(pCurl, CURLOPT_FOLLOWLOCATION, 1L);
+        BAIL_ON_TDNF_CURL_ERROR(dwError);
+
+        if (pTdnf->pConf->nConnectTimeout > 0)
+        {
+            curl_easy_setopt(pCurl, CURLOPT_CONNECTTIMEOUT,
+                              (long)pTdnf->pConf->nConnectTimeout);
+        }
+
+        if (!pTdnf->pArgs->nQuiet && pszProgressData != NULL)
+        {
+            //print progress only if tty or verbose is specified.
+            if (isatty(STDOUT_FILENO) || pTdnf->pArgs->nVerbose)
+            {
+                dwError = set_progress_cb(pCurl, pszProgressData);
+                BAIL_ON_TDNF_ERROR(dwError);
+                nNoOutput = 0;
+            }
+        }
+    }
+
     for(i = 0; i <= pRepo->nRetries; i++)
     {
+#ifdef TDNF_ZIG_DOWNLOAD
+        if (nUseZigDownload)
+        {
+            if (i > 0)
+            {
+                pr_info("retrying %d/%d\n", i, pRepo->nRetries);
+            }
+
+            lStatus = 0;
+            dwError = TDNFZigDownloadFile(&request, &lStatus);
+            if (dwError == 0)
+            {
+                break;
+            }
+
+            if (lStatus >= 400)
+            {
+                pr_err(
+                        "Error: %ld when downloading %s. Please check repo url "
+                        "or refresh metadata with 'tdnf makecache'.\n",
+                        lStatus,
+                        pszFileUrl);
+                BAIL_ON_TDNF_ERROR(dwError);
+            }
+
+            if (i == pRepo->nRetries || TDNFZigDownloadErrorIsFatal(dwError, lStatus))
+            {
+                pr_err("Error: failed to download %s: %s\n",
+                       pszFileUrl, TDNFZigDownloadLastError());
+                BAIL_ON_TDNF_ERROR(dwError);
+            }
+
+            unlink(pszFileTmp);
+            continue;
+        }
+#endif
+
         fp = fopen(pszFileTmp, "wb");
         if(!fp)
         {
@@ -283,10 +507,15 @@ TDNFDownloadFile(
         pr_info("\n");
     }
 
-    dwError = curl_easy_getinfo(pCurl,
-                                CURLINFO_RESPONSE_CODE,
-                                &lStatus);
-    BAIL_ON_TDNF_CURL_ERROR(dwError);
+#ifdef TDNF_ZIG_DOWNLOAD
+    if (!nUseZigDownload)
+#endif
+    {
+        dwError = curl_easy_getinfo(pCurl,
+                                    CURLINFO_RESPONSE_CODE,
+                                    &lStatus);
+        BAIL_ON_TDNF_CURL_ERROR(dwError);
+    }
 
     if(lStatus >= 400)
     {
