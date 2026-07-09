@@ -704,18 +704,16 @@ pub fn build(b: *Build) void {
 
     // tdnf
     const tdnf_mod = b.createModule(.{
+        .root_source_file = b.path("tools/cli/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
         .pic = true,
     });
     tdnf_mod.addIncludePath(b.path("include"));
+    tdnf_mod.addIncludePath(b.path("jsondump"));
     tdnf_mod.addIncludePath(b.path("tools/cli"));
-    tdnf_mod.addCSourceFiles(.{
-        .root = b.path("tools/cli"),
-        .files = &.{"main.c"},
-        .flags = &tdnf_cflags,
-    });
+    tdnf_mod.linkLibrary(jsondump_lib);
     tdnf_mod.linkLibrary(libtdnfcli);
     tdnf_mod.linkLibrary(libtdnf);
     const tdnf_exe = b.addExecutable(.{
