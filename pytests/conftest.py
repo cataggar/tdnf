@@ -39,45 +39,96 @@ def StopTestRepoServer(server):
     server.join()
 
 
-def TestRepoServer(root, port=8080, interface='', enable_https=False):
-    addr = (interface, port)
-    enable_https = enable_https
+def dump_certificate(fn, cert):
+    directory = os.path.dirname(fn)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(fn, 'wt') as f:
+        data = crypto.dump_certificate(crypto.FILETYPE_PEM, cert)
+        f.write(data.decode('utf-8'))
 
-    def dump_cert(fn, cert):
-        with open(fn, 'wt') as f:
-            tmp = crypto.dump_certificate(crypto.FILETYPE_PEM, cert)
-            f.write(tmp.decode('utf-8'))
+
+def dump_privatekey(fn, key):
+    directory = os.path.dirname(fn)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(fn, 'wt') as f:
+        data = crypto.dump_privatekey(crypto.FILETYPE_PEM, key)
+        f.write(data.decode('utf-8'))
+
+
+def write_self_signed_https_material(certfile, keyfile):
+    key = crypto.PKey()
+    key.generate_key(crypto.TYPE_RSA, 2048)
+
+    cert = crypto.X509()
+    cert.set_version(2)
+    cert.get_subject().C = 'IN'
+    cert.get_subject().ST = 'Karnataka'
+    cert.get_subject().L = 'Bangalore'
+    cert.get_subject().O = 'VMware'  # noqa: E741
+    cert.get_subject().OU = 'Photon OS'
+    cert.get_subject().CN = '127.0.0.1'
+    cert.get_subject().emailAddress = 'tdnf-devel@vmware.com'
+    cert.set_serial_number(int(time.time()))
+    cert.gmtime_adj_notBefore(0)
+    cert.gmtime_adj_notAfter(365 * 24 * 60 * 60)
+    cert.set_issuer(cert.get_subject())
+    cert.set_pubkey(key)
+    cert.add_extensions([
+        crypto.X509Extension(b'basicConstraints', False, b'CA:TRUE'),
+        crypto.X509Extension(
+            b'keyUsage',
+            False,
+            b'digitalSignature,keyEncipherment,keyCertSign',
+        ),
+        crypto.X509Extension(b'extendedKeyUsage', False, b'serverAuth'),
+        crypto.X509Extension(
+            b'subjectAltName',
+            False,
+            b'DNS:localhost,IP:127.0.0.1',
+        ),
+    ])
+    cert.sign(key, 'sha256')
+
+    dump_certificate(certfile, cert)
+    dump_privatekey(keyfile, key)
+
+
+def TestRepoServer(
+        root,
+        port=8080,
+        interface='',
+        enable_https=False,
+        certfile=None,
+        keyfile=None,
+        require_client_cert=False,
+        client_ca_cert=None):
+    addr = (interface, port)
 
     os.chdir(root)
 
     if enable_https:
-        k = crypto.PKey()
-        k.generate_key(crypto.TYPE_RSA, 2048)
-        cert = crypto.X509()
-        cert.get_subject().C = 'IN'
-        cert.get_subject().ST = 'Karnataka'
-        cert.get_subject().L = 'Bangalore'
-        cert.get_subject().O = 'VMware'  # noqa: E741
-        cert.get_subject().OU = 'Photon OS'
-        cert.get_subject().CN = 'pytest.tdnf.vmware.github.io'
-        cert.get_subject().emailAddress = 'tdnf-devel@vmware.com'
-        cert.set_serial_number(0)
-        cert.gmtime_adj_notBefore(0)
-        cert.gmtime_adj_notAfter(365 * 24 * 60 * 60)
-        cert.set_issuer(cert.get_subject())
-        cert.set_pubkey(k)
-        cert.sign(k, 'sha512')
+        if (certfile is None) != (keyfile is None):
+            raise ValueError('certfile and keyfile must be provided together')
 
-        keyfile = os.path.join(os.getcwd(), 'key.pem')
-        dump_cert(keyfile, cert)
+        if certfile is None:
+            certfile = os.path.join(os.getcwd(), 'cert.pem')
+            keyfile = os.path.join(os.getcwd(), 'key.pem')
 
-        certfile = os.path.join(os.getcwd(), 'cert.pem')
-        dump_cert(keyfile, k)
+        if not os.path.exists(certfile) or not os.path.exists(keyfile):
+            write_self_signed_https_material(certfile, keyfile)
 
     httpd = HTTPServer(addr, SimpleHTTPRequestHandler)
     if enable_https:
-        httpd.socket = ssl.wrap_socket(httpd.socket, keyfile=keyfile,
-                                       certfile=certfile, server_side=True)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(certfile=certfile, keyfile=keyfile)
+        if require_client_cert:
+            if not client_ca_cert:
+                raise ValueError('client_ca_cert is required for mutual TLS')
+            context.verify_mode = ssl.CERT_REQUIRED
+            context.load_verify_locations(cafile=client_ca_cert)
+        httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
     httpd.serve_forever()
 
 
