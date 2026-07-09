@@ -720,7 +720,7 @@ fn chooseTransport(uri: Uri, request: DownloadRequest) !DownloadTransport {
         if (has_partial_client_auth) {
             return error.UnsupportedConfiguration;
         }
-        if (!request.ssl_verify or has_client_auth) {
+        if (!request.ssl_verify or request.ca_cert != null or has_client_auth) {
             return .tls_http;
         }
         if (request.connect_timeout_secs != 0) {

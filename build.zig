@@ -187,6 +187,7 @@ pub fn build(b: *Build) void {
         .{ .key = "CMAKE_CURRENT_BINARY_DIR", .value = abs_prefix },
         .{ .key = "CMAKE_BINARY_DIR", .value = abs_prefix },
         .{ .key = "PLUGIN_PATH", .value = b.fmt("{s}/{s}", .{ abs_prefix, plugin_dir_rel }) },
+        .{ .key = "ZIG_DOWNLOAD", .value = if (zig_download) "true" else "false" },
     });
 
     // ----- generated text files (autoconf_at style: @VAR@ only) ----- //
