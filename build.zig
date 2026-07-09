@@ -109,6 +109,11 @@ pub fn build(b: *Build) void {
         "rpmzig-verify",
         "Replace librpm signature verification with rpmzig's pure-Zig OpenPGP verifier (default false)",
     ) orelse false;
+    const zig_download = b.option(
+        bool,
+        "zig-download",
+        "Route repo/package downloads through the Zig transport (default false)",
+    ) orelse false;
 
     const prefix = b.install_prefix;
     const libdir = "lib";
@@ -673,6 +678,9 @@ pub fn build(b: *Build) void {
         tdnf_so_mod.addCMacro("TDNF_RPMZIG_VERIFY", "1");
         tdnf_so_mod.addIncludePath(b.path("rpmzig"));
     }
+    if (zig_download) {
+        tdnf_so_mod.addCMacro("TDNF_ZIG_DOWNLOAD", "1");
+    }
     tdnf_so_mod.addCSourceFiles(.{
         .root = b.path("client"),
         .files = &.{
@@ -704,6 +712,9 @@ pub fn build(b: *Build) void {
     tdnf_so_mod.linkLibrary(history_lib);
     tdnf_so_mod.linkLibrary(llconf_lib);
     tdnf_so_mod.linkLibrary(rpmzig_lib);
+    if (zig_download) {
+        tdnf_so_mod.linkLibrary(download_zig_lib);
+    }
     linkSystem(tdnf_so_mod, &.{ "rpm", "libsolv", "libsolvext", "libcurl", "sqlite3" });
 
     const libtdnf = b.addLibrary(.{
