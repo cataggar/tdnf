@@ -10,6 +10,7 @@ const c = @cImport({
 });
 const argparse = @import("argparse.zig");
 const api = @import("api.zig");
+const apimisc = @import("apimisc.zig");
 const help = @import("help.zig");
 const options = @import("options.zig");
 const output = @import("output.zig");
@@ -27,6 +28,7 @@ const updateinfocmd = @import("updateinfocmd.zig");
 comptime {
     _ = argparse;
     _ = api;
+    _ = apimisc;
     _ = help;
     _ = options;
     _ = output;
