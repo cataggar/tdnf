@@ -1,7 +1,7 @@
 # tdnf - tiny dandified yum
 
 A C implementation of a dnf/yum-compatible package manager built on
-`libsolv`, `librpm`, and `libcurl`.
+`libsolv` and `librpm`, with downloads handled by Zig's HTTP/TLS stack.
 
 ## Build
 
@@ -9,7 +9,7 @@ Requires Zig 0.16+ and the following C development packages (Debian/Ubuntu
 names; equivalent `*-devel` packages on rpm distros):
 
 ```
-librpm-dev libsolv-dev libcurl4-openssl-dev libexpat1-dev \
+librpm-dev libsolv-dev libexpat1-dev \
 libsqlite3-dev libgpgme-dev libpopt-dev pkg-config
 ```
 

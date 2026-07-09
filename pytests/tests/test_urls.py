@@ -47,7 +47,7 @@ def test_urls_format(utils):
 
     for line in ret['stdout']:
         if line.strip():
-            assert (line.startswith('http://') or line.startswith('https://') or line.startswith('ftp://') or line.startswith('file://') or line.startswith('/')), \
+            assert (line.startswith('http://') or line.startswith('https://') or line.startswith('file://') or line.startswith('/')), \
                 f"unexpected URL format: {line}"
 
 

@@ -67,13 +67,6 @@ TDNFRefreshSack(
 
 //repoutils.c
 uint32_t
-TDNFRepoGetUserPass(
-    PTDNF pTdnf,
-    PTDNF_REPO_DATA pRepo,
-    char** ppszUserPass
-    );
-
-uint32_t
 TDNFRepoGetRpmCacheDir(
     PTDNF pTdnf,
     PTDNF_REPO_DATA pRepo,
@@ -134,34 +127,11 @@ TDNFRemoveKeysCache(
     );
 
 uint32_t
-TDNFRepoApplyDownloadSettings(
-    PTDNF_REPO_DATA pRepo,
-    CURL *pCurl
-    );
-
-uint32_t
-TDNFRepoApplyProxySettings(
-    PTDNF_CONF pConf,
-    CURL *pCurl
-    );
-
-uint32_t
-TDNFRepoApplySSLSettings(
-    PTDNF_REPO_DATA pRepo,
-    CURL *pCurl
-    );
-
-uint32_t
 TDNFFindRepoById(
     PTDNF pTdnf,
     const char* pszRepo,
     PTDNF_REPO_DATA* ppRepo
     );
-
-uint32_t
-TDNFCurlErrorIsFatal(
-    CURLcode curlError
-);
 
 void
 TDNFFreeHistoryInfoItems(
@@ -877,22 +847,12 @@ TDNFGetRebootRequiredOption(
 
 //utils.c
 uint32_t
-TDNFIsCurlError(
-    uint32_t dwError
-    );
-
-uint32_t
 TDNFIsSystemError(
     uint32_t dwError
     );
 
 uint32_t
 TDNFGetSystemError(
-    uint32_t dwError
-    );
-
-uint32_t
-TDNFGetCurlError(
     uint32_t dwError
     );
 

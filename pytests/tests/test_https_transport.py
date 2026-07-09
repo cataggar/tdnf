@@ -250,12 +250,6 @@ def SlowRepoServer(
     httpd.serve_forever()
 
 
-@pytest.fixture(scope='module', autouse=True)
-def require_zig_download(utils):
-    if not utils.config.get('zig_download'):
-        pytest.skip('requires zig build with -Dzig-download=true')
-
-
 @pytest.fixture(scope='function', autouse=True)
 def setup_case(utils):
     workroot = os.path.join(utils.config['build_dir'], 'https-transport-tests')

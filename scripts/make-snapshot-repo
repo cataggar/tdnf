@@ -64,7 +64,7 @@ ET.register_namespace('xml', NS_XML)
 
 def _fetch(url_or_path):
     """Return bytes from a URL or local file path."""
-    if url_or_path.startswith(('http://', 'https://', 'ftp://')):
+    if url_or_path.startswith(('http://', 'https://')):
         with urllib.request.urlopen(url_or_path) as r:
             return r.read()
     with open(url_or_path, 'rb') as f:
@@ -84,7 +84,7 @@ def _open_gz_stream(url_or_path):
     For local paths the file is opened and wrapped in GzipFile.
     The caller is responsible for closing the returned objects.
     """
-    if url_or_path.startswith(('http://', 'https://', 'ftp://')):
+    if url_or_path.startswith(('http://', 'https://')):
         response = urllib.request.urlopen(url_or_path)
         return gzip.GzipFile(fileobj=response), response
     else:

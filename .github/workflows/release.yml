@@ -32,7 +32,6 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             librpm-dev \
             libsolv-dev \
-            libcurl4-openssl-dev \
             libexpat1-dev \
             libsqlite3-dev \
             libgpgme-dev \
