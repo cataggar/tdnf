@@ -49,6 +49,7 @@
 
 #include <tdnf.h>
 #include <tdnfdownload.h>
+#include <tdnfrepomd.h>
 #include <tdnfplugin.h>
 #include <tdnfplugineventmap.h>
 #include <tdnf-common-defines.h>
