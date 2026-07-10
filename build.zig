@@ -213,6 +213,13 @@ pub fn build(b: *Build) void {
 
     const zig_test_step = b.step("test", "Run Zig unit tests");
 
+    const xml_mod = b.createModule(.{
+        .root_source_file = b.path("xml/xml.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
     // ----- static libraries ----- //
 
     const common_lib = blk: {
@@ -831,12 +838,19 @@ pub fn build(b: *Build) void {
     b.installArtifact(jsondump_test_exe);
 
     {
+        const tests = b.addTest(.{ .root_module = xml_mod });
+        const run_tests = b.addRunArtifact(tests);
+        zig_test_step.dependOn(&run_tests.step);
+    }
+
+    {
         const test_mod = b.createModule(.{
             .root_source_file = b.path("plugins/metalink/xml.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
         });
+        test_mod.addImport("xml", xml_mod);
         test_mod.addIncludePath(b.path("plugins/metalink"));
         const tests = b.addTest(.{ .root_module = test_mod });
         const run_tests = b.addRunArtifact(tests);
@@ -852,6 +866,7 @@ pub fn build(b: *Build) void {
         .link_libc = true,
         .pic = true,
     });
+    metalink_xml_mod.addImport("xml", xml_mod);
     const metalink_xml_lib = b.addLibrary(.{
         .name = "tdnfmetalinkxml",
         .linkage = .static,
