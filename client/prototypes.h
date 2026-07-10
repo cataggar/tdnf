@@ -610,7 +610,7 @@ TDNFParseRepoMD(
 
 uint32_t
 TDNFFindRepoMDPart(
-    Repo *pSolvRepo,
+    const TDNF_REPOMD_DOC *pRepoMd,
     const char *pszType,
     char **ppszPart
     );
@@ -645,7 +645,7 @@ TDNFDownloadMetadata(
 uint32_t
 TDNFDownloadRepoMDParts(
     PTDNF pTdnf,
-    Repo *pSolvRepo,
+    const TDNF_REPOMD_DOC *pRepoMd,
     PTDNF_REPO_DATA pRepo,
     const char *pszDir,
     int nPrintOnly

@@ -928,19 +928,19 @@ error:
 
 uint32_t
 TDNFFindRepoMDPart(
-    Repo *pSolvRepo,
+    const TDNF_REPOMD_DOC *pRepoMd,
     const char *pszType,
     char **ppszPart
     )
 {
     uint32_t dwError = 0;
-    Pool *pPool = NULL;
-    Dataiterator di = {0};
     char *pszPart = NULL;
     const char *pszPartTemp = NULL;
+    const TDNF_REPOMD_RECORD *pRecord = NULL;
+    uint32_t dwCount = 0;
+    uint32_t dwIndex = 0;
 
-    if(!pSolvRepo ||
-       !pSolvRepo->pool ||
+    if(!pRepoMd ||
        IsNullOrEmptyString(pszType) ||
        !ppszPart)
     {
@@ -948,26 +948,29 @@ TDNFFindRepoMDPart(
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    pPool = pSolvRepo->pool;
-
-    dwError = dataiterator_init(
-                  &di,
-                  pPool,
-                  pSolvRepo,
-                  SOLVID_META,
-                  REPOSITORY_REPOMD_TYPE,
-                  pszType,
-                  SEARCH_STRING);
-    BAIL_ON_TDNF_ERROR(dwError);
-
-    dataiterator_prepend_keyname(&di, REPOSITORY_REPOMD);
-    if (dataiterator_step(&di))
+    dwCount = TDNFRepoMdGetRecordCount(pRepoMd);
+    for(dwIndex = 0; dwIndex < dwCount; ++dwIndex)
     {
-        dataiterator_setpos_parent(&di);
-        pszPartTemp = pool_lookup_str(
-                          pPool,
-                          SOLVID_POS,
-                          REPOSITORY_REPOMD_LOCATION);
+        pRecord = TDNFRepoMdGetRecord(pRepoMd, dwIndex);
+        if(!pRecord || IsNullOrEmptyString(pRecord->pszLocationHref))
+        {
+            continue;
+        }
+
+        if(!strcmp(pszType, TDNF_REPOMD_TYPE_UPDATEINFO))
+        {
+            if(pRecord->dwKind == TDNF_REPOMD_RECORD_KIND_UPDATEINFO)
+            {
+                pszPartTemp = pRecord->pszLocationHref;
+                break;
+            }
+        }
+        else if(!IsNullOrEmptyString(pRecord->pszType) &&
+                !strcmp(pRecord->pszType, pszType))
+        {
+            pszPartTemp = pRecord->pszLocationHref;
+            break;
+        }
     }
 
     if(!pszPartTemp)
@@ -982,7 +985,6 @@ TDNFFindRepoMDPart(
     *ppszPart = pszPart;
 
 cleanup:
-    dataiterator_free(&di);
     return dwError;
 
 error:
@@ -994,15 +996,59 @@ error:
     goto cleanup;
 }
 
+static uint32_t
+TDNFParseRepoMDDoc(
+    const char *pszRepoMDPath,
+    TDNF_REPOMD_DOC **ppRepoMd
+    )
+{
+    static const char szEmptyRepoMD[] =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+        "<repomd xmlns=\"http://linux.duke.edu/metadata/repo\"></repomd>";
+    uint32_t dwError = 0;
+    TDNF_REPOMD_DOC *pRepoMd = NULL;
+
+    if(IsNullOrEmptyString(pszRepoMDPath) || !ppRepoMd)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    dwError = TDNFRepoMdParseFile(pszRepoMDPath, &pRepoMd);
+    if(dwError == ERROR_TDNF_INVALID_REPO_FILE)
+    {
+        pr_crit("Error(%u) parsing repomd: %s\n",
+                dwError,
+                TDNFRepoMdLastError());
+
+        dwError = TDNFRepoMdParseBuffer(
+                      szEmptyRepoMD,
+                      sizeof(szEmptyRepoMD) - 1,
+                      &pRepoMd);
+    }
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    *ppRepoMd = pRepoMd;
+
+cleanup:
+    return dwError;
+
+error:
+    if(ppRepoMd)
+    {
+        *ppRepoMd = NULL;
+    }
+    TDNFRepoMdFree(pRepoMd);
+    goto cleanup;
+}
+
 uint32_t
 TDNFParseRepoMD(
     PTDNF_REPO_METADATA pRepoMD
     )
 {
     uint32_t dwError = 0;
-    Repo *pRepo = NULL;
-    Pool *pPool = NULL;
-    FILE *fp = NULL;
+    TDNF_REPOMD_DOC *pRepoMdDoc = NULL;
 
     if(!pRepoMD)
     {
@@ -1010,34 +1056,17 @@ TDNFParseRepoMD(
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    dwError = SolvCreatePool(&pPool);
+    dwError = TDNFParseRepoMDDoc(pRepoMD->pszRepoMD, &pRepoMdDoc);
     BAIL_ON_TDNF_ERROR(dwError);
 
-    pRepo = repo_create(pPool, "md_parse_temp");
-
-    fp = fopen(pRepoMD->pszRepoMD, "r");
-    if(!fp)
-    {
-        dwError = errno;
-        BAIL_ON_TDNF_SYSTEM_ERROR(dwError);
-    }
-
-    dwError = repo_add_repomdxml(pRepo, fp, 0);
-    if(dwError)
-    {
-        pr_crit("Error(%u) parsing repomd: %s\n",
-                dwError,
-                pool_errstr(pPool));
-    }
-
     dwError = TDNFFindRepoMDPart(
-                  pRepo,
+                  pRepoMdDoc,
                   TDNF_REPOMD_TYPE_PRIMARY,
                   &pRepoMD->pszPrimary);
     BAIL_ON_TDNF_ERROR(dwError);
 
     dwError = TDNFFindRepoMDPart(
-                  pRepo,
+                  pRepoMdDoc,
                   TDNF_REPOMD_TYPE_FILELISTS,
                   &pRepoMD->pszFileLists);
     /* file lists can be missing (issue #273) */
@@ -1048,7 +1077,7 @@ TDNFParseRepoMD(
     BAIL_ON_TDNF_ERROR(dwError);
 
     dwError = TDNFFindRepoMDPart(
-                  pRepo,
+                  pRepoMdDoc,
                   TDNF_REPOMD_TYPE_UPDATEINFO,
                   &pRepoMD->pszUpdateInfo);
     /* updateinfo is not mandatory */
@@ -1059,7 +1088,7 @@ TDNFParseRepoMD(
     BAIL_ON_TDNF_ERROR(dwError);
 
     dwError = TDNFFindRepoMDPart(
-                  pRepo,
+                  pRepoMdDoc,
                   TDNF_REPOMD_TYPE_OTHER,
                   &pRepoMD->pszOther);
     if(dwError == ERROR_TDNF_NO_DATA)
@@ -1069,18 +1098,7 @@ TDNFParseRepoMD(
     BAIL_ON_TDNF_ERROR(dwError);
 
 cleanup:
-    if (fp)
-    {
-        fclose(fp);
-    }
-    if(pRepo)
-    {
-        repo_free(pRepo, 0);
-    }
-    if(pPool)
-    {
-        pool_free(pPool);
-    }
+    TDNFRepoMdFree(pRepoMdDoc);
     return dwError;
 
 error:
@@ -1143,9 +1161,7 @@ TDNFDownloadMetadata(
     char *pszRepoMDPath = NULL;
     char *pszRepoMDUrl = NULL;
     char *pszRepoDataDir = NULL;
-    Repo *pSolvRepo = NULL;
-    Pool *pPool = NULL;
-    FILE *fp = NULL;
+    TDNF_REPOMD_DOC *pRepoMd = NULL;
 
     if (!nPrintOnly)
     {
@@ -1187,42 +1203,14 @@ TDNFDownloadMetadata(
         pr_info("%s\n", pszRepoMDUrl);
     }
 
-    dwError = SolvCreatePool(&pPool);
+    dwError = TDNFParseRepoMDDoc(pszRepoMDPath, &pRepoMd);
     BAIL_ON_TDNF_ERROR(dwError);
 
-    pSolvRepo = repo_create(pPool, "md_parse_temp");
-
-    fp = fopen(pszRepoMDPath, "r");
-    if(!fp)
-    {
-        dwError = errno;
-        BAIL_ON_TDNF_SYSTEM_ERROR(dwError);
-    }
-
-    dwError = repo_add_repomdxml(pSolvRepo, fp, 0);
-    if(dwError)
-    {
-        pr_crit("Error(%u) parsing repomd: %s\n",
-                dwError,
-                pool_errstr(pPool));
-    }
-
-    dwError = TDNFDownloadRepoMDParts(pTdnf, pSolvRepo, pRepo, pszRepoDir, nPrintOnly);
+    dwError = TDNFDownloadRepoMDParts(pTdnf, pRepoMd, pRepo, pszRepoDir, nPrintOnly);
     BAIL_ON_TDNF_ERROR(dwError);
 
 cleanup:
-    if (fp)
-    {
-        fclose(fp);
-    }
-    if (pSolvRepo)
-    {
-        repo_free(pSolvRepo, 0);
-    }
-    if (pPool)
-    {
-        pool_free(pPool);
-    }
+    TDNFRepoMdFree(pRepoMd);
     TDNF_SAFE_FREE_MEMORY(pszRepoMDPath);
     TDNF_SAFE_FREE_MEMORY(pszRepoMDUrl);
     TDNF_SAFE_FREE_MEMORY(pszRepoDataDir);
@@ -1234,48 +1222,37 @@ error:
 uint32_t
 TDNFDownloadRepoMDParts(
     PTDNF pTdnf,
-    Repo *pSolvRepo,
+    const TDNF_REPOMD_DOC *pRepoMd,
     PTDNF_REPO_DATA pRepo,
     const char *pszDir,
     int nPrintOnly
     )
 {
     uint32_t dwError = 0;
-    Pool *pPool = NULL;
-    Dataiterator di = {0};
     const char *pszPartFile = NULL;
     char *pszPartUrl = NULL;
     char *pszPartPath = NULL;
+    const TDNF_REPOMD_RECORD *pRecord = NULL;
+    uint32_t dwCount = 0;
+    uint32_t dwIndex = 0;
 
-    if(!pSolvRepo ||
-       !pSolvRepo->pool ||
+    if(!pRepoMd ||
        !pRepo)
     {
         dwError = ERROR_TDNF_INVALID_PARAMETER;
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    pPool = pSolvRepo->pool;
-
-    dwError = dataiterator_init(
-                  &di,
-                  pPool,
-                  pSolvRepo,
-                  SOLVID_META,
-                  REPOSITORY_REPOMD_TYPE,
-                  0,
-                  SEARCH_STRING);
-    BAIL_ON_TDNF_ERROR(dwError);
-
-    dataiterator_prepend_keyname(&di, REPOSITORY_REPOMD);
-
-    while (dataiterator_step(&di))
+    dwCount = TDNFRepoMdGetRecordCount(pRepoMd);
+    for(dwIndex = 0; dwIndex < dwCount; ++dwIndex)
     {
-        dataiterator_setpos_parent(&di);
-        pszPartFile = pool_lookup_str(
-                          pPool,
-                          SOLVID_POS,
-                          REPOSITORY_REPOMD_LOCATION);
+        pRecord = TDNFRepoMdGetRecord(pRepoMd, dwIndex);
+        if(!pRecord || IsNullOrEmptyString(pRecord->pszLocationHref))
+        {
+            continue;
+        }
+
+        pszPartFile = pRecord->pszLocationHref;
 
         dwError = TDNFJoinPath(&pszPartPath,
                                pszDir,
@@ -1303,7 +1280,6 @@ TDNFDownloadRepoMDParts(
     }
 
 cleanup:
-    dataiterator_free(&di);
     return dwError;
 error:
     TDNF_SAFE_FREE_MEMORY(pszPartUrl);
@@ -1311,4 +1287,3 @@ error:
 
     goto cleanup;
 }
-

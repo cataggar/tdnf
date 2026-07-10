@@ -220,6 +220,22 @@ pub fn build(b: *Build) void {
         .link_libc = true,
     });
 
+    const repomd_mod = b.createModule(.{
+        .root_source_file = b.path("repomd/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .pic = true,
+    });
+    repomd_mod.addImport("xml", xml_mod);
+    repomd_mod.addIncludePath(b.path("include"));
+
+    const repomd_lib = b.addLibrary(.{
+        .name = "tdnfrepomd",
+        .linkage = .static,
+        .root_module = repomd_mod,
+    });
+
     // ----- static libraries ----- //
 
     const common_lib = blk: {
@@ -710,6 +726,7 @@ pub fn build(b: *Build) void {
     tdnf_so_mod.linkLibrary(history_lib);
     tdnf_so_mod.linkLibrary(llconf_lib);
     tdnf_so_mod.linkLibrary(rpmzig_lib);
+    tdnf_so_mod.linkLibrary(repomd_lib);
     tdnf_so_mod.linkLibrary(download_zig_lib);
     linkSystem(tdnf_so_mod, &.{ "rpm", "libsolv", "libsolvext", "sqlite3" });
 
@@ -839,6 +856,20 @@ pub fn build(b: *Build) void {
 
     {
         const tests = b.addTest(.{ .root_module = xml_mod });
+        const run_tests = b.addRunArtifact(tests);
+        zig_test_step.dependOn(&run_tests.step);
+    }
+
+    {
+        const test_mod = b.createModule(.{
+            .root_source_file = b.path("repomd/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        test_mod.addImport("xml", xml_mod);
+        test_mod.addIncludePath(b.path("include"));
+        const tests = b.addTest(.{ .root_module = test_mod });
         const run_tests = b.addRunArtifact(tests);
         zig_test_step.dependOn(&run_tests.step);
     }
