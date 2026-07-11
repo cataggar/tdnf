@@ -8,6 +8,9 @@ const c = @cImport({
 const model = @import("model.zig");
 const repomd = @import("repomd.zig");
 
+pub const primary_xml = @import("primary.zig");
+pub const metadata_model = model;
+
 const c_header = if (builtin.is_test) @cImport({
     @cInclude("tdnfrepomd.h");
 }) else struct {};
