@@ -525,6 +525,30 @@ SolvReadYumRepo(
     );
 
 uint32_t
+SolvReadYumRepoNative(
+    Repo *pRepo,
+    const char *pszRepomd,
+    const char *pszPrimary,
+    const char *pszFilelists,
+    const char *pszUpdateinfo,
+    const char *pszOther
+    );
+
+uint32_t
+SolvSerializeRepo(
+    Repo *pRepo,
+    char **ppszBytes,
+    size_t *pnSize
+    );
+
+void
+SolvLogNativeRepoMismatch(
+    const char *pszRepoName,
+    Repo *pLegacy,
+    Repo *pNative
+    );
+
+uint32_t
 SolvCountPackages(
     PSolvSack pSack,
     uint32_t* pdwCount

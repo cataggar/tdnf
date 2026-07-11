@@ -34,6 +34,7 @@
 #include <solv/policy.h>
 
 #include <tdnf.h>
+#include <tdnfrepomd.h>
 #include <tdnf-common-defines.h>
 
 #include "defines.h"
