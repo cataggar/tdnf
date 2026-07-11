@@ -87,6 +87,38 @@ pub const ChangelogRange = struct {
     }
 };
 
+pub const AdvisoryKind = enum {
+    unknown,
+    security,
+    bugfix,
+    enhancement,
+};
+
+pub const AdvisoryReferenceKind = enum {
+    other,
+    bugzilla,
+    cve,
+    vendor,
+};
+
+pub const AdvisoryReferenceRange = struct {
+    start: usize = 0,
+    len: usize = 0,
+
+    pub fn slice(self: AdvisoryReferenceRange, references: []const AdvisoryReference) []const AdvisoryReference {
+        return references[self.start .. self.start + self.len];
+    }
+};
+
+pub const AdvisoryPackageRange = struct {
+    start: usize = 0,
+    len: usize = 0,
+
+    pub fn slice(self: AdvisoryPackageRange, packages: []const AdvisoryPackage) []const AdvisoryPackage {
+        return packages[self.start .. self.start + self.len];
+    }
+};
+
 pub const PackageChecksum = struct {
     kind: []const u8,
     value: []const u8,
@@ -169,6 +201,50 @@ pub const ChangelogEntry = struct {
     text: []const u8,
 };
 
+pub const AdvisoryReference = struct {
+    kind: AdvisoryReferenceKind = .other,
+    raw_type: ?[]const u8 = null,
+    id: ?[]const u8 = null,
+    title: ?[]const u8 = null,
+    href: ?[]const u8 = null,
+};
+
+pub const AdvisoryPackage = struct {
+    collection_short: ?[]const u8 = null,
+    collection_name: ?[]const u8 = null,
+    nevra: Nevra = .{},
+    src: ?[]const u8 = null,
+    filename: ?[]const u8 = null,
+    reboot_suggested: bool = false,
+};
+
+pub const Advisory = struct {
+    id: []const u8,
+    raw_type: []const u8,
+    kind: AdvisoryKind = .unknown,
+    from: ?[]const u8 = null,
+    status: ?[]const u8 = null,
+    version: ?[]const u8 = null,
+    title: ?[]const u8 = null,
+    severity: ?[]const u8 = null,
+    release: ?[]const u8 = null,
+    rights: ?[]const u8 = null,
+    issued: ?[]const u8 = null,
+    updated: ?[]const u8 = null,
+    description: ?[]const u8 = null,
+    reboot_suggested: bool = false,
+    references: AdvisoryReferenceRange = .{},
+    packages: AdvisoryPackageRange = .{},
+
+    pub fn referenceEntries(self: Advisory, references: []const AdvisoryReference) []const AdvisoryReference {
+        return self.references.slice(references);
+    }
+
+    pub fn packageEntries(self: Advisory, packages: []const AdvisoryPackage) []const AdvisoryPackage {
+        return self.packages.slice(packages);
+    }
+};
+
 pub const Package = struct {
     pkg_id: []const u8,
     nevra: Nevra,
@@ -239,12 +315,32 @@ pub const ParsedPrimary = struct {
     changelogs: []ChangelogEntry = &[_]ChangelogEntry{},
 };
 
+pub const ParsedUpdateInfo = struct {
+    advisories: []Advisory = &[_]Advisory{},
+    references: []AdvisoryReference = &[_]AdvisoryReference{},
+    packages: []AdvisoryPackage = &[_]AdvisoryPackage{},
+};
+
 pub fn kindFromRawType(raw_type: []const u8) RecordKind {
     if (std.mem.eql(u8, raw_type, "primary")) return .primary;
     if (std.mem.eql(u8, raw_type, "filelists")) return .filelists;
     if (std.mem.eql(u8, raw_type, "other")) return .other;
     if (std.mem.startsWith(u8, raw_type, "updateinfo")) return .updateinfo;
     return .unknown;
+}
+
+pub fn advisoryKindFromType(raw_type: []const u8) AdvisoryKind {
+    if (std.ascii.eqlIgnoreCase(raw_type, "security")) return .security;
+    if (std.ascii.eqlIgnoreCase(raw_type, "bugfix")) return .bugfix;
+    if (std.ascii.eqlIgnoreCase(raw_type, "enhancement")) return .enhancement;
+    return .unknown;
+}
+
+pub fn advisoryReferenceKindFromType(raw_type: []const u8) AdvisoryReferenceKind {
+    if (std.ascii.eqlIgnoreCase(raw_type, "bugzilla")) return .bugzilla;
+    if (std.ascii.eqlIgnoreCase(raw_type, "cve")) return .cve;
+    if (std.ascii.eqlIgnoreCase(raw_type, "vendor")) return .vendor;
+    return .other;
 }
 
 pub fn dupZ(allocator: std.mem.Allocator, bytes: []const u8) ![:0]const u8 {
