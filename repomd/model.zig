@@ -63,6 +63,30 @@ pub const RelationRange = struct {
     }
 };
 
+pub const FileKind = enum {
+    plain,
+    dir,
+    ghost,
+};
+
+pub const FileRange = struct {
+    start: usize = 0,
+    len: usize = 0,
+
+    pub fn slice(self: FileRange, files: []const FileEntry) []const FileEntry {
+        return files[self.start .. self.start + self.len];
+    }
+};
+
+pub const ChangelogRange = struct {
+    start: usize = 0,
+    len: usize = 0,
+
+    pub fn slice(self: ChangelogRange, changelogs: []const ChangelogEntry) []const ChangelogEntry {
+        return changelogs[self.start .. self.start + self.len];
+    }
+};
+
 pub const PackageChecksum = struct {
     kind: []const u8,
     value: []const u8,
@@ -134,6 +158,17 @@ pub const Relation = struct {
     pre: bool = false,
 };
 
+pub const FileEntry = struct {
+    path: []const u8,
+    kind: FileKind = .plain,
+};
+
+pub const ChangelogEntry = struct {
+    author: []const u8,
+    timestamp: u64,
+    text: []const u8,
+};
+
 pub const Package = struct {
     pkg_id: []const u8,
     nevra: Nevra,
@@ -154,6 +189,8 @@ pub const Package = struct {
     suggests: RelationRange = .{},
     supplements: RelationRange = .{},
     enhances: RelationRange = .{},
+    files: FileRange = .{},
+    changelogs: ChangelogRange = .{},
 
     pub fn range(self: Package, kind: DependencyKind) RelationRange {
         return switch (kind) {
@@ -184,12 +221,22 @@ pub const Package = struct {
     pub fn relationsFor(self: Package, kind: DependencyKind, relations: []const Relation) []const Relation {
         return self.range(kind).slice(relations);
     }
+
+    pub fn fileEntries(self: Package, files: []const FileEntry) []const FileEntry {
+        return self.files.slice(files);
+    }
+
+    pub fn changelogEntries(self: Package, changelogs: []const ChangelogEntry) []const ChangelogEntry {
+        return self.changelogs.slice(changelogs);
+    }
 };
 
 pub const ParsedPrimary = struct {
     declared_package_count: ?u64 = null,
     packages: []Package = &[_]Package{},
     relations: []Relation = &[_]Relation{},
+    files: []FileEntry = &[_]FileEntry{},
+    changelogs: []ChangelogEntry = &[_]ChangelogEntry{},
 };
 
 pub fn kindFromRawType(raw_type: []const u8) RecordKind {

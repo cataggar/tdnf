@@ -385,18 +385,51 @@ const Parser = struct {
         const top = &self.frames.items[self.frames.items.len - 1];
         switch (top.kind) {
             .package => try self.finishPackage(),
-            .name => try self.currentPackage().setRequiredString(&self.currentPackage().name, try copyRequiredText(self.allocator, top.text.items)),
-            .arch => try self.currentPackage().setRequiredString(&self.currentPackage().arch, try copyRequiredText(self.allocator, top.text.items)),
+            .name => {
+                const builder = try self.currentPackage();
+                try builder.setRequiredString(&builder.name, try copyRequiredText(self.allocator, top.text.items));
+            },
+            .arch => {
+                const builder = try self.currentPackage();
+                try builder.setRequiredString(&builder.arch, try copyRequiredText(self.allocator, top.text.items));
+            },
             .checksum => try self.finishChecksum(top),
-            .summary => self.currentPackage().setOptionalString(&self.currentPackage().summary, try copyOptionalText(self.allocator, top.text.items)),
-            .description => self.currentPackage().setOptionalString(&self.currentPackage().description, try copyOptionalText(self.allocator, top.text.items)),
-            .packager => self.currentPackage().setOptionalString(&self.currentPackage().packager, try copyOptionalText(self.allocator, top.text.items)),
-            .url => self.currentPackage().setOptionalString(&self.currentPackage().url, try copyOptionalText(self.allocator, top.text.items)),
-            .license => self.currentPackage().setOptionalString(&self.currentPackage().license, try copyOptionalText(self.allocator, top.text.items)),
-            .vendor => self.currentPackage().setOptionalString(&self.currentPackage().vendor, try copyOptionalText(self.allocator, top.text.items)),
-            .group => self.currentPackage().setOptionalString(&self.currentPackage().group, try copyOptionalText(self.allocator, top.text.items)),
-            .buildhost => self.currentPackage().setOptionalString(&self.currentPackage().buildhost, try copyOptionalText(self.allocator, top.text.items)),
-            .sourcerpm => self.currentPackage().setOptionalString(&self.currentPackage().source_rpm, try copyOptionalText(self.allocator, top.text.items)),
+            .summary => {
+                const builder = try self.currentPackage();
+                builder.setOptionalString(&builder.summary, try copyOptionalText(self.allocator, top.text.items));
+            },
+            .description => {
+                const builder = try self.currentPackage();
+                builder.setOptionalString(&builder.description, try copyOptionalText(self.allocator, top.text.items));
+            },
+            .packager => {
+                const builder = try self.currentPackage();
+                builder.setOptionalString(&builder.packager, try copyOptionalText(self.allocator, top.text.items));
+            },
+            .url => {
+                const builder = try self.currentPackage();
+                builder.setOptionalString(&builder.url, try copyOptionalText(self.allocator, top.text.items));
+            },
+            .license => {
+                const builder = try self.currentPackage();
+                builder.setOptionalString(&builder.license, try copyOptionalText(self.allocator, top.text.items));
+            },
+            .vendor => {
+                const builder = try self.currentPackage();
+                builder.setOptionalString(&builder.vendor, try copyOptionalText(self.allocator, top.text.items));
+            },
+            .group => {
+                const builder = try self.currentPackage();
+                builder.setOptionalString(&builder.group, try copyOptionalText(self.allocator, top.text.items));
+            },
+            .buildhost => {
+                const builder = try self.currentPackage();
+                builder.setOptionalString(&builder.buildhost, try copyOptionalText(self.allocator, top.text.items));
+            },
+            .sourcerpm => {
+                const builder = try self.currentPackage();
+                builder.setOptionalString(&builder.source_rpm, try copyOptionalText(self.allocator, top.text.items));
+            },
             else => {},
         }
     }
