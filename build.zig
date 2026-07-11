@@ -109,6 +109,16 @@ pub fn build(b: *Build) void {
         "rpmzig-verify",
         "Replace librpm signature verification with rpmzig's pure-Zig OpenPGP verifier (default false)",
     ) orelse false;
+    const native_repomd_crosscheck = b.option(
+        bool,
+        "native-repomd-crosscheck",
+        "Build the native repo-metadata->libsolv bridge and run log-only crosschecks against libsolv's XML loaders (default false)",
+    ) orelse false;
+    const native_repomd = (b.option(
+        bool,
+        "native-repomd",
+        "Build the native repo-metadata->libsolv bridge without flipping the default libsolv XML-loading path (default false)",
+    ) orelse false) or native_repomd_crosscheck;
     const prefix = b.install_prefix;
     const libdir = "lib";
     const full_libdir = b.fmt("{s}/{s}", .{ prefix, libdir });
@@ -331,11 +341,28 @@ pub fn build(b: *Build) void {
         break :blk lib;
     };
 
-    const solv_lib = staticLib(b, target, optimize, .{
-        .name = "tdnfsolv",
-        .root = "solv",
-        .files = &.{ "tdnfpackage.c", "tdnfpool.c", "tdnfquery.c", "tdnfrepo.c", "simplequery.c" },
-    });
+    const solv_lib = blk: {
+        const mod = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .pic = true,
+        });
+        mod.addIncludePath(b.path("include"));
+        mod.addIncludePath(b.path("solv"));
+        if (native_repomd) mod.addCMacro("TDNF_NATIVE_REPOMD", "1");
+        if (native_repomd_crosscheck) mod.addCMacro("TDNF_NATIVE_REPOMD_CROSSCHECK", "1");
+        mod.addCSourceFiles(.{
+            .root = b.path("solv"),
+            .files = &.{ "tdnfpackage.c", "tdnfpool.c", "tdnfquery.c", "tdnfrepo.c", "tdnfrepo_native.c", "simplequery.c" },
+            .flags = &tdnf_cflags,
+        });
+        break :blk b.addLibrary(.{
+            .name = "tdnfsolv",
+            .linkage = .static,
+            .root_module = mod,
+        });
+    };
 
     const history_lib = blk: {
         const mod = b.createModule(.{

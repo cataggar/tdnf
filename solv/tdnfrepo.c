@@ -9,6 +9,28 @@
 
 #include "includes.h"
 
+static uint32_t
+SolvReadYumRepoLegacy(
+    Repo *pRepo,
+    const char *pszRepomd,
+    const char *pszPrimary,
+    const char *pszFilelists,
+    const char *pszUpdateinfo,
+    const char *pszOther
+    );
+
+#ifdef TDNF_NATIVE_REPOMD_CROSSCHECK
+static void
+SolvCrosscheckYumRepoWithNative(
+    const char *pszRepoName,
+    const char *pszRepomd,
+    const char *pszPrimary,
+    const char *pszFilelists,
+    const char *pszUpdateinfo,
+    const char *pszOther
+    );
+#endif
+
 uint32_t
 SolvLoadRepomd(
     Repo* pRepo,
@@ -199,15 +221,55 @@ SolvReadYumRepo(
     )
 {
     uint32_t dwError = 0;
+
     if(!pRepo || !pszRepoName || !pszRepomd || !pszPrimary)
     {
         dwError = ERROR_TDNF_INVALID_PARAMETER;
         BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
     }
 
-    dwError = SolvLoadRepomd(pRepo, pszRepomd);
+    dwError = SolvReadYumRepoLegacy(
+                  pRepo,
+                  pszRepomd,
+                  pszPrimary,
+                  pszFilelists,
+                  pszUpdateinfo,
+                  pszOther);
     BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
 
+#ifdef TDNF_NATIVE_REPOMD_CROSSCHECK
+    SolvCrosscheckYumRepoWithNative(
+        pszRepoName,
+        pszRepomd,
+        pszPrimary,
+        pszFilelists,
+        pszUpdateinfo,
+        pszOther);
+#endif
+
+
+cleanup:
+
+    return dwError;
+
+error:
+    goto cleanup;
+}
+
+static uint32_t
+SolvReadYumRepoLegacy(
+    Repo *pRepo,
+    const char *pszRepomd,
+    const char *pszPrimary,
+    const char *pszFilelists,
+    const char *pszUpdateinfo,
+    const char *pszOther
+    )
+{
+    uint32_t dwError = 0;
+
+    dwError = SolvLoadRepomd(pRepo, pszRepomd);
+    BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
 
     dwError = SolvLoadRepomdPrimary(pRepo, pszPrimary);
     BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
@@ -230,14 +292,126 @@ SolvReadYumRepo(
         BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
     }
 
-
 cleanup:
-
     return dwError;
 
 error:
     goto cleanup;
 }
+
+#ifdef TDNF_NATIVE_REPOMD_CROSSCHECK
+static void
+SolvCrosscheckYumRepoWithNative(
+    const char *pszRepoName,
+    const char *pszRepomd,
+    const char *pszPrimary,
+    const char *pszFilelists,
+    const char *pszUpdateinfo,
+    const char *pszOther
+    )
+{
+    Pool *pPool = NULL;
+    Repo *pLegacy = NULL;
+    Repo *pNative = NULL;
+    char *pszLegacyBytes = NULL;
+    char *pszNativeBytes = NULL;
+    size_t nLegacySize = 0;
+    size_t nNativeSize = 0;
+    uint32_t dwError = 0;
+
+    pPool = pool_create();
+    if(!pPool)
+    {
+        pr_err("native repomd crosscheck: repo '%s' failed to create a temporary pool\n",
+               pszRepoName ? pszRepoName : "(unknown)");
+        goto cleanup;
+    }
+
+    pLegacy = repo_create(pPool, pszRepoName ? pszRepoName : "native-repomd-crosscheck");
+    pNative = repo_create(pPool, pszRepoName ? pszRepoName : "native-repomd-crosscheck");
+    if(!pLegacy || !pNative)
+    {
+        pr_err("native repomd crosscheck: repo '%s' failed to create temporary repos\n",
+               pszRepoName ? pszRepoName : "(unknown)");
+        goto cleanup;
+    }
+
+    dwError = SolvReadYumRepoLegacy(
+                  pLegacy,
+                  pszRepomd,
+                  pszPrimary,
+                  pszFilelists,
+                  pszUpdateinfo,
+                  pszOther);
+    if(dwError)
+    {
+        pr_err("native repomd crosscheck: repo '%s' failed to load the legacy comparison repo (%u)\n",
+               pszRepoName ? pszRepoName : "(unknown)",
+               dwError);
+        goto cleanup;
+    }
+
+    dwError = SolvReadYumRepoNative(
+                  pNative,
+                  pszRepomd,
+                  pszPrimary,
+                  pszFilelists,
+                  pszUpdateinfo,
+                  pszOther);
+    if(dwError)
+    {
+        pr_err("native repomd crosscheck: repo '%s' failed to load the native comparison repo (%u): %s\n",
+               pszRepoName ? pszRepoName : "(unknown)",
+               dwError,
+               TDNFRepoMdNativeLastError());
+        goto cleanup;
+    }
+
+    dwError = SolvSerializeRepo(pLegacy, &pszLegacyBytes, &nLegacySize);
+    if(dwError)
+    {
+        pr_err("native repomd crosscheck: repo '%s' failed to serialize the legacy comparison repo (%u)\n",
+               pszRepoName ? pszRepoName : "(unknown)",
+               dwError);
+        goto cleanup;
+    }
+
+    dwError = SolvSerializeRepo(pNative, &pszNativeBytes, &nNativeSize);
+    if(dwError)
+    {
+        pr_err("native repomd crosscheck: repo '%s' failed to serialize the native comparison repo (%u)\n",
+               pszRepoName ? pszRepoName : "(unknown)",
+               dwError);
+        goto cleanup;
+    }
+
+    if(nLegacySize != nNativeSize ||
+       !pszLegacyBytes ||
+       !pszNativeBytes ||
+       memcmp(pszLegacyBytes, pszNativeBytes, nLegacySize))
+    {
+        pr_err("native repomd crosscheck: repo '%s' serialized repo mismatch legacy_size=%zu native_size=%zu\n",
+               pszRepoName ? pszRepoName : "(unknown)",
+               nLegacySize,
+               nNativeSize);
+        SolvLogNativeRepoMismatch(pszRepoName, pLegacy, pNative);
+    }
+
+cleanup:
+    if(pszLegacyBytes)
+    {
+        free(pszLegacyBytes);
+    }
+    if(pszNativeBytes)
+    {
+        free(pszNativeBytes);
+    }
+    if(pPool)
+    {
+        pool_free(pPool);
+    }
+}
+#endif
 
 uint32_t
 SolvCountPackages(

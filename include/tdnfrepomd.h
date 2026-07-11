@@ -10,6 +10,8 @@
 extern "C" {
 #endif
 
+typedef struct s_Repo Repo;
+
 typedef struct tdnf_repomd_doc TDNF_REPOMD_DOC;
 
 enum {
@@ -107,6 +109,30 @@ const TDNF_REPOMD_RECORD*
 TDNFRepoMdGetRecord(
     const TDNF_REPOMD_DOC *pDoc,
     uint32_t dwIndex
+    );
+
+/*
+ * Return the last native repo->libsolv bridge error produced by the current
+ * thread.
+ */
+const char*
+TDNFRepoMdNativeLastError(
+    void
+    );
+
+/*
+ * Parse repo metadata with the native Zig parsers and populate an existing
+ * libsolv Repo using manual-construction APIs. Optional metadata paths may be
+ * NULL. The caller owns `pRepo`.
+ */
+uint32_t
+TDNFRepoMdNativeLoadSolvRepo(
+    Repo *pRepo,
+    const char *pszRepomd,
+    const char *pszPrimary,
+    const char *pszFilelists,
+    const char *pszUpdateinfo,
+    const char *pszOther
     );
 
 #ifdef __cplusplus
