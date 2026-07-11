@@ -869,6 +869,7 @@ pub fn build(b: *Build) void {
         });
         test_mod.addImport("xml", xml_mod);
         test_mod.addIncludePath(b.path("include"));
+        linkSystem(test_mod, &.{ "libsolv", "libsolvext" });
         const tests = b.addTest(.{ .root_module = test_mod });
         const run_tests = b.addRunArtifact(tests);
         zig_test_step.dependOn(&run_tests.step);

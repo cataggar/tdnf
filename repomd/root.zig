@@ -12,6 +12,7 @@ pub const primary_xml = @import("primary.zig");
 pub const filelists_xml = @import("filelists.zig");
 pub const other_xml = @import("other.zig");
 pub const updateinfo_xml = @import("updateinfo.zig");
+pub const metadata_cache = @import("cache.zig");
 pub const metadata_model = model;
 
 const c_header = if (builtin.is_test) @cImport({
@@ -220,6 +221,7 @@ fn expectOptionalString(expected: ?[]const u8, actual: ?[*:0]const u8) !void {
 }
 
 comptime {
+    _ = @import("cache.zig");
     _ = @import("filelists.zig");
     _ = @import("other.zig");
     _ = @import("updateinfo.zig");
