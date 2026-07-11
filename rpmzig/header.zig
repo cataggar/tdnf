@@ -33,9 +33,19 @@ pub const TagId = enum(u32) {
     epoch = 1003,
     summary = 1004,
     description = 1005,
+    build_time = 1006,
+    buildhost = 1007,
     arch = 1022,
     install_tid = 1128,
     install_time = 1008,
+    size = 1009,
+    vendor = 1011,
+    license = 1014,
+    packager = 1015,
+    group = 1016,
+    url = 1020,
+    source_rpm = 1044,
+    archive_size = 1046,
     payload_format = 1124,
     payload_compressor = 1125,
     payload_flags = 1126,
@@ -52,6 +62,35 @@ pub const TagId = enum(u32) {
     obsoletename = 1090,
     obsoleteversion = 1115,
     obsoleteflags = 1114,
+    changelogtime = 1080,
+    changelogname = 1081,
+    changelogtext = 1082,
+    filemodes = 1030,
+    fileflags = 1037,
+    dirindexes = 1116,
+    basenames = 1117,
+    dirnames = 1118,
+    recommendname = 5046,
+    recommendversion = 5047,
+    recommendflags = 5048,
+    suggestname = 5049,
+    suggestversion = 5050,
+    suggestflags = 5051,
+    supplementname = 5052,
+    supplementversion = 5053,
+    supplementflags = 5054,
+    enhancename = 5055,
+    enhanceversion = 5056,
+    enhanceflags = 5057,
+    oldsuggestsname = 1156,
+    oldsuggestsversion = 1157,
+    oldsuggestsflags = 1158,
+    oldenhancesname = 1159,
+    oldenhancesversion = 1160,
+    oldenhancesflags = 1161,
+    longsize = 5009,
+    sha1header = 269,
+    sha256header = 273,
     _,
 };
 
@@ -222,6 +261,15 @@ pub const Header = struct {
         return readU32(self.bytes, start);
     }
 
+    /// Get an INT64-typed tag.
+    pub fn getU64(self: Header, tag: TagId) ?u64 {
+        const e = self.find(tag) orelse return null;
+        if (@as(TypeId, @enumFromInt(e.typ)) != .int64) return null;
+        const start = self.data_off + @as(usize, e.offset);
+        if (start + 8 > self.bytes.len) return null;
+        return readU64(self.bytes, start);
+    }
+
     /// Get a BIN-typed tag as a slice into the blob. Used for raw
     /// binary payloads such as signature packets (sig_sigpgp,
     /// sig_dsa, sig_rsa, …) and stored digests (sig_sha1,
@@ -282,6 +330,16 @@ pub const Header = struct {
         return readU32(self.bytes, start);
     }
 
+    /// Look up the `i`th entry of an INT16 array tag.
+    pub fn u16ArrayItem(self: Header, tag: TagId, i: usize) ?u16 {
+        const e = self.find(tag) orelse return null;
+        if (@as(TypeId, @enumFromInt(e.typ)) != .int16) return null;
+        if (i >= e.count) return null;
+        const start = self.data_off + @as(usize, e.offset) + i * 2;
+        if (start + 2 > self.bytes.len) return null;
+        return readU16(self.bytes, start);
+    }
+
     /// Build the canonical NEVRA string `name-[epoch:]version-release[.arch]`.
     /// Epoch is included iff RPMTAG_EPOCH is present in the header.
     /// Arch is included iff RPMTAG_ARCH is present (which is not the
@@ -327,6 +385,22 @@ fn readU32(buf: []const u8, off: usize) u32 {
         @as(u32, buf[off + 1]) << 16 |
         @as(u32, buf[off + 2]) << 8 |
         @as(u32, buf[off + 3]);
+}
+
+fn readU16(buf: []const u8, off: usize) u16 {
+    return @as(u16, buf[off]) << 8 |
+        @as(u16, buf[off + 1]);
+}
+
+fn readU64(buf: []const u8, off: usize) u64 {
+    return @as(u64, buf[off]) << 56 |
+        @as(u64, buf[off + 1]) << 48 |
+        @as(u64, buf[off + 2]) << 40 |
+        @as(u64, buf[off + 3]) << 32 |
+        @as(u64, buf[off + 4]) << 24 |
+        @as(u64, buf[off + 5]) << 16 |
+        @as(u64, buf[off + 6]) << 8 |
+        @as(u64, buf[off + 7]);
 }
 
 // --- tests ----------------------------------------------------------

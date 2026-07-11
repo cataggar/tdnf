@@ -14,6 +14,7 @@ pub const other_xml = @import("other.zig");
 pub const updateinfo_xml = @import("updateinfo.zig");
 pub const metadata_cache = @import("cache.zig");
 pub const metadata_model = model;
+pub const rpm_package = @import("rpmpkg.zig");
 
 const c_header = if (builtin.is_test) @cImport({
     @cInclude("tdnfrepomd.h");
@@ -224,6 +225,7 @@ comptime {
     _ = @import("cache.zig");
     _ = @import("filelists.zig");
     _ = @import("other.zig");
+    _ = @import("rpmpkg.zig");
     _ = @import("updateinfo.zig");
 }
 

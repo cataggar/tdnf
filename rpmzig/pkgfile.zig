@@ -23,7 +23,7 @@
 //! well under 100 MB.
 
 const std = @import("std");
-const header = @import("header.zig");
+const header = @import("rpm_header");
 
 const c = @cImport({
     @cInclude("stdio.h");
