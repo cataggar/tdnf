@@ -321,6 +321,51 @@ pub const ParsedUpdateInfo = struct {
     packages: []AdvisoryPackage = &[_]AdvisoryPackage{},
 };
 
+pub const RepositoryModel = struct {
+    pszRevision: ?[*:0]const u8 = null,
+    records: []Record = &[_]Record{},
+    packages: []Package = &[_]Package{},
+    relations: []Relation = &[_]Relation{},
+    files: []FileEntry = &[_]FileEntry{},
+    changelogs: []ChangelogEntry = &[_]ChangelogEntry{},
+    advisories: []Advisory = &[_]Advisory{},
+    advisory_references: []AdvisoryReference = &[_]AdvisoryReference{},
+    advisory_packages: []AdvisoryPackage = &[_]AdvisoryPackage{},
+    has_filelists: bool = false,
+    has_other: bool = false,
+    has_updateinfo: bool = false,
+};
+
+pub fn repositoryModelFromParts(
+    parsed_repomd: ParsedRepoMd,
+    parsed_primary: ParsedPrimary,
+    parsed_updateinfo: ParsedUpdateInfo,
+) RepositoryModel {
+    var repo = RepositoryModel{
+        .pszRevision = parsed_repomd.pszRevision,
+        .records = parsed_repomd.pRecords,
+        .packages = parsed_primary.packages,
+        .relations = parsed_primary.relations,
+        .files = parsed_primary.files,
+        .changelogs = parsed_primary.changelogs,
+        .advisories = parsed_updateinfo.advisories,
+        .advisory_references = parsed_updateinfo.references,
+        .advisory_packages = parsed_updateinfo.packages,
+    };
+
+    for (parsed_repomd.pRecords) |record| {
+        const raw_type = spanZ(record.pszType) orelse continue;
+        switch (kindFromRawType(raw_type)) {
+            .filelists => repo.has_filelists = true,
+            .other => repo.has_other = true,
+            .updateinfo => repo.has_updateinfo = true,
+            else => {},
+        }
+    }
+
+    return repo;
+}
+
 pub fn kindFromRawType(raw_type: []const u8) RecordKind {
     if (std.mem.eql(u8, raw_type, "primary")) return .primary;
     if (std.mem.eql(u8, raw_type, "filelists")) return .filelists;
@@ -351,6 +396,11 @@ pub fn dupZ(allocator: std.mem.Allocator, bytes: []const u8) ![:0]const u8 {
 
 pub fn dup(allocator: std.mem.Allocator, bytes: []const u8) ![]const u8 {
     return allocator.dupe(u8, bytes);
+}
+
+pub fn spanZ(value: ?[*:0]const u8) ?[]const u8 {
+    const ptr = value orelse return null;
+    return std.mem.span(ptr);
 }
 
 pub fn compareOpFromFlags(raw_flags: []const u8) ?CompareOp {
