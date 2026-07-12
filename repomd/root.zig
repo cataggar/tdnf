@@ -15,6 +15,7 @@ pub const updateinfo_xml = @import("updateinfo.zig");
 pub const metadata_cache = @import("cache.zig");
 pub const metadata_model = model;
 pub const package_query = @import("pkgquery.zig");
+pub const query_index = @import("index.zig");
 pub const rpm_package = @import("rpmpkg.zig");
 pub const solv_bridge = @import("solvbridge.zig");
 
@@ -226,6 +227,7 @@ fn expectOptionalString(expected: ?[]const u8, actual: ?[*:0]const u8) !void {
 comptime {
     _ = @import("cache.zig");
     _ = @import("filelists.zig");
+    _ = @import("index.zig");
     _ = @import("other.zig");
     _ = @import("pkgquery.zig");
     _ = @import("rpmpkg.zig");
