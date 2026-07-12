@@ -9,7 +9,7 @@ Requires Zig 0.16+ and the following C development packages (Debian/Ubuntu
 names; equivalent `*-devel` packages on rpm distros):
 
 ```
-librpm-dev libsolv-dev libexpat1-dev \
+librpm-dev libexpat1-dev \
 libsqlite3-dev libgpgme-dev libpopt-dev pkg-config
 ```
 

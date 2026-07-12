@@ -7,7 +7,7 @@ HTTP/TLS stack. It ships a public C library (`libtdnf`) plus CLI binaries.
 ## Build, test, lint
 
 The build is driven by **Zig 0.16+** (no CMake — migrated to `build.zig`).
-The host needs `librpm-dev`, `libsolv-dev`, `libexpat1-dev`,
+The host needs `librpm-dev`, `libexpat1-dev`,
 `libsqlite3-dev`, `libgpgme-dev`,
 `libpopt-dev` (Debian/Ubuntu names — `*-devel` on rpm distros).
 
