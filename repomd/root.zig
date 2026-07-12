@@ -14,6 +14,7 @@ pub const other_xml = @import("other.zig");
 pub const updateinfo_xml = @import("updateinfo.zig");
 pub const metadata_cache = @import("cache.zig");
 pub const metadata_model = model;
+pub const package_query = @import("pkgquery.zig");
 pub const rpm_package = @import("rpmpkg.zig");
 pub const solv_bridge = @import("solvbridge.zig");
 
@@ -226,6 +227,7 @@ comptime {
     _ = @import("cache.zig");
     _ = @import("filelists.zig");
     _ = @import("other.zig");
+    _ = @import("pkgquery.zig");
     _ = @import("rpmpkg.zig");
     _ = @import("solvbridge.zig");
     _ = @import("updateinfo.zig");
