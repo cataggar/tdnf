@@ -535,21 +535,6 @@ SolvReadYumRepoNative(
     );
 
 uint32_t
-SolvSerializeRepo(
-    Repo *pRepo,
-    char **ppszBytes,
-    size_t *pnSize
-    );
-
-int
-SolvLogNativeRepoMismatch(
-    const char *pszRepoName,
-    Repo *pLegacy,
-    Repo *pNative,
-    int nAllowUnfocusedDiff
-    );
-
-uint32_t
 SolvCountPackages(
     PSolvSack pSack,
     uint32_t* pdwCount
@@ -580,44 +565,6 @@ SolvAddRpmNative(
     const char *pszPath,
     int dwFlags,
     Id *pdwSolvableId
-    );
-
-void
-SolvCrosscheckInstalledRpmsWithNative(
-    Repo *pLegacyRepo,
-    const char *pszCacheFileName,
-    int dwFlags
-    );
-
-void
-SolvCrosscheckRpmPathWithNative(
-    const char *pszPrefix,
-    const char *pszPath,
-    int dwFlags
-    );
-
-uint32_t
-SolvLoadRepomd(
-    Repo* pRepo,
-    const char* pszRepomd
-    );
-
-uint32_t
-SolvLoadRepomdPrimary(
-    Repo* pRepo,
-    const char* pszPrimary
-    );
-
-uint32_t
-SolvLoadRepomdFilelists(
-    Repo* pRepo,
-    const char* pszFilelists
-    );
-
-uint32_t
-SolvLoadRepomdUpdateinfo(
-    Repo* pRepo,
-    const char* pszUpdateinfo
     );
 
 uint32_t

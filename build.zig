@@ -109,21 +109,6 @@ pub fn build(b: *Build) void {
         "rpmzig-verify",
         "Replace librpm signature verification with rpmzig's pure-Zig OpenPGP verifier (default false)",
     ) orelse false;
-    const native_repomd_crosscheck = b.option(
-        bool,
-        "native-repomd-crosscheck",
-        "Build the native repo-metadata->libsolv bridge and run log-only crosschecks against libsolv's legacy repomd loaders (default false)",
-    ) orelse false;
-    const native_rpm_crosscheck = b.option(
-        bool,
-        "native-rpm-crosscheck",
-        "Build the native rpmdb/local-rpm metadata->libsolv bridge and run log-only crosschecks against libsolv's legacy rpm loaders (default false)",
-    ) orelse false;
-    const native_repomd = (b.option(
-        bool,
-        "native-repomd",
-        "Build the native repo-metadata->libsolv bridge without flipping the default libsolv XML-loading path (default false)",
-    ) orelse false) or native_repomd_crosscheck;
     const prefix = b.install_prefix;
     const libdir = "lib";
     const full_libdir = b.fmt("{s}/{s}", .{ prefix, libdir });
@@ -357,9 +342,6 @@ pub fn build(b: *Build) void {
         mod.addIncludePath(b.path("include"));
         mod.addIncludePath(b.path("solv"));
         mod.addIncludePath(b.path("rpmzig"));
-        if (native_repomd) mod.addCMacro("TDNF_NATIVE_REPOMD", "1");
-        if (native_repomd_crosscheck) mod.addCMacro("TDNF_NATIVE_REPOMD_CROSSCHECK", "1");
-        if (native_rpm_crosscheck) mod.addCMacro("TDNF_NATIVE_RPM_CROSSCHECK", "1");
         mod.addCSourceFiles(.{
             .root = b.path("solv"),
             .files = &.{ "tdnfpackage.c", "tdnfpool.c", "tdnfquery.c", "tdnfrepo.c", "tdnfrepo_native.c", "simplequery.c" },
@@ -754,7 +736,6 @@ pub fn build(b: *Build) void {
     });
     tdnf_so_mod.addIncludePath(b.path("include"));
     tdnf_so_mod.addIncludePath(b.path("client"));
-    if (native_rpm_crosscheck) tdnf_so_mod.addCMacro("TDNF_NATIVE_RPM_CROSSCHECK", "1");
     if (build_with_rpm_6x) tdnf_so_mod.addCMacro("BUILD_WITH_RPM_6X", "1");
     if (rpmzig_verify) {
         // TDNF_RPMZIG_VERIFY gates the rpmzig entry point
