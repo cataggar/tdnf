@@ -13,10 +13,6 @@ const c = @cImport({
     @cInclude("solv/repo.h");
     @cInclude("solv/repodata.h");
     @cInclude("solv/solvable.h");
-    @cInclude("solv/repo_rpmdb.h");
-    @cInclude("solv/repo_repomdxml.h");
-    @cInclude("solv/repo_rpmmd.h");
-    @cInclude("solv/repo_updateinfoxml.h");
 });
 
 const model = @import("model.zig");
@@ -56,7 +52,7 @@ const LoadError = error{
     DecompressFailed,
 };
 
-const BuildError = error{
+pub const BuildError = error{
     InvalidRepoMetadata,
     OutOfMemory,
 };
@@ -1044,7 +1040,7 @@ fn addFileEntry(
     c.repodata_add_dirstr(data, solvid, c.SOLVABLE_FILELIST, dir_id, try z(allocator, name_buf));
 }
 
-fn buildRepositoryIntoRepo(arena: std.mem.Allocator, repo: *c.Repo, repository: *const model.RepositoryModel) BuildError!void {
+pub fn buildRepositoryIntoRepo(arena: std.mem.Allocator, repo: *c.Repo, repository: *const model.RepositoryModel) BuildError!void {
     var builder = try SolvBuilder.init(arena, repo, repository, .{});
     return builder.build();
 }

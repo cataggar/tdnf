@@ -12,6 +12,10 @@
             .url = "https://github.com/cataggar/tls.zig/archive/2621e411af81c8b4d8fa5aaae08b9b183a80bb46.tar.gz",
             .hash = "tls-0.1.0-ER2e0vpTBgCVdP6tvFCii9_PFjATLb23ht2_xbGy5mYU",
         },
+        .libsolv = .{
+            .url = "https://github.com/cataggar/libsolv/archive/99b33fe2ca708fd61652b1c36e0fc35edd59a5b1.tar.gz",
+            .hash = "libsolv-0.7.39-PoNzehBtIABMbRTsbiVIOYaZ-HaX_EtRRjQhXT_U1TWu",
+        },
     },
     .paths = .{
         "build.zig",

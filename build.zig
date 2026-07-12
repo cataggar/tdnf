@@ -126,6 +126,20 @@ pub fn build(b: *Build) void {
     // Vendored sqlite backs the Zig-side history and rpmdb code paths.
     const sqlite_dep = b.dependency("sqlite", .{});
     const tls_dep = b.dependency("tls", .{});
+    // libsolv's C sources intentionally rely on wraparound in a few internal
+    // hash paths; build them without Zig's safe-mode C traps to match the
+    // behaviour of the system libsolv packages we are replacing.
+    const libsolv_optimize: OptimizeMode = .ReleaseFast;
+    const libsolv_dep = b.dependency("libsolv", .{
+        .target = target,
+        .optimize = libsolv_optimize,
+        .ext = true,
+        .zlib = false,
+    });
+    const libsolv = libsolv_dep.artifact("solv");
+    const libsolvext = libsolv_dep.artifact("solvext");
+    const libsolv_include = libsolv.getEmittedIncludeTree();
+    const libsolvext_include = libsolvext.getEmittedIncludeTree();
 
     const build_with_rpm_6x = detectRpm6(b);
     if (build_with_rpm_6x) {
@@ -259,6 +273,7 @@ pub fn build(b: *Build) void {
     repomd_mod.addImport("rpm_pkgfile", rpmzig_pkgfile_mod);
     repomd_mod.addIncludePath(b.path("include"));
     repomd_mod.addIncludePath(b.path("rpmzig"));
+    repomd_mod.addSystemIncludePath(libsolv_include);
 
     const repomd_lib = b.addLibrary(.{
         .name = "tdnfrepomd",
@@ -342,6 +357,8 @@ pub fn build(b: *Build) void {
         mod.addIncludePath(b.path("include"));
         mod.addIncludePath(b.path("solv"));
         mod.addIncludePath(b.path("rpmzig"));
+        mod.addSystemIncludePath(libsolv_include);
+        mod.addSystemIncludePath(libsolvext_include);
         mod.addCSourceFiles(.{
             .root = b.path("solv"),
             .files = &.{ "tdnfpackage.c", "tdnfpool.c", "tdnfquery.c", "tdnfrepo.c", "tdnfrepo_native.c", "simplequery.c" },
@@ -736,6 +753,8 @@ pub fn build(b: *Build) void {
     });
     tdnf_so_mod.addIncludePath(b.path("include"));
     tdnf_so_mod.addIncludePath(b.path("client"));
+    tdnf_so_mod.addSystemIncludePath(libsolv_include);
+    tdnf_so_mod.addSystemIncludePath(libsolvext_include);
     if (build_with_rpm_6x) tdnf_so_mod.addCMacro("BUILD_WITH_RPM_6X", "1");
     if (rpmzig_verify) {
         // TDNF_RPMZIG_VERIFY gates the rpmzig entry point
@@ -778,7 +797,9 @@ pub fn build(b: *Build) void {
     tdnf_so_mod.linkLibrary(rpmzig_lib);
     tdnf_so_mod.linkLibrary(repomd_lib);
     tdnf_so_mod.linkLibrary(download_zig_lib);
-    linkSystem(tdnf_so_mod, &.{ "rpm", "libsolv", "libsolvext", "sqlite3" });
+    tdnf_so_mod.addObjectFile(libsolv.getEmittedBin());
+    tdnf_so_mod.addObjectFile(libsolvext.getEmittedBin());
+    linkSystem(tdnf_so_mod, &.{ "rpm", "sqlite3" });
 
     const libtdnf = b.addLibrary(.{
         .name = "tdnf",
@@ -926,7 +947,10 @@ pub fn build(b: *Build) void {
         test_mod.addImport("rpmdb_test", rpmzig_rpmdb_test_mod);
         test_mod.addIncludePath(b.path("include"));
         test_mod.addIncludePath(b.path("rpmzig"));
-        linkSystem(test_mod, &.{ "libsolv", "libsolvext" });
+        test_mod.addSystemIncludePath(libsolv_include);
+        test_mod.addSystemIncludePath(libsolvext_include);
+        test_mod.addObjectFile(libsolv.getEmittedBin());
+        test_mod.addObjectFile(libsolvext.getEmittedBin());
         const tests = b.addTest(.{ .root_module = test_mod });
         const run_tests = b.addRunArtifact(tests);
         zig_test_step.dependOn(&run_tests.step);

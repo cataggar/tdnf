@@ -6,13 +6,13 @@ const filelists_xml = @import("filelists.zig");
 const other_xml = @import("other.zig");
 const rpmpkg = @import("rpmpkg.zig");
 const rpm_header = @import("rpm_header");
+const solv_bridge = @import("solvbridge.zig");
 
 const c = if (builtin.is_test) @cImport({
     @cDefine("_GNU_SOURCE", "1");
     @cInclude("stdio.h");
     @cInclude("solv/pool.h");
     @cInclude("solv/repo.h");
-    @cInclude("solv/repo_rpmmd.h");
     @cInclude("solv/solvable.h");
     @cInclude("solv/knownid.h");
 }) else struct {};
@@ -644,7 +644,7 @@ test "package metadata and source accessors match primary metadata" {
     defer arena_state.deinit();
     const fixture = try parsePrimaryAccessorFixture(arena_state.allocator());
 
-    var libsolv = try loadLibsolvFixture(fixture.primary_xml, null, null);
+    var libsolv = try loadLibsolvFixture(arena_state.allocator(), &fixture.parsed);
     defer libsolv.deinit();
 
     const pkg_one = fixture.parsed.packages[0];
@@ -974,9 +974,8 @@ const LibsolvFixture = struct {
 };
 
 fn loadLibsolvFixture(
-    primary_text: []const u8,
-    filelists_text: ?[]const u8,
-    other_text: ?[]const u8,
+    allocator: std.mem.Allocator,
+    primary: *const model.ParsedPrimary,
 ) !LibsolvFixture {
     const pool = c.pool_create() orelse return error.OutOfMemory;
     errdefer c.pool_free(pool);
@@ -984,21 +983,19 @@ fn loadLibsolvFixture(
     const repo = c.repo_create(pool, "pkgquery-test") orelse return error.OutOfMemory;
     errdefer c.repo_free(repo, 1);
 
-    try expectLibsolvOk(try loadRpmMd(repo, primary_text, null, 0));
-    if (filelists_text) |text| {
-        try expectLibsolvOk(try loadRpmMd(repo, text, "FL", c.REPO_EXTEND_SOLVABLES));
-    }
-    if (other_text) |text| {
-        try expectLibsolvOk(try loadRpmMd(repo, text, null, c.REPO_EXTEND_SOLVABLES));
-    }
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const repository = model.RepositoryModel{
+        .packages = primary.packages,
+        .relations = primary.relations,
+        .files = primary.files,
+        .changelogs = primary.changelogs,
+        .has_filelists = primary.files.len != 0,
+        .has_other = primary.changelogs.len != 0,
+    };
+    try solv_bridge.buildRepositoryIntoRepo(arena_state.allocator(), @ptrCast(repo), &repository);
 
     return .{ .pool = pool, .repo = repo };
-}
-
-fn loadRpmMd(repo: *c.Repo, xml_text: []const u8, cookie: ?[*:0]const u8, flags: c_int) !c_int {
-    const fp = c.fmemopen(@constCast(xml_text.ptr), xml_text.len, "r") orelse return error.TestExpectedEqual;
-    defer _ = c.fclose(fp);
-    return c.repo_add_rpmmd(repo, fp, cookie, flags);
 }
 
 fn libsolvSourcePackageString(
@@ -1015,10 +1012,14 @@ fn libsolvSourcePackageString(
         std.mem.span(value)
     else
         std.mem.span(c.solvable_lookup_str(solvable, c.SOLVABLE_EVR) orelse return error.TestExpectedEqual);
+    const normalized_source_evr = if (std.mem.startsWith(u8, source_evr, "0:"))
+        source_evr[2..]
+    else
+        source_evr;
     return std.fmt.allocPrint(
         allocator,
         "{s}-{s}.{s}",
-        .{ source_name, source_evr, std.mem.span(source_arch) },
+        .{ source_name, normalized_source_evr, std.mem.span(source_arch) },
     );
 }
 

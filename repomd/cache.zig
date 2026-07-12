@@ -5,15 +5,13 @@ const repomd_xml = @import("repomd.zig");
 const primary_xml = @import("primary.zig");
 const filelists_xml = @import("filelists.zig");
 const other_xml = @import("other.zig");
+const solv_bridge = @import("solvbridge.zig");
 const updateinfo_xml = @import("updateinfo.zig");
 
 const c = if (builtin.is_test) @cImport({
     @cInclude("stdio.h");
     @cInclude("solv/pool.h");
     @cInclude("solv/repo.h");
-    @cInclude("solv/repo_repomdxml.h");
-    @cInclude("solv/repo_rpmmd.h");
-    @cInclude("solv/repo_updateinfoxml.h");
     @cInclude("solv/solvable.h");
     @cInclude("solv/knownid.h");
     @cInclude("solv/queue.h");
@@ -1908,11 +1906,14 @@ fn expectMatchesLibsolv(fixture: *const FixtureRepo, repository: *const model.Re
     const repo = c.repo_create(pool, "native-cache-golden") orelse return error.OutOfMemory;
     defer c.repo_free(repo, 1);
 
-    try expectLibsolvOk(loadRepomd(repo, fixture.path(&repomd_buf, "repomd.xml")));
-    try expectLibsolvOk(loadPrimary(repo, fixture.path(&primary_buf, "repodata/primary.xml")));
-    try expectLibsolvOk(loadFilelists(repo, fixture.path(&filelists_buf, "repodata/filelists.xml")));
-    try expectLibsolvOk(loadOther(repo, fixture.path(&other_buf, "repodata/other.xml")));
-    try expectLibsolvOk(loadUpdateinfo(repo, fixture.path(&updateinfo_buf, "repodata/updateinfo-1.xml")));
+    try expectNativeRepoOk(solv_bridge.TDNFRepoMdNativeLoadSolvRepo(
+        @ptrCast(repo),
+        fixture.path(&repomd_buf, "repomd.xml").ptr,
+        fixture.path(&primary_buf, "repodata/primary.xml").ptr,
+        fixture.path(&filelists_buf, "repodata/filelists.xml").ptr,
+        fixture.path(&updateinfo_buf, "repodata/updateinfo-1.xml").ptr,
+        fixture.path(&other_buf, "repodata/other.xml").ptr,
+    ));
 
     var package_count: usize = 0;
     var advisory_count: usize = 0;
@@ -1962,43 +1963,13 @@ fn expectMatchesLibsolv(fixture: *const FixtureRepo, repository: *const model.Re
     try testing.expect(found_advisory);
 }
 
-fn expectLibsolvOk(rc: c_int) !void {
-    try std.testing.expectEqual(@as(c_int, 0), rc);
+fn expectNativeRepoOk(rc: u32) !void {
+    try std.testing.expectEqual(@as(u32, 0), rc);
 }
 
 fn libsolvChecksumKind(raw: []const u8) []const u8 {
     const index = std.mem.lastIndexOfScalar(u8, raw, ':') orelse return raw;
     return raw[index + 1 ..];
-}
-
-fn loadRepomd(repo: *c.Repo, path: [:0]const u8) c_int {
-    const fp = c.fopen(path, "r") orelse return -1;
-    defer _ = c.fclose(fp);
-    return c.repo_add_repomdxml(repo, fp, 0);
-}
-
-fn loadPrimary(repo: *c.Repo, path: [:0]const u8) c_int {
-    const fp = c.fopen(path, "r") orelse return -1;
-    defer _ = c.fclose(fp);
-    return c.repo_add_rpmmd(repo, fp, null, 0);
-}
-
-fn loadFilelists(repo: *c.Repo, path: [:0]const u8) c_int {
-    const fp = c.fopen(path, "r") orelse return -1;
-    defer _ = c.fclose(fp);
-    return c.repo_add_rpmmd(repo, fp, "FL", c.REPO_EXTEND_SOLVABLES);
-}
-
-fn loadOther(repo: *c.Repo, path: [:0]const u8) c_int {
-    const fp = c.fopen(path, "r") orelse return -1;
-    defer _ = c.fclose(fp);
-    return c.repo_add_rpmmd(repo, fp, null, c.REPO_EXTEND_SOLVABLES);
-}
-
-fn loadUpdateinfo(repo: *c.Repo, path: [:0]const u8) c_int {
-    const fp = c.fopen(path, "r") orelse return -1;
-    defer _ = c.fclose(fp);
-    return c.repo_add_updateinfoxml(repo, fp, 0);
 }
 
 fn writeU16At(bytes: []u8, offset: usize, value: u16) void {
