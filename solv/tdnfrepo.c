@@ -8,206 +8,7 @@
  */
 
 #include "includes.h"
-
-static uint32_t
-SolvReadYumRepoLegacy(
-    Repo *pRepo,
-    const char *pszRepomd,
-    const char *pszPrimary,
-    const char *pszFilelists,
-    const char *pszUpdateinfo,
-    const char *pszOther
-    );
-
-#ifdef TDNF_NATIVE_REPOMD_CROSSCHECK
-static void
-SolvCrosscheckYumRepoWithNative(
-    const char *pszRepoName,
-    const char *pszRepomd,
-    const char *pszPrimary,
-    const char *pszFilelists,
-    const char *pszUpdateinfo,
-    const char *pszOther
-    );
-#endif
-
-uint32_t
-SolvLoadRepomd(
-    Repo* pRepo,
-    const char* pszRepomd
-    )
-{
-    uint32_t dwError = 0;
-    FILE *fp = NULL;
-    if( !pRepo || IsNullOrEmptyString(pszRepomd))
-    {
-        dwError = ERROR_TDNF_INVALID_PARAMETER;
-        BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
-    }
-
-    fp = fopen(pszRepomd, "r");
-    if (fp == NULL)
-    {
-        dwError = ERROR_TDNF_SOLV_IO;
-        BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
-    }
-    if (repo_add_repomdxml(pRepo, fp, 0))
-    {
-        dwError = ERROR_TDNF_SOLV_IO;
-        BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
-    }
-cleanup:
-    if(fp != NULL)
-    {
-        fclose(fp);
-    }
-    return dwError;
-
-error:
-    goto cleanup;
-}
-
-uint32_t
-SolvLoadRepomdPrimary(
-    Repo* pRepo,
-    const char* pszPrimary
-    )
-{
-    uint32_t dwError = 0;
-    FILE *fp = NULL;
-    if( !pRepo || IsNullOrEmptyString(pszPrimary))
-    {
-        dwError = ERROR_TDNF_INVALID_PARAMETER;
-        BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
-    }
-
-    fp = solv_xfopen(pszPrimary, "r");
-    if (fp == NULL)
-    {
-        dwError = ERROR_TDNF_SOLV_IO;
-        BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
-    }
-    if (repo_add_rpmmd(pRepo, fp, 0, 0))
-    {
-        dwError = ERROR_TDNF_SOLV_IO;
-        BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
-    }
-cleanup:
-    if(fp != NULL)
-    {
-        fclose(fp);
-    }
-    return dwError;
-
-error:
-    goto cleanup;
-
-}
-
-uint32_t
-SolvLoadRepomdFilelists(
-    Repo* pRepo,
-    const char* pszFilelists
-    )
-{
-    uint32_t dwError = 0;
-    FILE *fp = NULL;
-    if(!pRepo || IsNullOrEmptyString(pszFilelists))
-    {
-        dwError = ERROR_TDNF_INVALID_PARAMETER;
-        BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
-    }
-    fp = solv_xfopen(pszFilelists, "r");
-    if (fp == NULL)
-    {
-        dwError = ERROR_TDNF_SOLV_IO;
-        BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
-    }
-    if (repo_add_rpmmd(pRepo, fp, "FL", REPO_EXTEND_SOLVABLES))
-    {
-        dwError = ERROR_TDNF_SOLV_FAILED;
-        BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
-    }
-cleanup:
-    if(fp != NULL)
-        fclose(fp);
-    return dwError;
-
-error:
-    goto cleanup;
-}
-
-uint32_t
-SolvLoadRepomdUpdateinfo(
-    Repo* pRepo,
-    const char* pszUpdateinfo
-    )
-{
-    uint32_t dwError = 0;
-    FILE *fp = NULL;
-    if( !pRepo || IsNullOrEmptyString(pszUpdateinfo))
-    {
-        dwError = ERROR_TDNF_INVALID_PARAMETER;
-        BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
-    }
-    fp = solv_xfopen(pszUpdateinfo, "r");
-    if (fp == NULL)
-    {
-        dwError = ERROR_TDNF_SOLV_IO;
-        BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
-    }
-    if (repo_add_updateinfoxml(pRepo, fp, 0))
-    {
-        dwError = ERROR_TDNF_SOLV_IO;
-        BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
-    }
-cleanup:
-    if(fp != NULL)
-    {
-        fclose(fp);
-    }
-    return dwError;
-
-error:
-    goto cleanup;
-}
-
-static uint32_t
-SolvLoadRepomdOther(
-    Repo* pRepo,
-    const char* pszOther
-    )
-{
-    uint32_t dwError = 0;
-    FILE *fp = NULL;
-    if( !pRepo || IsNullOrEmptyString(pszOther))
-    {
-        dwError = ERROR_TDNF_INVALID_PARAMETER;
-        BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
-    }
-
-    fp = solv_xfopen(pszOther, "r");
-    if (fp == NULL)
-    {
-        dwError = ERROR_TDNF_SOLV_IO;
-        BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
-    }
-    if (repo_add_rpmmd(pRepo, fp, 0, REPO_EXTEND_SOLVABLES))
-    {
-        dwError = ERROR_TDNF_SOLV_IO;
-        BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
-    }
-cleanup:
-    if(fp != NULL)
-    {
-        fclose(fp);
-    }
-    return dwError;
-
-error:
-    goto cleanup;
-
-}
+#include <rpmdb.h>
 
 uint32_t
 SolvReadYumRepo(
@@ -228,7 +29,7 @@ SolvReadYumRepo(
         BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
     }
 
-    dwError = SolvReadYumRepoLegacy(
+    dwError = SolvReadYumRepoNative(
                   pRepo,
                   pszRepomd,
                   pszPrimary,
@@ -237,17 +38,6 @@ SolvReadYumRepo(
                   pszOther);
     BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
 
-#ifdef TDNF_NATIVE_REPOMD_CROSSCHECK
-    SolvCrosscheckYumRepoWithNative(
-        pszRepoName,
-        pszRepomd,
-        pszPrimary,
-        pszFilelists,
-        pszUpdateinfo,
-        pszOther);
-#endif
-
-
 cleanup:
 
     return dwError;
@@ -255,163 +45,6 @@ cleanup:
 error:
     goto cleanup;
 }
-
-static uint32_t
-SolvReadYumRepoLegacy(
-    Repo *pRepo,
-    const char *pszRepomd,
-    const char *pszPrimary,
-    const char *pszFilelists,
-    const char *pszUpdateinfo,
-    const char *pszOther
-    )
-{
-    uint32_t dwError = 0;
-
-    dwError = SolvLoadRepomd(pRepo, pszRepomd);
-    BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
-
-    dwError = SolvLoadRepomdPrimary(pRepo, pszPrimary);
-    BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
-
-    if(pszFilelists)
-    {
-        dwError = SolvLoadRepomdFilelists(pRepo, pszFilelists);
-        BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
-    }
-
-    if(pszUpdateinfo)
-    {
-        dwError = SolvLoadRepomdUpdateinfo(pRepo, pszUpdateinfo);
-        BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
-    }
-
-    if(pszOther)
-    {
-        dwError = SolvLoadRepomdOther(pRepo, pszOther);
-        BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
-    }
-
-cleanup:
-    return dwError;
-
-error:
-    goto cleanup;
-}
-
-#ifdef TDNF_NATIVE_REPOMD_CROSSCHECK
-static void
-SolvCrosscheckYumRepoWithNative(
-    const char *pszRepoName,
-    const char *pszRepomd,
-    const char *pszPrimary,
-    const char *pszFilelists,
-    const char *pszUpdateinfo,
-    const char *pszOther
-    )
-{
-    Pool *pPool = NULL;
-    Repo *pLegacy = NULL;
-    Repo *pNative = NULL;
-    char *pszLegacyBytes = NULL;
-    char *pszNativeBytes = NULL;
-    size_t nLegacySize = 0;
-    size_t nNativeSize = 0;
-    uint32_t dwError = 0;
-
-    pPool = pool_create();
-    if(!pPool)
-    {
-        pr_err("native repomd crosscheck: repo '%s' failed to create a temporary pool\n",
-               pszRepoName ? pszRepoName : "(unknown)");
-        goto cleanup;
-    }
-
-    pLegacy = repo_create(pPool, pszRepoName ? pszRepoName : "native-repomd-crosscheck");
-    pNative = repo_create(pPool, pszRepoName ? pszRepoName : "native-repomd-crosscheck");
-    if(!pLegacy || !pNative)
-    {
-        pr_err("native repomd crosscheck: repo '%s' failed to create temporary repos\n",
-               pszRepoName ? pszRepoName : "(unknown)");
-        goto cleanup;
-    }
-
-    dwError = SolvReadYumRepoLegacy(
-                  pLegacy,
-                  pszRepomd,
-                  pszPrimary,
-                  pszFilelists,
-                  pszUpdateinfo,
-                  pszOther);
-    if(dwError)
-    {
-        pr_err("native repomd crosscheck: repo '%s' failed to load the legacy comparison repo (%u)\n",
-               pszRepoName ? pszRepoName : "(unknown)",
-               dwError);
-        goto cleanup;
-    }
-
-    dwError = SolvReadYumRepoNative(
-                  pNative,
-                  pszRepomd,
-                  pszPrimary,
-                  pszFilelists,
-                  pszUpdateinfo,
-                  pszOther);
-    if(dwError)
-    {
-        pr_err("native repomd crosscheck: repo '%s' failed to load the native comparison repo (%u): %s\n",
-               pszRepoName ? pszRepoName : "(unknown)",
-               dwError,
-               TDNFRepoMdNativeLastError());
-        goto cleanup;
-    }
-
-    dwError = SolvSerializeRepo(pLegacy, &pszLegacyBytes, &nLegacySize);
-    if(dwError)
-    {
-        pr_err("native repomd crosscheck: repo '%s' failed to serialize the legacy comparison repo (%u)\n",
-               pszRepoName ? pszRepoName : "(unknown)",
-               dwError);
-        goto cleanup;
-    }
-
-    dwError = SolvSerializeRepo(pNative, &pszNativeBytes, &nNativeSize);
-    if(dwError)
-    {
-        pr_err("native repomd crosscheck: repo '%s' failed to serialize the native comparison repo (%u)\n",
-               pszRepoName ? pszRepoName : "(unknown)",
-               dwError);
-        goto cleanup;
-    }
-
-    if(nLegacySize != nNativeSize ||
-       !pszLegacyBytes ||
-       !pszNativeBytes ||
-       memcmp(pszLegacyBytes, pszNativeBytes, nLegacySize))
-    {
-        pr_err("native repomd crosscheck: repo '%s' serialized repo mismatch legacy_size=%zu native_size=%zu\n",
-               pszRepoName ? pszRepoName : "(unknown)",
-               nLegacySize,
-               nNativeSize);
-        SolvLogNativeRepoMismatch(pszRepoName, pLegacy, pNative, 0);
-    }
-
-cleanup:
-    if(pszLegacyBytes)
-    {
-        free(pszLegacyBytes);
-    }
-    if(pszNativeBytes)
-    {
-        free(pszNativeBytes);
-    }
-    if(pPool)
-    {
-        pool_free(pPool);
-    }
-}
-#endif
 
 uint32_t
 SolvCountPackages(
@@ -486,18 +119,12 @@ readRpmsFromDir(
             dwError = readRpmsFromDir(pRepo, pszPath);
             BAIL_ON_TDNF_ERROR(dwError);
         } else if (strcmp(&pEnt->d_name[strlen(pEnt->d_name)-4], ".rpm") == 0) {
-            if(!repo_add_rpm(pRepo,
-                             pszPath,
-                             REPO_REUSE_REPODATA|REPO_NO_INTERNALIZE)) {
-                dwError = ERROR_TDNF_INVALID_PARAMETER;
-                BAIL_ON_TDNF_ERROR(dwError);
-            }
-#ifdef TDNF_NATIVE_RPM_CROSSCHECK
-            SolvCrosscheckRpmPathWithNative(
-                "native local-rpm crosscheck",
-                pszPath,
-                REPO_REUSE_REPODATA|REPO_NO_INTERNALIZE);
-#endif
+            dwError = SolvAddRpmNative(
+                          pRepo,
+                          pszPath,
+                          REPO_REUSE_REPODATA|REPO_NO_INTERNALIZE,
+                          NULL);
+            BAIL_ON_TDNF_ERROR(dwError);
         }
         TDNF_SAFE_FREE_MEMORY(pszPath);
     }
@@ -511,6 +138,319 @@ cleanup:
 
 error:
     goto cleanup;
+}
+
+static uint32_t
+SolvGetInstalledRepoCachePath(
+    const char *pszCacheDir,
+    const char *pszFileName,
+    char **ppszPath
+    )
+{
+    uint32_t dwError = 0;
+    char *pszSolvCacheDir = NULL;
+    char *pszPath = NULL;
+
+    if(ppszPath)
+    {
+        *ppszPath = NULL;
+    }
+
+    if(IsNullOrEmptyString(pszCacheDir) ||
+       IsNullOrEmptyString(pszFileName) ||
+       !ppszPath)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    dwError = TDNFJoinPath(
+                  &pszSolvCacheDir,
+                  pszCacheDir,
+                  TDNF_SOLVCACHE_DIR_NAME,
+                  NULL);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    dwError = TDNFJoinPath(
+                  &pszPath,
+                  pszSolvCacheDir,
+                  pszFileName,
+                  NULL);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    *ppszPath = pszPath;
+
+cleanup:
+    TDNF_SAFE_FREE_MEMORY(pszSolvCacheDir);
+    return dwError;
+
+error:
+    TDNF_SAFE_FREE_MEMORY(pszPath);
+    goto cleanup;
+}
+
+static void
+SolvTrimLineEnding(
+    char *pszValue
+    )
+{
+    size_t nLen = 0;
+
+    if(IsNullOrEmptyString(pszValue))
+    {
+        return;
+    }
+
+    nLen = strlen(pszValue);
+    while(nLen > 0 &&
+          (pszValue[nLen - 1] == '\n' || pszValue[nLen - 1] == '\r'))
+    {
+        pszValue[--nLen] = '\0';
+    }
+}
+
+static int
+SolvUseInstalledRepoCache(
+    Repo *pRepo,
+    const char *pszCacheDir,
+    const char *pszCookie
+    )
+{
+    uint32_t dwError = 0;
+    FILE *pSolvFile = NULL;
+    FILE *pCookieFile = NULL;
+    char *pszSolvPath = NULL;
+    char *pszCookiePath = NULL;
+    char szCookie[128] = {0};
+    int nUseInstalledCache = 0;
+
+    if(!pRepo ||
+       IsNullOrEmptyString(pszCacheDir) ||
+       IsNullOrEmptyString(pszCookie))
+    {
+        goto cleanup;
+    }
+
+    dwError = SolvGetInstalledRepoCachePath(
+                  pszCacheDir,
+                  SYSTEM_REPO_NAME ".solv",
+                  &pszSolvPath);
+    if(dwError)
+    {
+        goto cleanup;
+    }
+
+    dwError = SolvGetInstalledRepoCachePath(
+                  pszCacheDir,
+                  SYSTEM_REPO_NAME ".cookie",
+                  &pszCookiePath);
+    if(dwError)
+    {
+        goto cleanup;
+    }
+
+    pCookieFile = fopen(pszCookiePath, "r");
+    if(!pCookieFile)
+    {
+        goto cleanup;
+    }
+    if(!fgets(szCookie, sizeof(szCookie), pCookieFile))
+    {
+        goto cleanup;
+    }
+    SolvTrimLineEnding(szCookie);
+
+    if(strcmp(szCookie, pszCookie))
+    {
+        goto cleanup;
+    }
+
+    pSolvFile = fopen(pszSolvPath, "r");
+    if(!pSolvFile)
+    {
+        goto cleanup;
+    }
+
+    if(repo_add_solv(pRepo, pSolvFile, 0))
+    {
+        repo_empty(pRepo, 1);
+        if(!IsNullOrEmptyString(pszSolvPath))
+        {
+            unlink(pszSolvPath);
+        }
+        if(!IsNullOrEmptyString(pszCookiePath))
+        {
+            unlink(pszCookiePath);
+        }
+        goto cleanup;
+    }
+
+    nUseInstalledCache = 1;
+
+cleanup:
+    if(pSolvFile)
+    {
+        fclose(pSolvFile);
+    }
+    if(pCookieFile)
+    {
+        fclose(pCookieFile);
+    }
+    TDNF_SAFE_FREE_MEMORY(pszSolvPath);
+    TDNF_SAFE_FREE_MEMORY(pszCookiePath);
+    return nUseInstalledCache;
+}
+
+static void
+SolvCreateInstalledRepoCache(
+    Repo *pRepo,
+    const char *pszCacheDir,
+    const char *pszCookie
+    )
+{
+    uint32_t dwError = 0;
+    FILE *pSolvFile = NULL;
+    FILE *pCookieFile = NULL;
+    char *pszSolvCacheDir = NULL;
+    char *pszSolvPath = NULL;
+    char *pszCookiePath = NULL;
+    char *pszTempSolvFile = NULL;
+    int fd = -1;
+    mode_t mask = 0;
+
+    if(!pRepo ||
+       IsNullOrEmptyString(pszCacheDir) ||
+       IsNullOrEmptyString(pszCookie))
+    {
+        goto cleanup;
+    }
+
+    dwError = TDNFJoinPath(
+                  &pszSolvCacheDir,
+                  pszCacheDir,
+                  TDNF_SOLVCACHE_DIR_NAME,
+                  NULL);
+    if(dwError)
+    {
+        goto cleanup;
+    }
+
+    if(access(pszSolvCacheDir, W_OK | X_OK))
+    {
+        if(errno != ENOENT)
+        {
+            goto cleanup;
+        }
+
+        dwError = TDNFUtilsMakeDirs(pszSolvCacheDir);
+        if(dwError == ERROR_TDNF_ALREADY_EXISTS)
+        {
+            dwError = 0;
+        }
+        if(dwError)
+        {
+            goto cleanup;
+        }
+    }
+
+    dwError = SolvGetInstalledRepoCachePath(
+                  pszCacheDir,
+                  SYSTEM_REPO_NAME ".solv",
+                  &pszSolvPath);
+    if(dwError)
+    {
+        goto cleanup;
+    }
+
+    dwError = SolvGetInstalledRepoCachePath(
+                  pszCacheDir,
+                  SYSTEM_REPO_NAME ".cookie",
+                  &pszCookiePath);
+    if(dwError)
+    {
+        goto cleanup;
+    }
+
+    pszTempSolvFile = solv_dupjoin(pszSolvCacheDir, "/", ".newsolv-XXXXXX");
+    if(!pszTempSolvFile)
+    {
+        goto cleanup;
+    }
+
+    mask = umask(S_IRUSR | S_IWUSR | S_IRWXG);
+    umask(mask);
+    fd = mkstemp(pszTempSolvFile);
+    if(fd < 0)
+    {
+        goto cleanup;
+    }
+
+    fchmod(fd, 0444);
+    pSolvFile = fdopen(fd, "w");
+    if(!pSolvFile)
+    {
+        close(fd);
+        fd = -1;
+        goto cleanup;
+    }
+    fd = -1;
+
+    if(repo_write(pRepo, pSolvFile))
+    {
+        goto cleanup;
+    }
+
+    if(fclose(pSolvFile))
+    {
+        pSolvFile = NULL;
+        goto cleanup;
+    }
+    pSolvFile = NULL;
+
+    if(rename(pszTempSolvFile, pszSolvPath) == -1)
+    {
+        goto cleanup;
+    }
+    unlink(pszTempSolvFile);
+
+    pCookieFile = fopen(pszCookiePath, "w");
+    if(!pCookieFile)
+    {
+        goto cleanup;
+    }
+    if(fputs(pszCookie, pCookieFile) == EOF ||
+       fputc('\n', pCookieFile) == EOF)
+    {
+        goto cleanup;
+    }
+    fclose(pCookieFile);
+    pCookieFile = NULL;
+
+cleanup:
+    if(pCookieFile)
+    {
+        fclose(pCookieFile);
+    }
+    if(pSolvFile)
+    {
+        fclose(pSolvFile);
+        if(!IsNullOrEmptyString(pszTempSolvFile))
+        {
+            unlink(pszTempSolvFile);
+        }
+    }
+    else if(fd >= 0)
+    {
+        close(fd);
+        if(!IsNullOrEmptyString(pszTempSolvFile))
+        {
+            unlink(pszTempSolvFile);
+        }
+    }
+    TDNF_SAFE_FREE_MEMORY(pszTempSolvFile);
+    TDNF_SAFE_FREE_MEMORY(pszSolvCacheDir);
+    TDNF_SAFE_FREE_MEMORY(pszSolvPath);
+    TDNF_SAFE_FREE_MEMORY(pszCookiePath);
 }
 
 uint32_t
@@ -545,43 +485,43 @@ SolvReadInstalledRpms(
     )
 {
     uint32_t dwError = 0;
-    FILE *pCacheFile = NULL;
+    const char *pszRootDir = NULL;
+    char *pszCookie = NULL;
     int  dwFlags = 0;
+    int nUseInstalledCache = 0;
 
-    if(!pRepo)
+    if(!pRepo || !pRepo->pool)
     {
         dwError = ERROR_TDNF_INVALID_PARAMETER;
         BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
     }
 
-    if(pszCacheFileName && access(pszCacheFileName, F_OK) == 0)
+    pszRootDir = pool_get_rootdir(pRepo->pool);
+    if(!IsNullOrEmptyString(pszCacheFileName))
     {
-        /* coverity[toctou] */
-        pCacheFile = fopen(pszCacheFileName, "r");
+        pszCookie = tdnf_rpmdb_cookie(pszRootDir);
+        nUseInstalledCache = SolvUseInstalledRepoCache(
+                                 pRepo,
+                                 pszCacheFileName,
+                                 pszCookie);
+    }
 
-        if(!pCacheFile)
-        {
-            dwError = errno;
-            BAIL_ON_TDNF_SYSTEM_ERROR(dwError);
-        }
+    if(nUseInstalledCache)
+    {
+        goto cleanup;
     }
 
     dwFlags = REPO_REUSE_REPODATA | RPM_ADD_WITH_HDRID | REPO_USE_ROOTDIR;
-    dwError = repo_add_rpmdb_reffp(pRepo, pCacheFile, dwFlags);
+    dwError = SolvReadInstalledRpmsNative(pRepo, pszRootDir, dwFlags);
+    BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
 
-    if (dwError)
-    {
-        dwError = ERROR_TDNF_SOLV_IO;
-        BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
-    }
-
-#ifdef TDNF_NATIVE_RPM_CROSSCHECK
-    SolvCrosscheckInstalledRpmsWithNative(pRepo, pszCacheFileName, dwFlags);
-#endif
+    SolvCreateInstalledRepoCache(pRepo, pszCacheFileName, pszCookie);
 
 cleanup:
-    if (pCacheFile)
-        fclose(pCacheFile);
+    if(pszCookie)
+    {
+        tdnf_rpmdb_string_free(pszCookie);
+    }
     return dwError;
 
 error:
