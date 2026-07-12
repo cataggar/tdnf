@@ -829,6 +829,12 @@ TDNFAddCmdLinePackages(
             dwError = ERROR_TDNF_INVALID_PARAMETER;
             BAIL_ON_TDNF_ERROR(dwError);
         }
+#ifdef TDNF_NATIVE_RPM_CROSSCHECK
+        SolvCrosscheckRpmPathWithNative(
+            "native cmdline-rpm crosscheck",
+            pszRPMPath,
+            REPO_REUSE_REPODATA|REPO_NO_INTERNALIZE|RPM_ADD_WITH_HDRID|RPM_ADD_WITH_SHA256SUM);
+#endif
         queue_push(pQueueGoal, id);
     }
 

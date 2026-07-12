@@ -1,5 +1,6 @@
 #define _GNU_SOURCE 1
 #include "includes.h"
+#include <rpmdb.h>
 
 static int
 SolvNativeIsAdvisory(
@@ -46,9 +47,11 @@ SolvNativeCompareNumField(
     );
 
 static int
-SolvNativeCompareChecksum(
+SolvNativeCompareChecksumField(
     Solvable *pLegacy,
     Solvable *pNative,
+    Id dwKeyName,
+    const char *pszField,
     const char *pszRepoName
     );
 
@@ -147,6 +150,14 @@ SolvNativePoolIdToStr(
     Id dwId
     );
 
+static uint32_t
+SolvAddRpmLegacy(
+    Repo *pRepo,
+    const char *pszPath,
+    int dwFlags,
+    Id *pdwSolvableId
+    );
+
 uint32_t
 SolvReadYumRepoNative(
     Repo *pRepo,
@@ -231,11 +242,837 @@ error:
     goto cleanup;
 }
 
+uint32_t
+SolvReadInstalledRpmsNative(
+    Repo* pRepo,
+    const char *pszRootDir,
+    int dwFlags
+    )
+{
+    uint32_t dwError = 0;
+
+    if(!pRepo)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
+    }
+
+    dwError = TDNFRepoMdNativeLoadInstalledSolvRepo(pRepo, pszRootDir, dwFlags);
+    BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
+
+cleanup:
+    return dwError;
+
+error:
+    goto cleanup;
+}
+
+uint32_t
+SolvAddRpmNative(
+    Repo *pRepo,
+    const char *pszPath,
+    int dwFlags,
+    Id *pdwSolvableId
+    )
+{
+    uint32_t dwError = 0;
+    uint32_t dwSolvableId = 0;
+
+    if(pdwSolvableId)
+    {
+        *pdwSolvableId = 0;
+    }
+
+    if(!pRepo || IsNullOrEmptyString(pszPath))
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
+    }
+
+    dwError = TDNFRepoMdNativeAddRpm(pRepo, pszPath, dwFlags, &dwSolvableId);
+    BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
+
+    if(pdwSolvableId)
+    {
+        *pdwSolvableId = (Id)dwSolvableId;
+    }
+
+cleanup:
+    return dwError;
+
+error:
+    goto cleanup;
+}
+
+static uint32_t
+SolvAddRpmLegacy(
+    Repo *pRepo,
+    const char *pszPath,
+    int dwFlags,
+    Id *pdwSolvableId
+    )
+{
+    uint32_t dwError = 0;
+    Id dwSolvableId = 0;
+
+    if(pdwSolvableId)
+    {
+        *pdwSolvableId = 0;
+    }
+
+    if(!pRepo || IsNullOrEmptyString(pszPath))
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
+    }
+
+    dwSolvableId = repo_add_rpm(pRepo, pszPath, dwFlags);
+    if(!dwSolvableId)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
+    }
+
+    if(pdwSolvableId)
+    {
+        *pdwSolvableId = dwSolvableId;
+    }
+
+cleanup:
+    return dwError;
+
+error:
+    goto cleanup;
+}
+
+static void
+SolvLogNativeCrosscheckSuccess(
+    const char *pszPrefix,
+    const char *pszRepoName,
+    Repo *pRepo,
+    int nFocusedComparison
+    )
+{
+    uint32_t dwPackages = 0;
+    uint32_t dwAdvisories = 0;
+    uint32_t dwError = 0;
+    const char *pszLogFile = getenv("TDNF_NATIVE_CROSSCHECK_LOGFILE");
+    FILE *pLog = NULL;
+    char *pszMessage = NULL;
+
+    if(IsNullOrEmptyString(pszLogFile))
+    {
+        return;
+    }
+
+    SolvNativeCountRepoKinds(pRepo, &dwPackages, &dwAdvisories);
+
+    dwError = TDNFAllocateStringPrintf(
+                  &pszMessage,
+                  "%s: repo '%s' compared %u package(s)%s with no mismatches\n",
+                  pszPrefix ? pszPrefix : "native crosscheck",
+                  pszRepoName ? pszRepoName : "(unknown)",
+                  dwPackages,
+                  nFocusedComparison ? " after focused comparison" : "");
+    if(!dwError && pszMessage)
+    {
+        pLog = fopen(pszLogFile, "a");
+        if(pLog)
+        {
+            fputs(pszMessage, pLog);
+            fclose(pLog);
+            pLog = NULL;
+        }
+    }
+
+    if(pLog)
+    {
+        fclose(pLog);
+    }
+    TDNF_SAFE_FREE_MEMORY(pszMessage);
+    (void)dwAdvisories;
+}
+
+static int
+SolvInstalledCrosscheckShouldRun(
+    const char *pszRootDir,
+    const char *pszStateFile,
+    char **ppszCookie
+    )
+{
+    FILE *pState = NULL;
+    char *pszCookie = NULL;
+    char szStateCookie[256] = {0};
+    int nShouldRun = 1;
+
+    if(ppszCookie)
+    {
+        *ppszCookie = NULL;
+    }
+
+    pszCookie = tdnf_rpmdb_cookie(pszRootDir);
+    if(ppszCookie)
+    {
+        *ppszCookie = pszCookie;
+    }
+
+    if(IsNullOrEmptyString(pszStateFile) || IsNullOrEmptyString(pszCookie))
+    {
+        return 1;
+    }
+
+    pState = fopen(pszStateFile, "r");
+    if(!pState)
+    {
+        return 1;
+    }
+
+    if(fgets(szStateCookie, sizeof(szStateCookie), pState))
+    {
+        size_t nLen = strlen(szStateCookie);
+
+        while(nLen > 0 &&
+              (szStateCookie[nLen - 1] == '\n' || szStateCookie[nLen - 1] == '\r'))
+        {
+            szStateCookie[--nLen] = '\0';
+        }
+        if(szStateCookie[0] &&
+           !strcmp(szStateCookie, pszCookie))
+        {
+            nShouldRun = 0;
+        }
+    }
+
+    fclose(pState);
+    return nShouldRun;
+}
+
+static void
+SolvInstalledCrosscheckUpdateState(
+    const char *pszStateFile,
+    const char *pszCookie
+    )
+{
+    FILE *pState = NULL;
+
+    if(IsNullOrEmptyString(pszStateFile) || IsNullOrEmptyString(pszCookie))
+    {
+        return;
+    }
+
+    pState = fopen(pszStateFile, "w");
+    if(!pState)
+    {
+        return;
+    }
+
+    fputs(pszCookie, pState);
+    fclose(pState);
+}
+
+static uint32_t
+SolvGetInstalledCrosscheckStateFile(
+    const char *pszCachePath,
+    char **ppszStateFile
+    )
+{
+    uint32_t dwError = 0;
+    int nIsDir = 0;
+
+    if(ppszStateFile)
+    {
+        *ppszStateFile = NULL;
+    }
+
+    if(IsNullOrEmptyString(pszCachePath) || !ppszStateFile)
+    {
+        goto cleanup;
+    }
+
+    dwError = TDNFIsDir(pszCachePath, &nIsDir);
+    if(dwError == ERROR_TDNF_FILE_NOT_FOUND)
+    {
+        dwError = 0;
+        nIsDir = 0;
+    }
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    if(nIsDir)
+    {
+        dwError = TDNFJoinPath(
+                      ppszStateFile,
+                      pszCachePath,
+                      SYSTEM_REPO_NAME ".native-crosscheck.cookie",
+                      NULL);
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+    else
+    {
+        dwError = TDNFAllocateStringPrintf(
+                      ppszStateFile,
+                      "%s.native-crosscheck.cookie",
+                      pszCachePath);
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+cleanup:
+    return dwError;
+
+error:
+    goto cleanup;
+}
+
+static Id
+SolvNativeFindMatchingSolvableByStrings(
+    Repo *pRepo,
+    const char *pszName,
+    const char *pszArch,
+    const char *pszEvr,
+    int nAdvisory
+    )
+{
+    Id p = 0;
+    Solvable *pSolv = NULL;
+
+    if(!pRepo || !pRepo->pool)
+    {
+        return 0;
+    }
+
+    FOR_REPO_SOLVABLES(pRepo, p, pSolv)
+    {
+        if(SolvNativeIsAdvisory(pRepo->pool, pSolv) != nAdvisory)
+        {
+            continue;
+        }
+        if(SolvNativeStringsEqual(pool_id2str(pRepo->pool, pSolv->name), pszName) &&
+           SolvNativeStringsEqual(pool_id2str(pRepo->pool, pSolv->arch), pszArch) &&
+           SolvNativeStringsEqual(pool_id2str(pRepo->pool, pSolv->evr), pszEvr))
+        {
+            return p;
+        }
+    }
+
+    return 0;
+}
+
+static int
+SolvNativeCompareChecksumFieldCrossPool(
+    Solvable *pLegacy,
+    Solvable *pNative,
+    Id dwKeyName,
+    const char *pszField,
+    const char *pszPrefix,
+    const char *pszRepoName
+    )
+{
+    Id dwLegacyType = 0;
+    Id dwNativeType = 0;
+    const char *pszLegacy = solvable_lookup_checksum(pLegacy, dwKeyName, &dwLegacyType);
+    const char *pszNative = solvable_lookup_checksum(pNative, dwKeyName, &dwNativeType);
+    const char *pszLegacyType = dwLegacyType ? pool_id2str(pLegacy->repo->pool, dwLegacyType) : NULL;
+    const char *pszNativeType = dwNativeType ? pool_id2str(pNative->repo->pool, dwNativeType) : NULL;
+
+    if(!SolvNativeStringsEqual(pszLegacy, pszNative) ||
+       !SolvNativeStringsEqual(pszLegacyType, pszNativeType))
+    {
+        pr_err("%s: repo '%s' %s mismatch legacy=%s/%s native=%s/%s\n",
+               pszPrefix ? pszPrefix : "native rpmdb crosscheck",
+               pszRepoName ? pszRepoName : "(unknown)",
+               pszField,
+               pszLegacyType ? pszLegacyType : "(null)",
+               pszLegacy ? pszLegacy : "(null)",
+               pszNativeType ? pszNativeType : "(null)",
+               pszNative ? pszNative : "(null)");
+        return 1;
+    }
+
+    return 0;
+}
+
+static int
+SolvNativeCompareNumFieldCrossPool(
+    Repo *pLegacy,
+    Id dwLegacy,
+    Repo *pNative,
+    Id dwNative,
+    Id dwKeyName,
+    const char *pszField,
+    const char *pszPrefix,
+    const char *pszRepoName
+    )
+{
+    unsigned long long nLegacy = repo_lookup_num(pLegacy, dwLegacy, dwKeyName, 0);
+    unsigned long long nNative = repo_lookup_num(pNative, dwNative, dwKeyName, 0);
+
+    if(nLegacy != nNative)
+    {
+        pr_err("%s: repo '%s' %s mismatch legacy=%llu native=%llu\n",
+               pszPrefix ? pszPrefix : "native rpmdb crosscheck",
+               pszRepoName ? pszRepoName : "(unknown)",
+               pszField,
+               nLegacy,
+               nNative);
+        return 1;
+    }
+
+    return 0;
+}
+
+static int
+SolvNativeCompareIdArraySampleCrossPool(
+    Repo *pLegacy,
+    Id dwLegacy,
+    Repo *pNative,
+    Id dwNative,
+    Id dwKeyName,
+    const char *pszField,
+    const char *pszPrefix,
+    const char *pszRepoName
+    )
+{
+    Queue qLegacy = {0};
+    Queue qNative = {0};
+    const char *pszLegacyFirst = "(empty)";
+    const char *pszNativeFirst = "(empty)";
+    int nMismatch = 0;
+
+    queue_init(&qLegacy);
+    queue_init(&qNative);
+
+    repo_lookup_idarray(pLegacy, dwLegacy, dwKeyName, &qLegacy);
+    repo_lookup_idarray(pNative, dwNative, dwKeyName, &qNative);
+
+    if(qLegacy.count > 0)
+    {
+        pszLegacyFirst = pool_dep2str(pLegacy->pool, qLegacy.elements[0]);
+    }
+    if(qNative.count > 0)
+    {
+        pszNativeFirst = pool_dep2str(pNative->pool, qNative.elements[0]);
+    }
+
+    if(qLegacy.count != qNative.count ||
+       !SolvNativeStringsEqual(pszLegacyFirst, pszNativeFirst))
+    {
+        pr_err("%s: repo '%s' %s mismatch legacy_count=%d native_count=%d first_legacy='%s' first_native='%s'\n",
+               pszPrefix ? pszPrefix : "native rpmdb crosscheck",
+               pszRepoName ? pszRepoName : "(unknown)",
+               pszField,
+               qLegacy.count,
+               qNative.count,
+               pszLegacyFirst,
+               pszNativeFirst);
+        nMismatch = 1;
+    }
+
+    queue_free(&qLegacy);
+    queue_free(&qNative);
+    return nMismatch;
+}
+
+static int
+SolvNativeCompareFileListsSampleCrossPool(
+    Repo *pLegacy,
+    Id dwLegacy,
+    Repo *pNative,
+    Id dwNative,
+    const char *pszPrefix,
+    const char *pszRepoName
+    )
+{
+    Dataiterator di = {0};
+    int nLegacyCount = 0;
+    int nNativeCount = 0;
+
+    dataiterator_init(&di, pLegacy->pool, pLegacy, dwLegacy,
+                      SOLVABLE_FILELIST, NULL,
+                      SEARCH_FILES | SEARCH_COMPLETE_FILELIST);
+    while(dataiterator_step(&di))
+    {
+        nLegacyCount++;
+    }
+    dataiterator_free(&di);
+
+    dataiterator_init(&di, pNative->pool, pNative, dwNative,
+                      SOLVABLE_FILELIST, NULL,
+                      SEARCH_FILES | SEARCH_COMPLETE_FILELIST);
+    while(dataiterator_step(&di))
+    {
+        nNativeCount++;
+    }
+    dataiterator_free(&di);
+
+    if(nLegacyCount != nNativeCount)
+    {
+        pr_err("%s: repo '%s' file list mismatch legacy_count=%d native_count=%d\n",
+               pszPrefix ? pszPrefix : "native rpmdb crosscheck",
+               pszRepoName ? pszRepoName : "(unknown)",
+               nLegacyCount,
+               nNativeCount);
+        return 1;
+    }
+
+    return 0;
+}
+
+static int
+SolvNativeComparePackageSampleCrossPool(
+    Repo *pLegacy,
+    Id dwLegacy,
+    Repo *pNative,
+    Id dwNative,
+    const char *pszPrefix,
+    const char *pszRepoName
+    )
+{
+    Solvable *pLegacySolv = pool_id2solvable(pLegacy->pool, dwLegacy);
+    Solvable *pNativeSolv = pool_id2solvable(pNative->pool, dwNative);
+
+    if(!pLegacySolv || !pNativeSolv)
+    {
+        pr_err("%s: repo '%s' had an internal package lookup failure\n",
+               pszPrefix ? pszPrefix : "native rpmdb crosscheck",
+               pszRepoName ? pszRepoName : "(unknown)");
+        return 1;
+    }
+
+    if(SolvNativeCompareChecksumFieldCrossPool(pLegacySolv, pNativeSolv, SOLVABLE_CHECKSUM, "checksum", pszPrefix, pszRepoName) ||
+       SolvNativeCompareChecksumFieldCrossPool(pLegacySolv, pNativeSolv, SOLVABLE_HDRID, "hdrid", pszPrefix, pszRepoName) ||
+       SolvNativeCompareChecksumFieldCrossPool(pLegacySolv, pNativeSolv, SOLVABLE_PKGID, "pkgid", pszPrefix, pszRepoName) ||
+       SolvNativeCompareNumFieldCrossPool(pLegacy, dwLegacy, pNative, dwNative, SOLVABLE_BUILDTIME, "buildtime", pszPrefix, pszRepoName) ||
+       SolvNativeCompareNumFieldCrossPool(pLegacy, dwLegacy, pNative, dwNative, SOLVABLE_INSTALLTIME, "installtime", pszPrefix, pszRepoName) ||
+       SolvNativeCompareNumFieldCrossPool(pLegacy, dwLegacy, pNative, dwNative, SOLVABLE_INSTALLSIZE, "installsize", pszPrefix, pszRepoName) ||
+       SolvNativeCompareNumFieldCrossPool(pLegacy, dwLegacy, pNative, dwNative, SOLVABLE_DOWNLOADSIZE, "downloadsize", pszPrefix, pszRepoName) ||
+       SolvNativeCompareNumFieldCrossPool(pLegacy, dwLegacy, pNative, dwNative, SOLVABLE_HEADEREND, "headerend", pszPrefix, pszRepoName) ||
+       SolvNativeCompareIdArraySampleCrossPool(pLegacy, dwLegacy, pNative, dwNative, SOLVABLE_PROVIDES, "provides", pszPrefix, pszRepoName) ||
+       SolvNativeCompareIdArraySampleCrossPool(pLegacy, dwLegacy, pNative, dwNative, SOLVABLE_REQUIRES, "requires", pszPrefix, pszRepoName) ||
+       SolvNativeCompareIdArraySampleCrossPool(pLegacy, dwLegacy, pNative, dwNative, SOLVABLE_CONFLICTS, "conflicts", pszPrefix, pszRepoName) ||
+       SolvNativeCompareIdArraySampleCrossPool(pLegacy, dwLegacy, pNative, dwNative, SOLVABLE_OBSOLETES, "obsoletes", pszPrefix, pszRepoName) ||
+       SolvNativeCompareFileListsSampleCrossPool(pLegacy, dwLegacy, pNative, dwNative, pszPrefix, pszRepoName))
+    {
+        pr_err("%s: repo '%s' package sample '%s.%s' evr '%s' mismatched\n",
+               pszPrefix ? pszPrefix : "native rpmdb crosscheck",
+               pszRepoName ? pszRepoName : "(unknown)",
+               pool_id2str(pLegacy->pool, pLegacySolv->name),
+               pool_id2str(pLegacy->pool, pLegacySolv->arch),
+               pool_id2str(pLegacy->pool, pLegacySolv->evr));
+        return 1;
+    }
+
+    return 0;
+}
+
+static int
+SolvNativeCrosscheckInstalledSamples(
+    Repo *pLegacy,
+    Repo *pNative,
+    const char *pszPrefix,
+    const char *pszRepoName
+    )
+{
+    uint32_t dwLegacyPackages = 0;
+    uint32_t dwNativePackages = 0;
+    uint32_t dwLegacyAdvisories = 0;
+    uint32_t dwNativeAdvisories = 0;
+    uint32_t dwSeenPackages = 0;
+    Id p = 0;
+    Solvable *pSolv = NULL;
+
+    SolvNativeCountRepoKinds(pLegacy, &dwLegacyPackages, &dwLegacyAdvisories);
+    SolvNativeCountRepoKinds(pNative, &dwNativePackages, &dwNativeAdvisories);
+
+    if(dwLegacyPackages != dwNativePackages)
+    {
+        pr_err("%s: repo '%s' package count mismatch legacy=%u native=%u\n",
+               pszPrefix ? pszPrefix : "native rpmdb crosscheck",
+               pszRepoName ? pszRepoName : "(unknown)",
+               dwLegacyPackages,
+               dwNativePackages);
+        return 1;
+    }
+    if(dwLegacyAdvisories != dwNativeAdvisories)
+    {
+        pr_err("%s: repo '%s' advisory count mismatch legacy=%u native=%u\n",
+               pszPrefix ? pszPrefix : "native rpmdb crosscheck",
+               pszRepoName ? pszRepoName : "(unknown)",
+               dwLegacyAdvisories,
+               dwNativeAdvisories);
+        return 1;
+    }
+
+    FOR_REPO_SOLVABLES(pLegacy, p, pSolv)
+    {
+        Id dwNative = 0;
+        const char *pszName = NULL;
+        const char *pszArch = NULL;
+        const char *pszEvr = NULL;
+
+        if(SolvNativeIsAdvisory(pLegacy->pool, pSolv))
+        {
+            continue;
+        }
+
+        if(dwSeenPackages >= 8)
+        {
+            break;
+        }
+        dwSeenPackages++;
+
+        pszName = pool_id2str(pLegacy->pool, pSolv->name);
+        pszArch = pool_id2str(pLegacy->pool, pSolv->arch);
+        pszEvr = pool_id2str(pLegacy->pool, pSolv->evr);
+        dwNative = SolvNativeFindMatchingSolvableByStrings(
+                       pNative,
+                       pszName,
+                       pszArch,
+                       pszEvr,
+                       0);
+        if(!dwNative)
+        {
+            pr_err("%s: repo '%s' missing package '%s.%s' evr '%s' in native bridge\n",
+                   pszPrefix ? pszPrefix : "native rpmdb crosscheck",
+                   pszRepoName ? pszRepoName : "(unknown)",
+                   pszName ? pszName : "(null)",
+                   pszArch ? pszArch : "(null)",
+                   pszEvr ? pszEvr : "(null)");
+            return 1;
+        }
+        if(SolvNativeComparePackageSampleCrossPool(pLegacy, p, pNative, dwNative, pszPrefix, pszRepoName))
+        {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 void
+SolvCrosscheckInstalledRpmsWithNative(
+    Repo *pLegacyRepo,
+    const char *pszCacheFileName,
+    int dwFlags
+    )
+{
+    static int nInstalledCrosschecked = 0;
+    uint32_t dwError = 0;
+    const char *pszRootDir = NULL;
+    Pool *pPool = NULL;
+    Repo *pNative = NULL;
+    char *pszCookie = NULL;
+    char *pszStateFile = NULL;
+    int nMatched = 0;
+
+    if(nInstalledCrosschecked)
+    {
+        return;
+    }
+    nInstalledCrosschecked = 1;
+
+    if(!pLegacyRepo || !pLegacyRepo->pool)
+    {
+        pr_err("native rpmdb crosscheck: repo '%s' had an internal comparison setup failure\n",
+               SYSTEM_REPO_NAME);
+        return;
+    }
+
+    pszRootDir = pool_get_rootdir(pLegacyRepo->pool);
+    if(!pszRootDir)
+    {
+        pszRootDir = "";
+    }
+
+    dwError = SolvGetInstalledCrosscheckStateFile(
+                  pszCacheFileName,
+                  &pszStateFile);
+    if(dwError)
+    {
+        pr_err("native rpmdb crosscheck: repo '%s' failed to derive a state-file path (%u)\n",
+               SYSTEM_REPO_NAME,
+               dwError);
+        goto cleanup;
+    }
+
+    if(!SolvInstalledCrosscheckShouldRun(pszRootDir, pszStateFile, &pszCookie))
+    {
+        goto cleanup;
+    }
+
+    pPool = pool_create();
+    if(!pPool)
+    {
+        pr_err("native rpmdb crosscheck: repo '%s' failed to create a temporary pool\n",
+               SYSTEM_REPO_NAME);
+        goto cleanup;
+    }
+    if(pszRootDir[0])
+    {
+        pool_set_rootdir(pPool, pszRootDir);
+    }
+
+    pNative = repo_create(pPool, SYSTEM_REPO_NAME);
+    if(!pNative)
+    {
+        pr_err("native rpmdb crosscheck: repo '%s' failed to create a temporary native repo\n",
+               SYSTEM_REPO_NAME);
+        goto cleanup;
+    }
+
+    dwError = SolvReadInstalledRpmsNative(pNative, pszRootDir, dwFlags);
+    if(dwError)
+    {
+        pr_err("native rpmdb crosscheck: repo '%s' failed to load the native comparison repo (%u): %s\n",
+               SYSTEM_REPO_NAME,
+               dwError,
+               TDNFRepoMdNativeLastError());
+        goto cleanup;
+    }
+
+    if(!SolvNativeCrosscheckInstalledSamples(
+            pLegacyRepo,
+            pNative,
+            "native rpmdb crosscheck",
+            SYSTEM_REPO_NAME))
+    {
+        SolvLogNativeCrosscheckSuccess("native rpmdb crosscheck", SYSTEM_REPO_NAME, pNative, 0);
+        nMatched = 1;
+    }
+
+cleanup:
+    if(nMatched)
+    {
+        SolvInstalledCrosscheckUpdateState(pszStateFile, pszCookie);
+    }
+    if(pszCookie)
+    {
+        tdnf_rpmdb_string_free(pszCookie);
+    }
+    TDNF_SAFE_FREE_MEMORY(pszStateFile);
+    if(pPool)
+    {
+        pool_free(pPool);
+    }
+}
+
+void
+SolvCrosscheckRpmPathWithNative(
+    const char *pszPrefix,
+    const char *pszPath,
+    int dwFlags
+    )
+{
+    uint32_t dwError = 0;
+    Pool *pPool = NULL;
+    Repo *pLegacy = NULL;
+    Repo *pNative = NULL;
+    char *pszLegacyBytes = NULL;
+    char *pszNativeBytes = NULL;
+    size_t nLegacySize = 0;
+    size_t nNativeSize = 0;
+
+    if(IsNullOrEmptyString(pszPath))
+    {
+        return;
+    }
+
+    pPool = pool_create();
+    if(!pPool)
+    {
+        pr_err("%s: rpm '%s' failed to create a temporary pool\n",
+               pszPrefix ? pszPrefix : "native rpm crosscheck",
+               pszPath);
+        goto cleanup;
+    }
+
+    pLegacy = repo_create(pPool, pszPath);
+    pNative = repo_create(pPool, pszPath);
+    if(!pLegacy || !pNative)
+    {
+        pr_err("%s: rpm '%s' failed to create temporary repos\n",
+               pszPrefix ? pszPrefix : "native rpm crosscheck",
+               pszPath);
+        goto cleanup;
+    }
+
+    dwError = SolvAddRpmLegacy(pLegacy, pszPath, dwFlags, NULL);
+    if(dwError)
+    {
+        pr_err("%s: rpm '%s' failed to load the legacy comparison repo (%u)\n",
+               pszPrefix ? pszPrefix : "native rpm crosscheck",
+               pszPath,
+               dwError);
+        goto cleanup;
+    }
+
+    dwError = SolvAddRpmNative(pNative, pszPath, dwFlags, NULL);
+    if(dwError)
+    {
+        pr_err("%s: rpm '%s' failed to load the native comparison repo (%u): %s\n",
+               pszPrefix ? pszPrefix : "native rpm crosscheck",
+               pszPath,
+               dwError,
+               TDNFRepoMdNativeLastError());
+        goto cleanup;
+    }
+
+    repo_internalize(pLegacy);
+    repo_internalize(pNative);
+
+    dwError = SolvSerializeRepo(pLegacy, &pszLegacyBytes, &nLegacySize);
+    if(dwError)
+    {
+        pr_err("%s: rpm '%s' failed to serialize the legacy repo (%u)\n",
+               pszPrefix ? pszPrefix : "native rpm crosscheck",
+               pszPath,
+               dwError);
+        goto cleanup;
+    }
+
+    dwError = SolvSerializeRepo(pNative, &pszNativeBytes, &nNativeSize);
+    if(dwError)
+    {
+        pr_err("%s: rpm '%s' failed to serialize the native repo (%u)\n",
+               pszPrefix ? pszPrefix : "native rpm crosscheck",
+               pszPath,
+               dwError);
+        goto cleanup;
+    }
+
+    if(nLegacySize == nNativeSize &&
+       pszLegacyBytes &&
+       pszNativeBytes &&
+       !memcmp(pszLegacyBytes, pszNativeBytes, nLegacySize))
+    {
+        SolvLogNativeCrosscheckSuccess(pszPrefix, pszPath, pNative, 0);
+        goto cleanup;
+    }
+
+    if(!SolvLogNativeRepoMismatch(pszPath, pLegacy, pNative, 1))
+    {
+        SolvLogNativeCrosscheckSuccess(pszPrefix, pszPath, pNative, 1);
+    }
+
+cleanup:
+    if(pszLegacyBytes)
+    {
+        free(pszLegacyBytes);
+    }
+    if(pszNativeBytes)
+    {
+        free(pszNativeBytes);
+    }
+    if(pPool)
+    {
+        pool_free(pPool);
+    }
+}
+
+int
 SolvLogNativeRepoMismatch(
     const char *pszRepoName,
     Repo *pLegacy,
-    Repo *pNative
+    Repo *pNative,
+    int nAllowUnfocusedDiff
     )
 {
     Pool *pPool = NULL;
@@ -250,7 +1087,7 @@ SolvLogNativeRepoMismatch(
     {
         pr_err("native repomd crosscheck: repo '%s' had an internal comparison setup failure\n",
                pszRepoName ? pszRepoName : "(unknown)");
-        return;
+        return 1;
     }
 
     pPool = pLegacy->pool;
@@ -263,6 +1100,7 @@ SolvLogNativeRepoMismatch(
                pszRepoName ? pszRepoName : "(unknown)",
                dwLegacyPackages,
                dwNativePackages);
+        return 1;
     }
     if(dwLegacyAdvisories != dwNativeAdvisories)
     {
@@ -270,6 +1108,7 @@ SolvLogNativeRepoMismatch(
                pszRepoName ? pszRepoName : "(unknown)",
                dwLegacyAdvisories,
                dwNativeAdvisories);
+        return 1;
     }
 
     FOR_REPO_SOLVABLES(pLegacy, p, pSolv)
@@ -291,7 +1130,7 @@ SolvLogNativeRepoMismatch(
                    SolvNativePoolIdToStr(pPool, pSolv->name),
                    SolvNativePoolIdToStr(pPool, pSolv->arch),
                    SolvNativePoolIdToStr(pPool, pSolv->evr));
-            return;
+            return 1;
         }
 
         if(nAdvisory)
@@ -303,7 +1142,7 @@ SolvLogNativeRepoMismatch(
                                          dwNativeId,
                                          pszRepoName))
             {
-                return;
+                return 1;
             }
         }
         else
@@ -315,13 +1154,19 @@ SolvLogNativeRepoMismatch(
                                         dwNativeId,
                                         pszRepoName))
             {
-                return;
+                return 1;
             }
         }
     }
 
+    if(nAllowUnfocusedDiff)
+    {
+        return 0;
+    }
+
     pr_err("native repomd crosscheck: repo '%s' serialized output differed but no focused field mismatch was isolated\n",
            pszRepoName ? pszRepoName : "(unknown)");
+    return 1;
 }
 
 static int
@@ -470,24 +1315,27 @@ SolvNativeCompareNumField(
 }
 
 static int
-SolvNativeCompareChecksum(
+SolvNativeCompareChecksumField(
     Solvable *pLegacy,
     Solvable *pNative,
+    Id dwKeyName,
+    const char *pszField,
     const char *pszRepoName
     )
 {
     Id dwLegacyType = 0;
     Id dwNativeType = 0;
-    const char *pszLegacy = solvable_lookup_checksum(pLegacy, SOLVABLE_CHECKSUM, &dwLegacyType);
-    const char *pszNative = solvable_lookup_checksum(pNative, SOLVABLE_CHECKSUM, &dwNativeType);
+    const char *pszLegacy = solvable_lookup_checksum(pLegacy, dwKeyName, &dwLegacyType);
+    const char *pszNative = solvable_lookup_checksum(pNative, dwKeyName, &dwNativeType);
 
     if(!SolvNativeStringsEqual(pszLegacy, pszNative) ||
        !SolvNativeStringsEqual(
             dwLegacyType ? pool_id2str(pLegacy->repo->pool, dwLegacyType) : NULL,
             dwNativeType ? pool_id2str(pNative->repo->pool, dwNativeType) : NULL))
     {
-        pr_err("native repomd crosscheck: repo '%s' checksum mismatch legacy=%s/%s native=%s/%s\n",
+        pr_err("native repomd crosscheck: repo '%s' %s mismatch legacy=%s/%s native=%s/%s\n",
                pszRepoName ? pszRepoName : "(unknown)",
+               pszField,
                dwLegacyType ? pool_id2str(pLegacy->repo->pool, dwLegacyType) : "(null)",
                pszLegacy ? pszLegacy : "(null)",
                dwNativeType ? pool_id2str(pNative->repo->pool, dwNativeType) : "(null)",
@@ -868,14 +1716,18 @@ SolvNativeComparePackage(
         return 1;
     }
 
-    if(SolvNativeCompareChecksum(pLegacySolv, pNativeSolv, pszRepoName) ||
+    if(SolvNativeCompareChecksumField(pLegacySolv, pNativeSolv, SOLVABLE_CHECKSUM, "checksum", pszRepoName) ||
+       SolvNativeCompareChecksumField(pLegacySolv, pNativeSolv, SOLVABLE_HDRID, "hdrid", pszRepoName) ||
+       SolvNativeCompareChecksumField(pLegacySolv, pNativeSolv, SOLVABLE_PKGID, "pkgid", pszRepoName) ||
        SolvNativeCompareNumField(pLegacy, dwLegacy, pNative, dwNative, SOLVABLE_BUILDTIME, "buildtime", pszRepoName) ||
+       SolvNativeCompareNumField(pLegacy, dwLegacy, pNative, dwNative, SOLVABLE_INSTALLTIME, "installtime", pszRepoName) ||
        SolvNativeCompareNumField(pLegacy, dwLegacy, pNative, dwNative, SOLVABLE_INSTALLSIZE, "installsize", pszRepoName) ||
        SolvNativeCompareNumField(pLegacy, dwLegacy, pNative, dwNative, SOLVABLE_DOWNLOADSIZE, "downloadsize", pszRepoName) ||
        SolvNativeCompareNumField(pLegacy, dwLegacy, pNative, dwNative, SOLVABLE_HEADEREND, "headerend", pszRepoName) ||
        SolvNativeCompareStringField(pLegacy, dwLegacy, pNative, dwNative, SOLVABLE_SUMMARY, "summary", pszRepoName) ||
        SolvNativeCompareStringField(pLegacy, dwLegacy, pNative, dwNative, SOLVABLE_DESCRIPTION, "description", pszRepoName) ||
        SolvNativeCompareStringField(pLegacy, dwLegacy, pNative, dwNative, SOLVABLE_PACKAGER, "packager", pszRepoName) ||
+       SolvNativeCompareStringField(pLegacy, dwLegacy, pNative, dwNative, SOLVABLE_VENDOR, "vendor", pszRepoName) ||
        SolvNativeCompareStringField(pLegacy, dwLegacy, pNative, dwNative, SOLVABLE_URL, "url", pszRepoName) ||
        SolvNativeCompareStringField(pLegacy, dwLegacy, pNative, dwNative, SOLVABLE_LICENSE, "license", pszRepoName) ||
        SolvNativeCompareStringField(pLegacy, dwLegacy, pNative, dwNative, SOLVABLE_GROUP, "group", pszRepoName) ||

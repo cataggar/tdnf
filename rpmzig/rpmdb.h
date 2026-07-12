@@ -81,6 +81,25 @@ void tdnf_rpmdb_iter_close(tdnf_rpmdb_iter *it);
 int tdnf_rpmdb_iter_next_nevra(tdnf_rpmdb_iter *it, char **nevra_out);
 
 /**
+ * Advance the iterator and return the next package header blob from
+ * the rpmdb Packages table.
+ *
+ * On success, `*blob_out` aliases sqlite-owned row memory and remains
+ * valid until the next iterator advance or `tdnf_rpmdb_iter_close`.
+ * `*blob_len_out` receives the blob length in bytes.
+ *
+ * Returns:
+ *    1 on success (blob populated),
+ *    0 on end-of-iteration,
+ *   -1 on error (use tdnf_rpmdb_last_error).
+ */
+int tdnf_rpmdb_iter_next_header_blob(
+    tdnf_rpmdb_iter *it,
+    const unsigned char **blob_out,
+    size_t *blob_len_out
+);
+
+/**
  * Free a string returned by tdnf_rpmdb_iter_next_nevra. Accepts NULL.
  */
 void tdnf_rpmdb_string_free(char *s);
@@ -247,4 +266,3 @@ int tdnf_rpm_file_signed_range(
 #endif
 
 #endif /* _TDNF_RPMZIG_RPMDB_H_ */
-

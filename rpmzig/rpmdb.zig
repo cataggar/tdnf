@@ -206,6 +206,10 @@ pub const Iter = struct {
         HeaderParseFailed,
     };
 
+    pub const NextBlobError = error{
+        SqliteStepFailed,
+    };
+
     pub fn openRoot(root: []const u8) OpenError!*Iter {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         const db_path = buildDbPath(&buf, root) catch return error.PathTooLong;
@@ -256,6 +260,15 @@ pub const Iter = struct {
     /// The returned header aliases sqlite-owned row memory and is only
     /// valid until the next `nextHeader` call or `close`.
     pub fn nextHeader(self: *Iter) NextHeaderError!?header.Header {
+        const blob = try self.nextHeaderBlob() orelse return null;
+        return header.Header.parse(blob) catch error.HeaderParseFailed;
+    }
+
+    /// Advances to the next non-empty row and returns the raw header blob.
+    ///
+    /// The returned slice aliases sqlite-owned row memory and is only
+    /// valid until the next iterator advance or `close`.
+    pub fn nextHeaderBlob(self: *Iter) NextBlobError!?[]const u8 {
         while (true) {
             const step_rc = c.sqlite3_step(self.stmt);
             if (step_rc == c.SQLITE_DONE) return null;
@@ -265,8 +278,7 @@ pub const Iter = struct {
             const blob_ptr = c.sqlite3_column_blob(self.stmt, 0);
             const blob_len: usize = @intCast(c.sqlite3_column_bytes(self.stmt, 0));
             if (blob_ptr == null or blob_len == 0) continue;
-            const blob: []const u8 = @as([*]const u8, @ptrCast(blob_ptr))[0..blob_len];
-            return header.Header.parse(blob) catch error.HeaderParseFailed;
+            return @as([*]const u8, @ptrCast(blob_ptr))[0..blob_len];
         }
     }
 };
@@ -328,6 +340,42 @@ export fn tdnf_rpmdb_iter_next_nevra(it: ?*Iter, nevra_out: ?*[*:0]u8) i32 {
     zbytes[nevra.len] = 0;
     std.heap.c_allocator.free(nevra);
     out.* = @ptrCast(zbytes);
+    return 1;
+}
+
+/// Advance the iterator and return the next raw header blob.
+/// The blob aliases sqlite-owned row memory and remains valid until
+/// the next iterator advance or `close`.
+export fn tdnf_rpmdb_iter_next_header_blob(
+    it: ?*Iter,
+    blob_out: ?*?[*]const u8,
+    blob_len_out: ?*usize,
+) i32 {
+    clearError();
+    const iter = it orelse {
+        setError("null iterator", .{});
+        return -1;
+    };
+    const out = blob_out orelse {
+        setError("null blob out param", .{});
+        return -1;
+    };
+    const len_out = blob_len_out orelse {
+        setError("null blob len out param", .{});
+        return -1;
+    };
+
+    const blob = iter.nextHeaderBlob() catch |err| {
+        setError("iter.nextHeaderBlob: {t}", .{err});
+        return -1;
+    } orelse {
+        out.* = null;
+        len_out.* = 0;
+        return 0;
+    };
+
+    out.* = @ptrCast(blob.ptr);
+    len_out.* = blob.len;
     return 1;
 }
 

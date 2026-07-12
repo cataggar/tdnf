@@ -135,6 +135,33 @@ TDNFRepoMdNativeLoadSolvRepo(
     const char *pszOther
     );
 
+/*
+ * Populate an existing libsolv Repo from the installed rpmdb under
+ * `pszRootDir`, using the native Zig header->package bridge. `nFlags`
+ * mirrors the `repo_add_rpmdb_reffp` flag word that selected the legacy
+ * loader's metadata shape.
+ */
+uint32_t
+TDNFRepoMdNativeLoadInstalledSolvRepo(
+    Repo *pRepo,
+    const char *pszRootDir,
+    int nFlags
+    );
+
+/*
+ * Add a single `.rpm` file to an existing libsolv Repo using the native
+ * Zig rpm-file parser plus manual solvable construction. `nFlags` mirrors
+ * `repo_add_rpm`. When `pdwSolvableId` is non-NULL, the added solvable id is
+ * stored there on success.
+ */
+uint32_t
+TDNFRepoMdNativeAddRpm(
+    Repo *pRepo,
+    const char *pszPath,
+    int nFlags,
+    uint32_t *pdwSolvableId
+    );
+
 #ifdef __cplusplus
 }
 #endif
