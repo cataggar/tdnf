@@ -394,7 +394,7 @@ SolvCrosscheckYumRepoWithNative(
                pszRepoName ? pszRepoName : "(unknown)",
                nLegacySize,
                nNativeSize);
-        SolvLogNativeRepoMismatch(pszRepoName, pLegacy, pNative);
+        SolvLogNativeRepoMismatch(pszRepoName, pLegacy, pNative, 0);
     }
 
 cleanup:
@@ -492,6 +492,12 @@ readRpmsFromDir(
                 dwError = ERROR_TDNF_INVALID_PARAMETER;
                 BAIL_ON_TDNF_ERROR(dwError);
             }
+#ifdef TDNF_NATIVE_RPM_CROSSCHECK
+            SolvCrosscheckRpmPathWithNative(
+                "native local-rpm crosscheck",
+                pszPath,
+                REPO_REUSE_REPODATA|REPO_NO_INTERNALIZE);
+#endif
         }
         TDNF_SAFE_FREE_MEMORY(pszPath);
     }
@@ -568,6 +574,10 @@ SolvReadInstalledRpms(
         dwError = ERROR_TDNF_SOLV_IO;
         BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
     }
+
+#ifdef TDNF_NATIVE_RPM_CROSSCHECK
+    SolvCrosscheckInstalledRpmsWithNative(pRepo, pszCacheFileName, dwFlags);
+#endif
 
 cleanup:
     if (pCacheFile)

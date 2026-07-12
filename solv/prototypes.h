@@ -541,11 +541,12 @@ SolvSerializeRepo(
     size_t *pnSize
     );
 
-void
+int
 SolvLogNativeRepoMismatch(
     const char *pszRepoName,
     Repo *pLegacy,
-    Repo *pNative
+    Repo *pNative,
+    int nAllowUnfocusedDiff
     );
 
 uint32_t
@@ -565,6 +566,35 @@ SolvReadInstalledRpms(
     Repo* pRepo,
     const char *pszCacheFileName
 );
+
+uint32_t
+SolvReadInstalledRpmsNative(
+    Repo* pRepo,
+    const char *pszRootDir,
+    int dwFlags
+    );
+
+uint32_t
+SolvAddRpmNative(
+    Repo *pRepo,
+    const char *pszPath,
+    int dwFlags,
+    Id *pdwSolvableId
+    );
+
+void
+SolvCrosscheckInstalledRpmsWithNative(
+    Repo *pLegacyRepo,
+    const char *pszCacheFileName,
+    int dwFlags
+    );
+
+void
+SolvCrosscheckRpmPathWithNative(
+    const char *pszPrefix,
+    const char *pszPath,
+    int dwFlags
+    );
 
 uint32_t
 SolvLoadRepomd(
