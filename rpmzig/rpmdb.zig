@@ -566,6 +566,124 @@ export fn tdnf_rpmdb_find_hnum_by_nevra(
     return 0;
 }
 
+/// Look up every installed package hnum whose main-header NAME
+/// matches `name`. On success writes a heap-allocated array of hnums
+/// into `*hnums_out` (free via tdnf_rpmdb_hnums_free) and the count
+/// into `*count_out`.
+///
+/// Returns 0 on success (including "no matches" — in which case
+/// `*hnums_out` is NULL and `*count_out` is 0), -1 on error.
+export fn tdnf_rpmdb_find_hnums_by_name(
+    root: ?[*:0]const u8,
+    name: ?[*:0]const u8,
+    hnums_out: ?*?[*]u32,
+    count_out: ?*usize,
+) i32 {
+    clearError();
+    const name_ptr = name orelse {
+        setError("null name", .{});
+        return -1;
+    };
+    const hout = hnums_out orelse {
+        setError("null hnums_out", .{});
+        return -1;
+    };
+    const cout = count_out orelse {
+        setError("null count_out", .{});
+        return -1;
+    };
+    hout.* = null;
+    cout.* = 0;
+
+    const root_slice: []const u8 = if (root) |p| std.mem.span(p) else "";
+    var writer = rpmdb_write.Writer.openRoot(root_slice) catch |err| {
+        setError("Writer.openRoot: {t}", .{err});
+        return -1;
+    };
+    defer writer.close();
+
+    const found = writer.findHnumsByName(std.heap.c_allocator, std.mem.span(name_ptr)) catch |err| {
+        setError("Writer.findHnumsByName: {t}", .{err});
+        return -1;
+    };
+    if (found.len == 0) {
+        std.heap.c_allocator.free(found);
+        return 0;
+    }
+    // Copy into a libc-malloc'd buffer so the caller can free with
+    // tdnf_rpmdb_hnums_free (i.e. plain free(3)).
+    const bytes = found.len * @sizeOf(u32);
+    const buf_ptr = libc.malloc(bytes) orelse {
+        std.heap.c_allocator.free(found);
+        setError("out of memory", .{});
+        return -1;
+    };
+    const buf = @as([*]u32, @ptrCast(@alignCast(buf_ptr)));
+    @memcpy(buf[0..found.len], found);
+    std.heap.c_allocator.free(found);
+    hout.* = buf;
+    cout.* = found.len;
+    return 0;
+}
+
+/// Free an hnum array returned by tdnf_rpmdb_find_hnums_by_name.
+export fn tdnf_rpmdb_hnums_free(hnums: ?[*]u32) void {
+    if (hnums) |p| libc.free(@ptrCast(p));
+}
+
+/// Read the raw main-header blob for the installed package with
+/// `hnum` under `root`. On success writes a heap-allocated blob
+/// pointer into `*blob_out` (free via tdnf_rpmdb_blob_free) and its
+/// length into `*len_out`.
+///
+/// Returns 0 on success, -1 on error (use tdnf_rpmdb_last_error()).
+export fn tdnf_rpmdb_read_header_blob(
+    root: ?[*:0]const u8,
+    hnum: u32,
+    blob_out: ?*?[*]u8,
+    len_out: ?*usize,
+) i32 {
+    clearError();
+    const bout = blob_out orelse {
+        setError("null blob_out", .{});
+        return -1;
+    };
+    const lout = len_out orelse {
+        setError("null len_out", .{});
+        return -1;
+    };
+    bout.* = null;
+    lout.* = 0;
+
+    const root_slice: []const u8 = if (root) |p| std.mem.span(p) else "";
+    var writer = rpmdb_write.Writer.openRoot(root_slice) catch |err| {
+        setError("Writer.openRoot: {t}", .{err});
+        return -1;
+    };
+    defer writer.close();
+
+    const blob = writer.readHeaderBlobCopy(std.heap.c_allocator, hnum) catch |err| {
+        setError("Writer.readHeaderBlobCopy({d}): {t}", .{ hnum, err });
+        return -1;
+    };
+    defer std.heap.c_allocator.free(blob);
+
+    const buf_ptr = libc.malloc(blob.len) orelse {
+        setError("out of memory", .{});
+        return -1;
+    };
+    const buf = @as([*]u8, @ptrCast(buf_ptr));
+    @memcpy(buf[0..blob.len], blob);
+    bout.* = buf;
+    lout.* = blob.len;
+    return 0;
+}
+
+/// Free a blob returned by tdnf_rpmdb_read_header_blob.
+export fn tdnf_rpmdb_blob_free(blob: ?[*]u8) void {
+    if (blob) |p| libc.free(@ptrCast(p));
+}
+
 // -------------------------------------------------------------------
 // Pubkey iterator (gpg-pubkey-* installed packages)
 // -------------------------------------------------------------------

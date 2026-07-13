@@ -299,6 +299,34 @@ pub const Writer = struct {
         return allocator.dupe(u8, blob);
     }
 
+    /// Find every installed package hnum whose main-header NAME
+    /// matches `wanted_name`. Caller owns the returned slice; free
+    /// with the same allocator.
+    pub fn findHnumsByName(
+        self: *Writer,
+        allocator: std.mem.Allocator,
+        wanted_name: []const u8,
+    ) Error![]u32 {
+        var stmt = try Statement.init(
+            self.db,
+            "SELECT hnum FROM 'Name' WHERE key=? ORDER BY hnum",
+        );
+        defer stmt.deinit();
+        try stmt.bindText(1, wanted_name);
+
+        var hnums = std.ArrayList(u32).empty;
+        errdefer hnums.deinit(allocator);
+
+        while (true) {
+            const rc = c.sqlite3_step(stmt.raw);
+            if (rc == c.SQLITE_DONE) break;
+            if (rc != c.SQLITE_ROW) return error.SqliteStepFailed;
+            const hnum: u32 = @intCast(c.sqlite3_column_int(stmt.raw, 0));
+            try hnums.append(allocator, hnum);
+        }
+        return hnums.toOwnedSlice(allocator);
+    }
+
     pub fn pathOwnedByOtherPackage(self: *Writer, current_hnum: u32, path: []const u8) Error!bool {
         if (path.len == 0 or path[0] != '/') {
             return error.InvalidHeaderBlob;

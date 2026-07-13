@@ -115,6 +115,14 @@ pub fn build(b: *Build) void {
         "rpmzig-transaction-check",
         "Use rpmzig's native transaction ordering and final dependency/conflict check (default true; pass -Drpmzig-transaction-check=false to fall back to the legacy librpm ordering/check path)",
     ) orelse true;
+    const rpmzig_transaction_execute = b.option(
+        bool,
+        "rpmzig-transaction-execute",
+        "Compose the rpmzig native install/rpmdb-write/erase/scriptlet/trigger engines into TDNFRunTransaction, replacing librpm's rpmtsRun path (default false; requires -Drpmzig-transaction-check=true).",
+    ) orelse false;
+    if (rpmzig_transaction_execute and !rpmzig_transaction_check) {
+        @panic("-Drpmzig-transaction-execute=true requires -Drpmzig-transaction-check=true");
+    }
     const rpmzig_lua = b.option(
         bool,
         "rpmzig-lua",
@@ -215,6 +223,7 @@ pub fn build(b: *Build) void {
         .{ .key = "NATIVE_FILE_INSTALL_BINARY", .value = b.fmt("{s}/libexec/tdnf/tdnf-rpm-install", .{abs_prefix}) },
         .{ .key = "RPMZIG_FILE_ERASE_CROSSCHECK", .value = if (rpmzig_file_erase_crosscheck) "true" else "false" },
         .{ .key = "NATIVE_FILE_ERASE_BINARY", .value = b.fmt("{s}/libexec/tdnf/tdnf-rpm-erase", .{abs_prefix}) },
+        .{ .key = "RPMZIG_TRANSACTION_EXECUTE", .value = if (rpmzig_transaction_execute) "true" else "false" },
     });
 
     // ----- generated text files (autoconf_at style: @VAR@ only) ----- //
@@ -931,6 +940,9 @@ pub fn build(b: *Build) void {
     if (rpmzig_transaction_check) {
         tdnf_so_mod.addCMacro("TDNF_RPMZIG_TRANSACTION_CHECK", "1");
     }
+    if (rpmzig_transaction_execute) {
+        tdnf_so_mod.addCMacro("TDNF_RPMZIG_TRANSACTION_EXECUTE", "1");
+    }
     tdnf_so_mod.addCSourceFiles(.{
         .root = b.path("client"),
         .files = &.{
@@ -938,6 +950,7 @@ pub fn build(b: *Build) void {
             "goal.c",        "gpgcheck.c", "init.c",    "packageutils.c",
             "querynative.c", "plugins.c",  "repo.c",    "repoutils.c",
             "remoterepo.c",  "repolist.c", "resolve.c", "rpmtrans.c",
+            "rpmtrans_native.c",
             "updateinfo.c",  "utils.c",    "history.c", "varsdir.c",
         },
         .flags = &tdnf_cflags,
