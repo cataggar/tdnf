@@ -921,9 +921,13 @@ TDNFNativeOrderAndCheck(
         switch(pItem->nType)
         {
             case TDNF_RPM_TS_ITEM_INSTALL:
-            case TDNF_RPM_TS_ITEM_UPGRADE:
                 pInputs[dwIndex].dwOperation =
                     TDNF_REPOMD_NATIVE_TRANSACTION_OP_INSTALL;
+                break;
+
+            case TDNF_RPM_TS_ITEM_UPGRADE:
+                pInputs[dwIndex].dwOperation =
+                    TDNF_REPOMD_NATIVE_TRANSACTION_OP_UPGRADE;
                 break;
 
             case TDNF_RPM_TS_ITEM_REINSTALL:
