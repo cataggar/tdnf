@@ -16,7 +16,7 @@
 //!   hsize bytes: data
 //!
 //! The first index entry in modern rpm headers is the "region trailer"
-//! tag (RPMTAG_HEADERIMAGE = 63, type = BIN, count = 16). We skip it
+//! tag (RPMTAG_HEADERIMMUTABLE = 63, type = BIN, count = 16). We skip it
 //! when iterating data tags; the region machinery is only needed when
 //! writing.
 //!
@@ -27,6 +27,19 @@
 const std = @import("std");
 
 pub const TagId = enum(u32) {
+    sigsize = 257,
+    sigpgp = 259,
+    sigmd5 = 261,
+    siggpg = 262,
+    dsaheader = 267,
+    rsaheader = 268,
+    sha1header = 269,
+    longsigsize = 270,
+    longarchivesize = 271,
+    sha256header = 273,
+    openpgp = 278,
+    sha3_256header = 279,
+    header_i18ntable = 100,
     name = 1000,
     version = 1001,
     release = 1002,
@@ -45,10 +58,13 @@ pub const TagId = enum(u32) {
     group = 1016,
     url = 1020,
     source_rpm = 1044,
+    file_states = 1029,
     archive_size = 1046,
+    triggername = 1066,
     payload_format = 1124,
     payload_compressor = 1125,
     payload_flags = 1126,
+    install_color = 1127,
     // STRING_ARRAY / INT32_ARRAY dep tags
     requirename = 1049,
     requireversion = 1050,
@@ -89,8 +105,21 @@ pub const TagId = enum(u32) {
     oldenhancesversion = 1160,
     oldenhancesflags = 1161,
     longsize = 5009,
-    sha1header = 269,
-    sha256header = 273,
+    filetriggername = 5069,
+    filetriggerindex = 5070,
+    transfiletriggername = 5079,
+    transfiletriggerindex = 5080,
+    filesignatures = 5090,
+    filesignaturelength = 5091,
+    payloadsha256 = 5092,
+    payloadsha256algo = 5093,
+    modularitylabel = 5096,
+    payloadsha256alt = 5097,
+    payloadsize = 5112,
+    payloadsizealt = 5113,
+    rpmformat = 5114,
+    packagedigests = 5118,
+    packagedigestalgos = 5119,
     _,
 };
 
@@ -137,10 +166,10 @@ pub const TypeId = enum(u32) {
     _,
 };
 
-/// region marker — RPMTAG_HEADERIMAGE. Index 0 of most rpmdb blobs.
-const RPMTAG_HEADERIMAGE: u32 = 63;
+/// region markers. Modern rpmdb blobs start with HEADERIMMUTABLE.
+const RPMTAG_HEADERIMAGE: u32 = 61;
 const RPMTAG_HEADERSIGNATURES: u32 = 62;
-const RPMTAG_HEADERIMMUTABLE: u32 = 61;
+const RPMTAG_HEADERIMMUTABLE: u32 = 63;
 
 pub const Error = error{
     Truncated,
@@ -233,11 +262,27 @@ pub const Header = struct {
         return null;
     }
 
+    /// Region-aware variant used by write-path code that needs to
+    /// verify the presence of immutable/header-signature markers.
+    pub fn findRawIncludingRegions(self: Header, tag: u32) ?IndexEntry {
+        var i: u32 = 0;
+        while (i < self.index_count) : (i += 1) {
+            const e = self.entry(i);
+            if (e.tag == tag) return e;
+        }
+        return null;
+    }
+
     /// Get a STRING-typed tag as a slice into the blob.
     /// I18N_STRING tags return their first (English / "C" locale)
     /// entry. Returns null if the tag is missing or has the wrong type.
     pub fn getString(self: Header, tag: TagId) ?[]const u8 {
         const e = self.find(tag) orelse return null;
+        return self.readString(e);
+    }
+
+    pub fn getStringRaw(self: Header, tag: u32) ?[]const u8 {
+        const e = self.findRaw(tag) orelse return null;
         return self.readString(e);
     }
 
@@ -255,6 +300,14 @@ pub const Header = struct {
     /// Get an INT32-typed tag.
     pub fn getU32(self: Header, tag: TagId) ?u32 {
         const e = self.find(tag) orelse return null;
+        if (@as(TypeId, @enumFromInt(e.typ)) != .int32) return null;
+        const start = self.data_off + @as(usize, e.offset);
+        if (start + 4 > self.bytes.len) return null;
+        return readU32(self.bytes, start);
+    }
+
+    pub fn getU32Raw(self: Header, tag: u32) ?u32 {
+        const e = self.findRaw(tag) orelse return null;
         if (@as(TypeId, @enumFromInt(e.typ)) != .int32) return null;
         const start = self.data_off + @as(usize, e.offset);
         if (start + 4 > self.bytes.len) return null;
@@ -299,12 +352,37 @@ pub const Header = struct {
         }
     }
 
+    pub fn stringArrayCountRaw(self: Header, tag: u32) usize {
+        const e = self.findRaw(tag) orelse return 0;
+        switch (@as(TypeId, @enumFromInt(e.typ))) {
+            .string_array, .i18n_string => return e.count,
+            else => return 0,
+        }
+    }
+
     /// Look up the `i`th entry of a STRING_ARRAY / I18N_STRING tag.
     /// O(i) — scans NULs from the start. Suitable for one-shot
     /// access; callers that iterate the whole array should keep a
     /// running offset themselves.
     pub fn stringArrayItem(self: Header, tag: TagId, i: usize) ?[]const u8 {
         const e = self.find(tag) orelse return null;
+        switch (@as(TypeId, @enumFromInt(e.typ))) {
+            .string_array, .i18n_string => {},
+            else => return null,
+        }
+        if (i >= e.count) return null;
+        var off = self.data_off + @as(usize, e.offset);
+        var skipped: usize = 0;
+        while (skipped < i) : (skipped += 1) {
+            const next_nul = std.mem.indexOfScalarPos(u8, self.bytes, off, 0) orelse return null;
+            off = next_nul + 1;
+        }
+        const end = std.mem.indexOfScalarPos(u8, self.bytes, off, 0) orelse return null;
+        return self.bytes[off..end];
+    }
+
+    pub fn stringArrayItemRaw(self: Header, tag: u32, i: usize) ?[]const u8 {
+        const e = self.findRaw(tag) orelse return null;
         switch (@as(TypeId, @enumFromInt(e.typ))) {
             .string_array, .i18n_string => {},
             else => return null,
@@ -330,6 +408,15 @@ pub const Header = struct {
         return readU32(self.bytes, start);
     }
 
+    pub fn u32ArrayItemRaw(self: Header, tag: u32, i: usize) ?u32 {
+        const e = self.findRaw(tag) orelse return null;
+        if (@as(TypeId, @enumFromInt(e.typ)) != .int32) return null;
+        if (i >= e.count) return null;
+        const start = self.data_off + @as(usize, e.offset) + i * 4;
+        if (start + 4 > self.bytes.len) return null;
+        return readU32(self.bytes, start);
+    }
+
     /// Look up the `i`th entry of an INT16 array tag.
     pub fn u16ArrayItem(self: Header, tag: TagId, i: usize) ?u16 {
         const e = self.find(tag) orelse return null;
@@ -338,6 +425,37 @@ pub const Header = struct {
         const start = self.data_off + @as(usize, e.offset) + i * 2;
         if (start + 2 > self.bytes.len) return null;
         return readU16(self.bytes, start);
+    }
+
+    pub fn rawEntryBytes(self: Header, e: IndexEntry) ?[]const u8 {
+        const start = self.data_off + @as(usize, e.offset);
+        if (start > self.bytes.len) return null;
+
+        const len: usize = switch (@as(TypeId, @enumFromInt(e.typ))) {
+            .char_type, .int8 => e.count,
+            .int16 => e.count * 2,
+            .int32 => e.count * 4,
+            .int64 => e.count * 8,
+            .bin => e.count,
+            .string => blk: {
+                const end = std.mem.indexOfScalarPos(u8, self.bytes, start, 0) orelse return null;
+                break :blk end + 1 - start;
+            },
+            .string_array, .i18n_string => blk: {
+                var off = start;
+                var remaining = e.count;
+                while (remaining > 0) : (remaining -= 1) {
+                    const end = std.mem.indexOfScalarPos(u8, self.bytes, off, 0) orelse return null;
+                    off = end + 1;
+                }
+                break :blk off - start;
+            },
+            else => return null,
+        };
+
+        const end = start + len;
+        if (end > self.bytes.len) return null;
+        return self.bytes[start..end];
     }
 
     /// Build the canonical NEVRA string `name-[epoch:]version-release[.arch]`.
@@ -414,16 +532,16 @@ test "parse a minimal hand-built header" {
     // One entry: NAME (1000) -> "hello\0", type=string, count=1
     // nindex = 1, hsize = 6
     const blob = [_]u8{
-        0,    0,    0,    1, // nindex
-        0,    0,    0,    6, // hsize
+        0, 0, 0, 1, // nindex
+        0,   0,   0,    6, // hsize
         // index entry: tag=1000, type=6 (string), offset=0, count=1
-        0,    0,    0x03, 0xe8,
-        0,    0,    0,    6,
-        0,    0,    0,    0,
-        0,    0,    0,    1,
+        0,   0,   0x03, 0xe8,
+        0,   0,   0,    6,
+        0,   0,   0,    0,
+        0,   0,   0,    1,
         // data: "hello\0"
-        'h',  'e',  'l',  'l',
-        'o',  0,
+        'h', 'e', 'l',  'l',
+        'o', 0,
     };
     const h = try Header.parse(&blob);
     try std.testing.expectEqual(@as(u32, 1), h.index_count);
@@ -434,20 +552,33 @@ test "parse a minimal hand-built header" {
 test "nevra with arch, no epoch" {
     // name=foo, version=1.0, release=2, arch=x86_64 → foo-1.0-2.x86_64
     const blob = [_]u8{
-        0,    0,    0,    4,
-        0,    0,    0,    16,
+        0,   0,   0,    4,
+        0,   0,   0,    16,
         // NAME    tag=1000  type=6  offset=0   count=1
-        0, 0, 0x03, 0xe8, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 1,
+        0,   0,   0x03, 0xe8,
+        0,   0,   0,    6,
+        0,   0,   0,    0,
+        0,   0,   0,    1,
         // VERSION tag=1001  type=6  offset=4   count=1
-        0, 0, 0x03, 0xe9, 0, 0, 0, 6, 0, 0, 0, 4, 0, 0, 0, 1,
+        0,   0,   0x03, 0xe9,
+        0,   0,   0,    6,
+        0,   0,   0,    4,
+        0,   0,   0,    1,
         // RELEASE tag=1002  type=6  offset=8   count=1
-        0, 0, 0x03, 0xea, 0, 0, 0, 6, 0, 0, 0, 8, 0, 0, 0, 1,
+        0,   0,   0x03, 0xea,
+        0,   0,   0,    6,
+        0,   0,   0,    8,
+        0,   0,   0,    1,
         // ARCH    tag=1022  type=6  offset=10  count=1
-        0, 0, 0x03, 0xfe, 0, 0, 0, 6, 0, 0, 0, 10, 0, 0, 0, 1,
-        'f', 'o', 'o', 0,
-        '1', '.', '0', 0,
-        '2', 0,
-        'x', '8', '6', '_', '6', '4', 0,
+        0,   0,   0x03, 0xfe,
+        0,   0,   0,    6,
+        0,   0,   0,    10,
+        0,   0,   0,    1,
+        'f', 'o', 'o',  0,
+        '1', '.', '0',  0,
+        '2', 0,   'x',  '8',
+        '6', '_', '6',  '4',
+        0,
     };
     const h = try Header.parse(&blob);
     const nevra = (try h.allocNevra(std.testing.allocator)).?;
@@ -459,18 +590,32 @@ test "nevra without arch (gpg-pubkey style)" {
     const blob = [_]u8{
         // nindex=3, hsize=3+9+9 = 21? compute: "gpg-pubkey\0" (11) +
         // "3135ce90\0" (9) + "5e6fda74\0" (9) = 29
-        0, 0, 0, 3,
-        0, 0, 0, 29,
+        0,   0,   0,    3,
+        0,   0,   0,    29,
         // NAME    tag=1000  type=6  offset=0   count=1
-        0, 0, 0x03, 0xe8, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 1,
+        0,   0,   0x03, 0xe8,
+        0,   0,   0,    6,
+        0,   0,   0,    0,
+        0,   0,   0,    1,
         // VERSION tag=1001  type=6  offset=11  count=1
-        0, 0, 0x03, 0xe9, 0, 0, 0, 6, 0, 0, 0, 11, 0, 0, 0, 1,
+        0,   0,   0x03, 0xe9,
+        0,   0,   0,    6,
+        0,   0,   0,    11,
+        0,   0,   0,    1,
         // RELEASE tag=1002  type=6  offset=20  count=1
-        0, 0, 0x03, 0xea, 0, 0, 0, 6, 0, 0, 0, 20, 0, 0, 0, 1,
+        0,   0,   0x03, 0xea,
+        0,   0,   0,    6,
+        0,   0,   0,    20,
+        0,   0,   0,    1,
         // data: gpg-pubkey\0 3135ce90\0 5e6fda74\0
-        'g', 'p', 'g', '-', 'p', 'u', 'b', 'k', 'e', 'y', 0,
-        '3', '1', '3', '5', 'c', 'e', '9', '0', 0,
-        '5', 'e', '6', 'f', 'd', 'a', '7', '4', 0,
+        'g', 'p', 'g',  '-',
+        'p', 'u', 'b',  'k',
+        'e', 'y', 0,    '3',
+        '1', '3', '5',  'c',
+        'e', '9', '0',  0,
+        '5', 'e', '6',  'f',
+        'd', 'a', '7',  '4',
+        0,
     };
     const h = try Header.parse(&blob);
     const nevra = (try h.allocNevra(std.testing.allocator)).?;
@@ -491,21 +636,41 @@ test "string array + u32 array + binary accessors" {
     //   total data = 36
     const blob = [_]u8{
         0, 0, 0, 3, // nindex = 3
-        0, 0, 0, 36, // hsize = 36
+        0,   0,   0,    36, // hsize = 36
         // REQUIRENAME tag=1049 type=8 (string_array) offset=0 count=3
-        0, 0, 0x04, 0x19, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 3,
+        0,   0,   0x04, 0x19,
+        0,   0,   0,    8,
+        0,   0,   0,    0,
+        0,   0,   0,    3,
         // REQUIREFLAGS tag=1048 type=4 (int32) offset=20 count=3
-        0, 0, 0x04, 0x18, 0, 0, 0, 4, 0, 0, 0, 20, 0, 0, 0, 3,
+        0,   0,   0x04, 0x18,
+        0,   0,   0,    4,
+        0,   0,   0,    20,
+        0,   0,   0,    3,
         // SIG_SHA256 tag=273 type=7 (bin) offset=32 count=4
-        0, 0, 0x01, 0x11, 0, 0, 0, 7, 0, 0, 0, 32, 0, 0, 0, 4,
+        0,   0,   0x01, 0x11,
+        0,   0,   0,    7,
+        0,   0,   0,    32,
+        0,   0,   0,    4,
         // data starts here
-        'l', 'i', 'b', 'c', 0,
-        'g', 'l', 'i', 'b', 'c', 0,
-        'o', 'p', 'e', 'n', 's', 's', 'l', 0,
+        'l', 'i', 'b',  'c',
+        0,   'g', 'l',  'i',
+        'b', 'c', 0,    'o',
+        'p', 'e', 'n',  's',
+        's', 'l', 0,
         0, // padding to 4-byte alignment for the int32 array
-        0, 0, 0, 0x08,
-        0, 0, 0, 0x10,
-        0, 0, 0, 0x02,
+        0,
+        0,
+        0,
+        0x08,
+        0,
+        0,
+        0,
+        0x10,
+        0,
+        0,
+        0,
+        0x02,
         0xde, 0xad, 0xbe, 0xef, // SIG_SHA256 (truncated)
     };
     const h = try Header.parse(&blob);
