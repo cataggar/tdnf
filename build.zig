@@ -773,6 +773,33 @@ pub fn build(b: *Build) void {
         b.getInstallStep().dependOn(&install.step);
     }
 
+    // tdnf-rpm-scriptlet: smoke-test exe for the native shell
+    // scriptlet executor.
+    {
+        const mod = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .pic = true,
+        });
+        mod.addIncludePath(b.path("rpmzig"));
+        mod.addCSourceFiles(.{
+            .root = b.path("rpmzig"),
+            .files = &.{"scriptlet_main.c"},
+            .flags = &tdnf_cflags,
+        });
+        mod.linkLibrary(rpmzig_lib);
+        const exe = b.addExecutable(.{
+            .name = "tdnf-rpm-scriptlet",
+            .root_module = mod,
+        });
+        hardenExe(exe);
+        const install = b.addInstallArtifact(exe, .{
+            .dest_dir = .{ .override = .{ .custom = "libexec/tdnf" } },
+        });
+        b.getInstallStep().dependOn(&install.step);
+    }
+
     // tdnf-rpm-verify: smoke-test exe for the pure-Zig signature
     // verifier. Builds the same in-memory --key / --rpmdb keyring
     // path libtdnf uses.

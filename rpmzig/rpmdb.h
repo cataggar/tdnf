@@ -376,6 +376,95 @@ int tdnf_rpm_file_install(
     const tdnf_rpm_install_options *options
 );
 
+/* --- native shell-scriptlet execution primitive (T4 building block) --- */
+
+typedef enum tdnf_rpm_scriptlet_phase {
+    TDNF_RPM_SCRIPTLET_PHASE_PRE = 0,
+    TDNF_RPM_SCRIPTLET_PHASE_POST = 1,
+    TDNF_RPM_SCRIPTLET_PHASE_PREUN = 2,
+    TDNF_RPM_SCRIPTLET_PHASE_POSTUN = 3,
+    TDNF_RPM_SCRIPTLET_PHASE_PRETRANS = 4,
+    TDNF_RPM_SCRIPTLET_PHASE_POSTTRANS = 5,
+} tdnf_rpm_scriptlet_phase;
+
+typedef enum tdnf_rpm_scriptlet_outcome {
+    TDNF_RPM_SCRIPTLET_OUTCOME_NOT_RUN = 0,
+    TDNF_RPM_SCRIPTLET_OUTCOME_OK = 1,
+    TDNF_RPM_SCRIPTLET_OUTCOME_EXITED = 2,
+    TDNF_RPM_SCRIPTLET_OUTCOME_SIGNALED = 3,
+} tdnf_rpm_scriptlet_outcome;
+
+typedef struct tdnf_rpm_scriptlet_options {
+    /**
+     * Install-root prefix for chrooted execution. Pass NULL or ""
+     * for "/".
+     */
+    const char *install_root;
+    /**
+     * librpm-style RPMTRANS_FLAG_* bitmask. The executor honours
+     * NOSCRIPTS plus the phase-specific NOPRE/NOPOST/NOPREUN/
+     * NOPOSTUN/NOPRETRANS/NOPOSTTRANS flags.
+     */
+    uint32_t trans_flags;
+    /**
+     * Optional rpmdefine overrides applied to the native transaction
+     * config store before execution. This is how callers override
+     * macros such as _tmppath and _install_script_path.
+     */
+    const char *const *rpmdefines;
+    size_t rpmdefine_count;
+    /**
+     * Positional arguments appended after the script path. Pass a
+     * negative value to omit the corresponding argument.
+     */
+    int arg1;
+    int arg2;
+    /**
+     * If non-negative, duplicate this file descriptor onto stderr in
+     * the child before exec.
+     */
+    int script_fd;
+    /**
+     * When non-zero, duplicate stderr (or script_fd when supplied)
+     * onto stdout before exec. This matches the tdnf JSON-output
+     * requirement where scriptlet chatter must not corrupt stdout.
+     */
+    int redirect_stdout_to_stderr;
+} tdnf_rpm_scriptlet_options;
+
+typedef struct tdnf_rpm_scriptlet_result {
+    int ran;
+    int critical;
+    tdnf_rpm_scriptlet_outcome outcome;
+    int exit_status;
+    int signal_number;
+} tdnf_rpm_scriptlet_result;
+
+/**
+ * Execute one package/transaction shell scriptlet extracted from a
+ * raw RPM main-header blob.
+ *
+ * The header blob must match the format returned by
+ * tdnf_rpm_file_main_header_blob() or stored in the sqlite rpmdb
+ * Packages.blob column. Lua (`<lua>`) interpreters are intentionally
+ * unsupported here and return -1.
+ *
+ * On success, `*result_out` is always populated. A non-zero script
+ * exit is reported in `result_out->outcome` plus `exit_status`; it is
+ * not treated as an API failure because callers need to distinguish
+ * aborting phases (%pre/%preun/%pretrans) from warning-only phases.
+ *
+ * Returns 0 on success, -1 on API/parse/runtime setup failure (use
+ * tdnf_rpmdb_last_error()).
+ */
+int tdnf_rpm_header_run_scriptlet(
+    const unsigned char *header_blob,
+    size_t header_len,
+    tdnf_rpm_scriptlet_phase phase,
+    const tdnf_rpm_scriptlet_options *options,
+    tdnf_rpm_scriptlet_result *result_out
+);
+
 /* --- files-in-package iterator --- */
 
 typedef struct tdnf_rpm_files_iter tdnf_rpm_files_iter;
