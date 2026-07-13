@@ -100,15 +100,6 @@ pub fn build(b: *Build) void {
         "Plugin install directory (relative to prefix, default: lib/tdnf-plugins)",
     ) orelse "lib/tdnf-plugins";
 
-    // Opt-in: replace librpm's signature verifier (rpmVerifySignatures)
-    // with rpmzig's pure-Zig OpenPGP verifier. Compiles
-    // client/gpgcheck_zig.c plus rpmzig/verify_pure.c into libtdnf.
-    // Default false — does not change observable behaviour.
-    const rpmzig_verify = b.option(
-        bool,
-        "rpmzig-verify",
-        "Replace librpm signature verification with rpmzig's pure-Zig OpenPGP verifier (default false)",
-    ) orelse false;
     const prefix = b.install_prefix;
     const libdir = "lib";
     const full_libdir = b.fmt("{s}/{s}", .{ prefix, libdir });
@@ -717,7 +708,7 @@ pub fn build(b: *Build) void {
 
     // tdnf-rpm-verify: smoke-test exe for the pure-Zig signature
     // verifier. Builds the same in-memory --key / --rpmdb keyring
-    // path libtdnf uses under -Drpmzig-verify=true.
+    // path libtdnf uses.
     {
         const mod = b.createModule(.{
             .target = target,
@@ -756,14 +747,7 @@ pub fn build(b: *Build) void {
     tdnf_so_mod.addSystemIncludePath(libsolv_include);
     tdnf_so_mod.addSystemIncludePath(libsolvext_include);
     if (build_with_rpm_6x) tdnf_so_mod.addCMacro("BUILD_WITH_RPM_6X", "1");
-    if (rpmzig_verify) {
-        // TDNF_RPMZIG_VERIFY gates the rpmzig entry point
-        // (TDNFRpmzigVerify) in client/gpgcheck.c. When enabled,
-        // libtdnf routes package signature verification through the
-        // pure-Zig rpmzig path.
-        tdnf_so_mod.addCMacro("TDNF_RPMZIG_VERIFY", "1");
-        tdnf_so_mod.addIncludePath(b.path("rpmzig"));
-    }
+    tdnf_so_mod.addIncludePath(b.path("rpmzig"));
     tdnf_so_mod.addCSourceFiles(.{
         .root = b.path("client"),
         .files = &.{
@@ -776,21 +760,19 @@ pub fn build(b: *Build) void {
         },
         .flags = &tdnf_cflags,
     });
-    if (rpmzig_verify) {
-        // gpgcheck_zig.c is the single C-side entry point into the
-        // rpmzig verifier; verify_pure.c bridges into rpmzig/pgp
-        // without any gpgme dependency.
-        tdnf_so_mod.addCSourceFiles(.{
-            .root = b.path("client"),
-            .files = &.{"gpgcheck_zig.c"},
-            .flags = &tdnf_cflags,
-        });
-        tdnf_so_mod.addCSourceFiles(.{
-            .root = b.path("rpmzig"),
-            .files = &.{"verify_pure.c"},
-            .flags = &tdnf_cflags,
-        });
-    }
+    // gpgcheck_zig.c is the single C-side entry point into the
+    // rpmzig verifier; verify_pure.c bridges into rpmzig/pgp
+    // without any gpgme dependency.
+    tdnf_so_mod.addCSourceFiles(.{
+        .root = b.path("client"),
+        .files = &.{"gpgcheck_zig.c"},
+        .flags = &tdnf_cflags,
+    });
+    tdnf_so_mod.addCSourceFiles(.{
+        .root = b.path("rpmzig"),
+        .files = &.{"verify_pure.c"},
+        .flags = &tdnf_cflags,
+    });
     tdnf_so_mod.linkLibrary(common_lib);
     tdnf_so_mod.linkLibrary(solv_lib);
     tdnf_so_mod.linkLibrary(history_lib);

@@ -42,7 +42,7 @@ const signature = @import("signature.zig");
 const keyring = @import("keyring.zig");
 
 /// Verification verdict. Numeric values must stay in lock-step with
-/// the C `TDNF_RPMZIG_VERIFY_*` constants in `rpmzig/verify.h` —
+/// the C `TDNF_RPMZIG_STATUS_*` constants in `rpmzig/verify.h` —
 /// callers compare against them directly.
 pub const Status = enum(c_int) {
     ok = 0,
@@ -52,7 +52,7 @@ pub const Status = enum(c_int) {
     /// Catch-all for "we couldn't decide": unsupported algorithm,
     /// unsupported signature type, malformed input that isn't
     /// clearly a forgery, allocator failure, etc. Numerically
-    /// identical to `TDNF_RPMZIG_VERIFY_INTERNAL_ERROR` so the C side
+    /// identical to `TDNF_RPMZIG_STATUS_INTERNAL_ERROR` so the C side
     /// can compare the value directly.
     internal = 4,
 };

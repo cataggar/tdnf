@@ -1,8 +1,7 @@
 /*
  * tdnf-rpm-verify — smoke-test for the pure-Zig rpmzig verifier.
  *
- * Builds the same in-memory keyring that libtdnf uses under
- * -Drpmzig-verify=true:
+ * Builds the same in-memory keyring that libtdnf uses:
  *
  *   tdnf-rpm-verify <file.rpm> --key <key.asc> [--key <key2.asc> ...]
  *       Load each .asc into the verifier's in-memory keyring.
@@ -164,23 +163,23 @@ int main(int argc, char **argv)
         (const void *const *)key_blobs, key_lens, key_count, &status);
 
     switch (status) {
-        case TDNF_RPMZIG_VERIFY_OK:
+        case TDNF_RPMZIG_STATUS_OK:
             printf("Result:    OK\n");
             exit_code = 0;
             break;
-        case TDNF_RPMZIG_VERIFY_NO_SIG:
+        case TDNF_RPMZIG_STATUS_NO_SIG:
             printf("Result:    no signature\n");
             exit_code = 1;
             break;
-        case TDNF_RPMZIG_VERIFY_NO_KEY:
+        case TDNF_RPMZIG_STATUS_NO_KEY:
             printf("Result:    signature present, NO matching key\n");
             exit_code = 2;
             break;
-        case TDNF_RPMZIG_VERIFY_BAD:
+        case TDNF_RPMZIG_STATUS_BAD:
             printf("Result:    BAD signature\n");
             exit_code = 3;
             break;
-        case TDNF_RPMZIG_VERIFY_INTERNAL_ERROR:
+        case TDNF_RPMZIG_STATUS_INTERNAL_ERROR:
         default:
             printf("Result:    internal error / unsupported input\n");
             exit_code = 4;

@@ -8,64 +8,8 @@
 
 #include "includes.h"
 
-#ifdef TDNF_RPMZIG_VERIFY
 #include "gpgcheck_zig.h"
 #include "../rpmzig/verify.h"
-#endif
-
-#ifndef TDNF_RPMZIG_VERIFY
-static uint32_t
-TDNFGPGCheck(
-    rpmts pTS,
-    const char* pszKeyFile,
-    const char* pszPkgFile
-    )
-{
-    uint32_t dwError = 0;
-    rpmKeyring pKeyring = NULL;
-    FD_t fp = NULL;
-
-    if(!pTS || IsNullOrEmptyString(pszKeyFile) || !pszPkgFile)
-    {
-        dwError = ERROR_TDNF_INVALID_PARAMETER;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    fp = Fopen(pszPkgFile, "r.ufdio");
-    if (fp == NULL) {
-        dwError = errno;
-        BAIL_ON_TDNF_SYSTEM_ERROR(dwError);
-    }
-
-    pKeyring = rpmtsGetKeyring(pTS, 0);
-    if (pKeyring == NULL) {
-        pr_err("failed to get RPM keyring");
-        dwError = ERROR_TDNF_INVALID_PARAMETER;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    dwError = AddKeyFileToKeyring(pszKeyFile, pKeyring);
-    BAIL_ON_TDNF_ERROR(dwError);
-
-    if (rpmVerifySignatures(
-        /* unused but must be != NULL, see lib/rpmchecksig.c in rpm */ (QVA_t)1,
-        pTS, fp, pszPkgFile) != 0)
-    {
-        dwError = ERROR_TDNF_RPM_GPG_NO_MATCH;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-cleanup:
-    if(fp)
-    {
-        Fclose(fp);
-    }
-    return dwError;
-
-error:
-    goto cleanup;
-}
-#endif /* !TDNF_RPMZIG_VERIFY */
 
 uint32_t
 ReadGPGKeyFile(
@@ -77,7 +21,6 @@ ReadGPGKeyFile(
     uint32_t dwError = 0;
     char* pszKeyData = NULL;
     int nPathIsDir = 0;
-    char* pszScheme = NULL;
 
     if(IsNullOrEmptyString(pszFile) || !ppszKeyData || !pnSize)
     {
@@ -105,57 +48,10 @@ ReadGPGKeyFile(
     *ppszKeyData = pszKeyData;
 
 cleanup:
-    TDNF_SAFE_FREE_MEMORY(pszScheme);
     return dwError;
 
 error:
     TDNF_SAFE_FREE_MEMORY(pszKeyData);
-    goto cleanup;
-}
-
-uint32_t
-AddKeyFileToKeyring(
-    const char* pszFile,
-    rpmKeyring pKeyring
-    )
-{
-    uint32_t dwError = 0;
-
-    int subkeysCount, i;
-    rpmPubkey *subkeys = NULL;
-    rpmPubkey key = NULL;
-
-    if(IsNullOrEmptyString(pszFile) || !pKeyring)
-    {
-        dwError = ERROR_TDNF_INVALID_PARAMETER;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    key = rpmPubkeyRead(pszFile);
-    if (key == NULL) {
-        pr_err("reading %s failed: %s (%d)", pszFile, strerror(errno), errno);
-        dwError = ERROR_TDNF_INVALID_PUBKEY_FILE;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-    if (rpmKeyringAddKey(pKeyring, key) == 0) {
-        pr_info("added key %s to keyring\n", pszFile);
-    }
-    subkeys = rpmGetSubkeys(key, &subkeysCount);
-    rpmPubkeyFree(key);
-    for (i = 0; i < subkeysCount; i++) {
-        rpmPubkey subkey = subkeys[i];
-
-        if (rpmKeyringAddKey(pKeyring, subkey) == 0) {
-            pr_info("added subkey %d of main key %s to keyring\n", i, pszFile);
-        }
-        rpmPubkeyFree(subkey);
-    }
-
-cleanup:
-    if (subkeys)
-        free(subkeys);
-    return dwError;
-error:
     goto cleanup;
 }
 
@@ -248,18 +144,14 @@ TDNFGPGCheckPackage(
             level &= ~RPMSIG_DIGEST_TYPE;
             rpmtsSetVSFlags(pTS->pTS, rpmtsVSFlags(pTS->pTS) | RPMVSF_MASK_NODIGESTS);
         }
-#ifdef TDNF_RPMZIG_VERIFY
-        /* Under -Drpmzig-verify=true, librpm is no longer the
-         * signature verifier — rpmzig's pure-Zig path is. Skip
-         * librpm's
-         * sig check so rpmReadPackageFile acts as a pure header
-         * reader and doesn't fail with RPMRC_NOTTRUSTED on rpms
-         * whose keys aren't yet in the librpm-side keyring.
-         * RPMSIG_SIGNATURE_TYPE is cleared from VfyLevel for the
-         * same reason. (Header digest checks stay active.) */
+        /* librpm is no longer the signature verifier — rpmzig's
+         * pure-Zig path is. Skip librpm's sig check so
+         * rpmReadPackageFile acts as a pure header reader and
+         * doesn't fail with RPMRC_NOTTRUSTED on rpms whose keys
+         * aren't yet in the rpmdb trust set. Header digest checks
+         * stay active. */
         rpmtsSetVSFlags(pTS->pTS, rpmtsVSFlags(pTS->pTS) | RPMVSF_MASK_NOSIGNATURES);
         level &= ~RPMSIG_SIGNATURE_TYPE;
-#endif
         rpmtsSetVfyLevel(pTS->pTS, level);
     } else {
         rpmtsSetVfyLevel(pTS->pTS, RPMSIG_NONE_TYPE);
@@ -280,6 +172,8 @@ TDNFGPGCheckPackage(
     Fclose(fp);
     fp = NULL;
 
+    BAIL_ON_TDNF_RPM_ERROR(dwError);
+
     if (pRepo->nGPGCheck && !pTdnf->pConf->nSkipSignature) {
         /* refuse to install an unsigned package if gpgcheck is enabled */
         if (((pszTmp = headerGetAsString(rpmHeader, RPMTAG_SIGPGP)) == NULL) &&
@@ -295,22 +189,7 @@ TDNFGPGCheckPackage(
         }
     }
 
-#ifdef TDNF_RPMZIG_VERIFY
-    /* Under the rpmzig primary path, librpm runs with
-     * RPMVSF_MASK_NOSIGNATURES (set above), so rpmReadPackageFile
-     * cannot return RPMRC_NOTTRUSTED / RPMRC_NOKEY. Any non-zero
-     * dwError here is a real I/O / format error — bail. Otherwise
-     * drive the key-fetch + rpmzig verify loop unconditionally for
-     * gpgcheck-enabled repos. */
-    BAIL_ON_TDNF_RPM_ERROR(dwError);
     if (pRepo->nGPGCheck && !pTdnf->pConf->nSkipSignature)
-#else
-    if (dwError != RPMRC_NOTTRUSTED && dwError != RPMRC_NOKEY)
-    {
-        BAIL_ON_TDNF_RPM_ERROR(dwError);
-    }
-    else if(pRepo->nGPGCheck && !pTdnf->pConf->nSkipSignature)
-#endif
     {
         dwError = TDNFGetGPGKeys(pTdnf, pRepo, &ppszUrlGPGKeys);
         BAIL_ON_TDNF_ERROR(dwError);
@@ -347,25 +226,26 @@ TDNFGPGCheckPackage(
                 }
                 BAIL_ON_TDNF_ERROR(dwError);
             }
-            /* Persist the key to the rpmts keyring (and from there to
-             * the rpmdb via rpmtsImportPubkey) so subsequent installs
-             * see it without re-prompting. Done on both verify paths;
-             * cheap and matches the historical UX. */
+            /* Persist each user-approved repo key to the rpmdb as a
+             * gpg-pubkey-* entry so subsequent installs and external
+             * rpm(8) queries see the same trust set. rpmzig still
+             * receives the fresh key directly below; this import is
+             * for durable keyring compatibility, not for the current
+             * verification attempt. */
             dwError = TDNFImportGPGKeyFile(pTS->pTS, pszLocalGPGKey);
             BAIL_ON_TDNF_ERROR(dwError);
 
-#ifdef TDNF_RPMZIG_VERIFY
             {
-                int rpmzig_status = TDNF_RPMZIG_VERIFY_INTERNAL_ERROR;
+                int rpmzig_status = TDNF_RPMZIG_STATUS_INTERNAL_ERROR;
                 (void)TDNFRpmzigVerify(
                     pszFilePath, pszLocalGPGKey,
                     pTdnf->pArgs ? pTdnf->pArgs->pszInstallRoot : NULL,
                     &rpmzig_status);
-                if (rpmzig_status == TDNF_RPMZIG_VERIFY_OK)
+                if (rpmzig_status == TDNF_RPMZIG_STATUS_OK)
                 {
                     nMatched++;
                 }
-                else if (rpmzig_status == TDNF_RPMZIG_VERIFY_NO_KEY)
+                else if (rpmzig_status == TDNF_RPMZIG_STATUS_NO_KEY)
                 {
                     /* The fresh key didn't match this signature.
                      * Try the next gpgkey url, if any. */
@@ -379,18 +259,6 @@ TDNFGPGCheckPackage(
                     BAIL_ON_TDNF_ERROR(dwError);
                 }
             }
-#else
-            dwError = TDNFGPGCheck(pTS->pTS, pszLocalGPGKey, pszFilePath);
-            if (dwError == 0)
-            {
-                nMatched++;
-            }
-            else if (dwError == ERROR_TDNF_RPM_GPG_NO_MATCH)
-            {
-                dwError = 0;
-            }
-            BAIL_ON_TDNF_ERROR(dwError);
-#endif
 
             if (nRemote)
             {
@@ -400,6 +268,8 @@ TDNFGPGCheckPackage(
                     BAIL_ON_TDNF_SYSTEM_ERROR(dwError);
                 }
             }
+
+            TDNF_SAFE_FREE_MEMORY(pszLocalGPGKey);
         }
 
         if (nMatched == 0)
@@ -407,36 +277,6 @@ TDNFGPGCheckPackage(
             dwError = ERROR_TDNF_RPM_GPG_NO_MATCH;
             BAIL_ON_TDNF_ERROR(dwError);
         }
-#ifndef TDNF_RPMZIG_VERIFY
-        /* On the librpm primary path, the first rpmReadPackageFile
-         * was called before the fresh key landed in the keyring,
-         * so we re-read now that the key has been imported and the
-         * librpm verifier has accepted. Under TDNF_RPMZIG_VERIFY
-         * the first read had RPMVSF_MASK_NOSIGNATURES in effect and
-         * already produced a usable header; rpmzig provided the
-         * authoritative verdict, so a second read is unnecessary. */
-        fp = Fopen (pszFilePath, "r.ufdio");
-        if(!fp)
-        {
-            dwError = errno;
-            BAIL_ON_TDNF_SYSTEM_ERROR(dwError);
-        }
-
-        dwError = rpmReadPackageFile(
-                      pTS->pTS,
-                      fp,
-                      pszFilePath,
-                      &rpmHeader);
-
-        BAIL_ON_TDNF_RPM_ERROR(dwError);
-
-        Fclose(fp);
-        fp = NULL;
-#endif
-    }
-    else
-    {
-        dwError = 0;
     }
 
     /* optional output parameter */

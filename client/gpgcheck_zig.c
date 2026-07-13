@@ -1,15 +1,11 @@
 /*
- * rpmzig primary signature verifier for TDNFGPGCheckPackage.
+ * libtdnf's pure-Zig rpmzig signature verifier for
+ * TDNFGPGCheckPackage.
  *
- * Compiled into libtdnf only when build.zig is invoked with
- * -Drpmzig-verify=true (defines TDNF_RPMZIG_VERIFY). When the flag
- * is unset this file is not part of the build and libtdnf keeps the
- * historical librpm verification path.
- *
- * Under the flag, this function REPLACES the librpm
- * rpmVerifySignatures path (TDNFGPGCheck) — rpmzig is the sole
- * signature verifier on the install path. The rpmts is separately
- * set to RPMVSF_MASK_NOSIGNATURES so rpmReadPackageFile runs as a
+ * This function replaces the historical librpm
+ * signature-verification path: rpmzig is the sole signature verifier
+ * on the install path. The rpmts is separately set to
+ * RPMVSF_MASK_NOSIGNATURES so rpmReadPackageFile runs as a
  * header-only reader.
  *
  * Trust set:
@@ -17,7 +13,7 @@
  *     'rpm --import' / TDNFImportGPGKeyFile build up over time)
  *   - the fresh key tdnf just fetched for this repo
  *
- * The status codes match TDNF_RPMZIG_VERIFY_* from verify.h.
+ * The status codes match TDNF_RPMZIG_STATUS_* from verify.h.
  */
 
 #include <stdio.h>
@@ -83,7 +79,7 @@ int TDNFRpmzigVerify(
     const void *blobs[MAX_RPMDB_KEYS + 1];
     size_t lens[MAX_RPMDB_KEYS + 1];
     size_t total_keys = 0;
-    int status = TDNF_RPMZIG_VERIFY_INTERNAL_ERROR;
+    int status = TDNF_RPMZIG_STATUS_INTERNAL_ERROR;
     int rc = 0;
     size_t i = 0;
 
@@ -92,14 +88,14 @@ int TDNFRpmzigVerify(
     fh = tdnf_rpm_file_open(pkg_path);
     if (!fh) {
         fprintf(stderr,
-            "rpmzig-verify: open %s: %s\n",
+            "rpmzig: open %s: %s\n",
             pkg_path, tdnf_rpmdb_last_error());
         return -1;
     }
 
     if (slurp_key(key_path, &fresh_key, &fresh_key_len) != 0) {
         fprintf(stderr,
-            "rpmzig-verify: read key %s failed\n", key_path);
+            "rpmzig: read key %s failed\n", key_path);
         tdnf_rpm_file_close(fh);
         return -1;
     }
@@ -116,7 +112,7 @@ int TDNFRpmzigVerify(
             if (n == 0) break;
             if (n < 0) {
                 fprintf(stderr,
-                    "rpmzig-verify: rpmdb pubkey walk: %s\n",
+                    "rpmzig: rpmdb pubkey walk: %s\n",
                     tdnf_rpmdb_last_error());
                 break;
             }
@@ -139,7 +135,7 @@ int TDNFRpmzigVerify(
     (void)tdnf_rpmzig_verify_pure(fh, blobs, lens, total_keys, &status);
 
     *out_status = status;
-    rc = (status == TDNF_RPMZIG_VERIFY_OK) ? 0 : 1;
+    rc = (status == TDNF_RPMZIG_STATUS_OK) ? 0 : 1;
 
     for (i = 0; i < rpmdb_count; i++) {
         tdnf_rpmdb_string_free(rpmdb_keys[i]);
