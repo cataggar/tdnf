@@ -34,6 +34,26 @@ pub const Options = struct {
     rpmdefines: []const []const u8 = &.{},
     script_fd: ?c_int = null,
     redirect_stdout_to_stderr: bool = false,
+    /// Optional explicit `$2` argument for the trigger scripts.
+    ///
+    /// When null (the default), the engine derives `$2` from the
+    /// current triggering-package instance count in the rpmdb, using
+    /// the phase-specific formula in `effectiveTriggeringInstanceCount`:
+    /// this matches real rpm for plain install / plain erase where
+    /// the rpmdb state is consistent with the transaction step.
+    ///
+    /// For upgrade, the native executor uses `write_replace` to swap
+    /// the old row atomically, so at the moment the engine is invoked
+    /// the rpmdb count no longer reflects real rpm's transient two-
+    /// instance state. Callers pass an override for those phases:
+    ///
+    ///   * %triggerin on the NEW package during upgrade: override
+    ///     with `nPriors + 1` (real rpm treats both old and new as
+    ///     briefly co-installed).
+    ///   * %triggerun / %triggerpostun on the OLD package during
+    ///     upgrade cleanup: override with `1` (the new instance
+    ///     survives).
+    arg2_override: ?i32 = null,
 };
 
 pub const Result = scriptlet_engine.Result;
@@ -72,7 +92,7 @@ pub fn runHeaderTriggers(
     defer db.close();
 
     const triggering_instances = try effectiveTriggeringInstanceCount(&db, triggering_name, phase);
-    const arg2 = try castCount(triggering_instances);
+    const arg2 = if (options.arg2_override) |ov| ov else try castCount(triggering_instances);
 
     var result = Result{
         .ran = false,
