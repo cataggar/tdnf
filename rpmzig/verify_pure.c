@@ -7,7 +7,7 @@
  * beyond the Zig-side verifier already linked into rpmzig_lib.
  *
  * Status codes returned via *out_status are the same
- * TDNF_RPMZIG_VERIFY_* set; INTERNAL_ERROR=4 is the catch-all for
+ * TDNF_RPMZIG_STATUS_* set; INTERNAL_ERROR=4 is the catch-all for
  * unsupported or otherwise unexpected verifier input.
  */
 
@@ -38,13 +38,13 @@ int tdnf_rpmzig_verify_pure(
     int status = 0;
 
     if (!fh || !out_status) return -1;
-    *out_status = TDNF_RPMZIG_VERIFY_INTERNAL_ERROR;
+    *out_status = TDNF_RPMZIG_STATUS_INTERNAL_ERROR;
 
     rc = tdnf_rpm_file_signed_range(fh,
         &sig_bytes, &sig_len,
         &signed_bytes, &signed_len);
     if (rc != 0) {
-        *out_status = TDNF_RPMZIG_VERIFY_NO_SIG;
+        *out_status = TDNF_RPMZIG_STATUS_NO_SIG;
         return 1;
     }
 
@@ -53,5 +53,5 @@ int tdnf_rpmzig_verify_pure(
         signed_bytes, signed_len,
         key_blobs, key_lens, key_count);
     *out_status = status;
-    return status == TDNF_RPMZIG_VERIFY_OK ? 0 : 1;
+    return status == TDNF_RPMZIG_STATUS_OK ? 0 : 1;
 }

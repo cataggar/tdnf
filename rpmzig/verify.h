@@ -4,8 +4,8 @@
  * Companion to rpmdb.h. The C shim in rpmzig/verify_pure.c bridges
  * `tdnf_rpm_file` into the Zig verifier under rpmzig/pgp/.
  */
-#ifndef _TDNF_RPMZIG_VERIFY_H_
-#define _TDNF_RPMZIG_VERIFY_H_
+#ifndef _TDNF_RPMZIG_STATUS_H_
+#define _TDNF_RPMZIG_STATUS_H_
 
 #include "rpmdb.h"
 
@@ -14,11 +14,11 @@ extern "C" {
 #endif
 
 enum {
-    TDNF_RPMZIG_VERIFY_OK             = 0,
-    TDNF_RPMZIG_VERIFY_NO_SIG         = 1,
-    TDNF_RPMZIG_VERIFY_NO_KEY         = 2,
-    TDNF_RPMZIG_VERIFY_BAD            = 3,
-    TDNF_RPMZIG_VERIFY_INTERNAL_ERROR = 4,
+    TDNF_RPMZIG_STATUS_OK             = 0,
+    TDNF_RPMZIG_STATUS_NO_SIG         = 1,
+    TDNF_RPMZIG_STATUS_NO_KEY         = 2,
+    TDNF_RPMZIG_STATUS_BAD            = 3,
+    TDNF_RPMZIG_STATUS_INTERNAL_ERROR = 4,
 };
 
 /**
@@ -31,9 +31,9 @@ enum {
  * `rpmzig/pgp/verify.zig` (currently RSA, ECDSA P-256/P-384, and
  * Ed25519 in both native and EdDSALegacy wire formats). Unsupported,
  * malformed, or otherwise unexpected cases return
- * TDNF_RPMZIG_VERIFY_INTERNAL_ERROR (numeric 4).
+ * TDNF_RPMZIG_STATUS_INTERNAL_ERROR (numeric 4).
  *
- * On success writes a TDNF_RPMZIG_VERIFY_* status into *out_status.
+ * On success writes a TDNF_RPMZIG_STATUS_* status into *out_status.
  * Returns 0 on OK, non-zero otherwise.
  */
 int tdnf_rpmzig_verify_pure(
@@ -48,4 +48,4 @@ int tdnf_rpmzig_verify_pure(
 }
 #endif
 
-#endif /* _TDNF_RPMZIG_VERIFY_H_ */
+#endif /* _TDNF_RPMZIG_STATUS_H_ */

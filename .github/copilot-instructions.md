@@ -119,24 +119,18 @@ the C ABI in `rpmzig/rpmdb.h` and `rpmzig/verify.h`):
   OpenPGP verifier in `rpmzig/pgp/*.zig` (see
   plan-pure-zig-pgp.md, issue #14).
 
-The verifier is **opt-in via `zig build -Drpmzig-verify=true`**.
-Under the flag, libtdnf uses the pure-Zig OpenPGP verifier and
-the rpmzig path replaces librpm's `rpmVerifySignatures`
-entirely (`rpmts` runs with `RPMVSF_MASK_NOSIGNATURES`).
-Default builds keep the librpm verify path. The rpmzig-enabled
-build does **not** link `libgpgme.so.11`, `libgpg-error.so.0`,
-or `libassuan.so.0`. Build matrix:
-
-| Flag                              | Verifier                | Links gpgme? |
-|-----------------------------------|-------------------------|--------------|
-| (default)                         | librpm primary          | no           |
-| `-Drpmzig-verify=true`            | rpmzig + pure-Zig primary | **no**     |
+libtdnf now uses the pure-Zig OpenPGP verifier
+unconditionally on the package-install path, with
+`rpmReadPackageFile` running under `RPMVSF_MASK_NOSIGNATURES`
+for the initial header read. The build no longer has a
+verifier-selection switch, and libtdnf does **not** link
+`libgpgme.so.11`, `libgpg-error.so.0`, or `libassuan.so.0`.
 
 Smoke-test consumers under `libexec/tdnf/`:
 `tdnf-rpmdb-count`, `tdnf-rpmdb-list`, `tdnf-rpmdb-pubkeys`,
 `tdnf-rpm-info`, `tdnf-rpm-files`, `tdnf-rpm-verify` (the last
 supports `--key` and `--rpmdb [root]`, using the same pure-Zig
-verification path as `-Drpmzig-verify=true`).
+verification path as libtdnf).
 
 After T3, librpm in libtdnf is purely the
 **transaction-execution backend** — the same role it plays in

@@ -1,8 +1,7 @@
 /*
  * Internal header for the pure-Zig rpmzig sig-verify entry point.
  * Both gpgcheck.c (caller) and gpgcheck_zig.c (definition) include
- * this. Pulled in only when libtdnf was built with
- * -Drpmzig-verify=true.
+ * this.
  */
 #ifndef _TDNF_CLIENT_GPGCHECK_ZIG_H_
 #define _TDNF_CLIENT_GPGCHECK_ZIG_H_
@@ -19,7 +18,7 @@ extern "C" {
  *   - the armored ASCII key in `key_path` (the fresh repo key
  *     tdnf just fetched).
  *
- * On success writes a TDNF_RPMZIG_VERIFY_* status into *out_status
+ * On success writes a TDNF_RPMZIG_STATUS_* status into *out_status
  * (0 = OK, 1 = NO_SIG, 2 = NO_KEY, 3 = BAD, 4 = INTERNAL_ERROR).
  * Returns 0 if *out_status == OK, non-zero otherwise (the value
  * itself is implementation-defined; callers should branch on

@@ -138,12 +138,6 @@ ReadGPGKeyFile(
    );
 
 uint32_t
-AddKeyFileToKeyring(
-    const char* pszFile,
-    rpmKeyring pKeyring
-    );
-
-uint32_t
 TDNFImportGPGKeyFile(
     rpmts pTS,
     const char* pszFile

@@ -26,16 +26,19 @@ def get_host_gpg_keys(utils):
     return host_gpg_keys
 
 
+def get_new_gpg_keys(current_gpg_keys, baseline_gpg_keys):
+    return [k for k in set(current_gpg_keys) - set(baseline_gpg_keys) if not any(
+        k.split('-')[2].endswith(orig.split('-')[2]) or orig.split('-')[2].endswith(k.split('-')[2])
+        for orig in baseline_gpg_keys)]
+
+
 @pytest.fixture(scope='function', autouse=True)
 def setup_test_function(utils):
     global original_gpg_keys
     if not original_gpg_keys:
         original_gpg_keys = get_host_gpg_keys(utils)
 
-    new_gpg_key = get_host_gpg_keys(utils)
-    new_gpg_key = [k for k in set(new_gpg_key) - set(original_gpg_keys) if not any(
-        k.split('-')[2].endswith(orig.split('-')[2]) or orig.split('-')[2].endswith(k.split('-')[2])
-        for orig in original_gpg_keys)]
+    new_gpg_key = get_new_gpg_keys(get_host_gpg_keys(utils), original_gpg_keys)
     for key in new_gpg_key:
         ret = utils._run(f"rpm -ev {key}")
         assert ret['retval'] == 0
@@ -50,10 +53,7 @@ def teardown_test(utils):
     set_gpgcheck(utils, False)
     set_gpgcheck(utils, False, None)
 
-    new_gpg_key = get_host_gpg_keys(utils)
-    new_gpg_key = [k for k in set(new_gpg_key) - set(original_gpg_keys) if not any(
-        k.split('-')[2].endswith(orig.split('-')[2]) or orig.split('-')[2].endswith(k.split('-')[2])
-        for orig in original_gpg_keys)]
+    new_gpg_key = get_new_gpg_keys(get_host_gpg_keys(utils), original_gpg_keys)
     for key in new_gpg_key:
         ret = utils._run(f"rpm -ev {key}")
         assert ret['retval'] == 0
@@ -159,10 +159,12 @@ def test_install_local_key(utils):
     set_gpgcheck(utils, True)
     keypath = os.path.join(utils.config['repo_path'], 'photon-test', 'keys', 'pubkey.asc')
     set_repo_key(utils, 'file://{}'.format(keypath))
+    host_gpg_keys = get_host_gpg_keys(utils)
     pkgname = utils.config["sglversion_pkgname"]
     ret = utils.run(['tdnf', 'install', '-y', pkgname])
     assert ret['retval'] == 0
     assert utils.check_package(pkgname)
+    assert get_new_gpg_keys(get_host_gpg_keys(utils), host_gpg_keys)
 
 
 # import remote, correct key during install from repo config, expect success
