@@ -559,6 +559,37 @@ fn dupZ(src: []const u8) ?[*:0]u8 {
 // -------------------------------------------------------------------
 
 const cpio = @import("cpio.zig");
+const install_engine = @import("install.zig");
+
+const CInstallPriorHeader = extern struct {
+    blob: ?[*]const u8,
+    len: usize,
+};
+
+const CInstallConflictFn = *const fn (?*anyopaque, [*:0]const u8) callconv(.c) c_int;
+
+const CInstallOptions = extern struct {
+    install_root: ?[*:0]const u8,
+    trans_flags: u32,
+    install_kind: c_int,
+    prior_headers: ?[*]const CInstallPriorHeader,
+    prior_header_count: usize,
+    conflict_fn: ?CInstallConflictFn,
+    conflict_fn_data: ?*anyopaque,
+};
+
+const ConflictBridge = struct {
+    cb: ?CInstallConflictFn,
+    data: ?*anyopaque,
+};
+
+fn conflictBridge(ctx: ?*anyopaque, path: []const u8) i32 {
+    const bridge: *const ConflictBridge = @ptrCast(@alignCast(ctx orelse return -1));
+    const cb = bridge.cb orelse return 0;
+    const path_z = std.heap.c_allocator.dupeZ(u8, path) catch return -1;
+    defer std.heap.c_allocator.free(path_z);
+    return cb(bridge.data, path_z);
+}
 
 // PR #5 of plan-pure-zig-pgp.md: pull the pure-Zig PGP verifier into
 // the rpmzig static library so its `export fn rpmzig_verify_detached`
@@ -640,6 +671,37 @@ export fn tdnf_rpm_file_nevra(fh: ?*FileHandle) ?[*:0]u8 {
     @memcpy(out_bytes[0..nevra.len], nevra);
     out_bytes[nevra.len] = 0;
     return @ptrCast(out_bytes);
+}
+
+/// Returns the raw main-header blob for this rpm file.
+///
+/// The returned bytes alias the file handle's owned buffer and stay
+/// valid until tdnf_rpm_file_close(). The blob is the header-v3 body
+/// without the 8-byte standalone magic prefix, matching rpmdb.sqlite's
+/// Packages.blob format and suitable for tdnf_rpm_file_install()'s
+/// prior_headers input.
+export fn tdnf_rpm_file_main_header_blob(
+    fh: ?*FileHandle,
+    out: ?*[*]const u8,
+    out_len: ?*usize,
+) i32 {
+    clearError();
+    const f = fh orelse {
+        setError("null file handle", .{});
+        return -1;
+    };
+    const out_ptr = out orelse {
+        setError("null out pointer", .{});
+        return -1;
+    };
+    const len_ptr = out_len orelse {
+        setError("null out_len pointer", .{});
+        return -1;
+    };
+
+    out_ptr.* = f.file.main.bytes.ptr;
+    len_ptr.* = f.file.main.bytes.len;
+    return 0;
 }
 
 /// Returns the payload compressor name as a static C string.
@@ -756,6 +818,86 @@ export fn tdnf_rpm_file_decompress_payload(
     @memcpy(@as([*]u8, @ptrCast(buf))[0..bytes.len], bytes);
     out_p.* = @ptrCast(buf);
     out_sz.* = bytes.len;
+    return 0;
+}
+
+/// Install this rpm file's payload into install_root using the native
+/// rpmzig file-installation engine.
+export fn tdnf_rpm_file_install(
+    fh: ?*FileHandle,
+    options: ?*const CInstallOptions,
+) i32 {
+    clearError();
+    const f = fh orelse {
+        setError("null file handle", .{});
+        return -1;
+    };
+    const opts = options orelse {
+        setError("null install options", .{});
+        return -1;
+    };
+
+    const install_root = if (opts.install_root) |p| std.mem.span(p) else "";
+
+    const kind: install_engine.InstallKind = switch (opts.install_kind) {
+        0 => .install,
+        1 => .upgrade,
+        2 => .reinstall,
+        else => {
+            setError("unsupported install_kind: {d}", .{opts.install_kind});
+            return -1;
+        },
+    };
+
+    var prior_headers = std.heap.c_allocator.alloc(header.Header, opts.prior_header_count) catch {
+        setError("out of memory", .{});
+        return -1;
+    };
+    defer std.heap.c_allocator.free(prior_headers);
+
+    if (opts.prior_header_count > 0 and opts.prior_headers == null) {
+        setError("null prior_headers with non-zero prior_header_count", .{});
+        return -1;
+    }
+
+    for (0..opts.prior_header_count) |i| {
+        const prior = opts.prior_headers.?[i];
+        const blob_ptr = prior.blob orelse {
+            setError("prior header {d} missing blob", .{i});
+            return -1;
+        };
+        prior_headers[i] = header.Header.parse(blob_ptr[0..prior.len]) catch |err| {
+            setError("prior header {d}: {t}", .{ i, err });
+            return -1;
+        };
+    }
+
+    var bridge = ConflictBridge{
+        .cb = opts.conflict_fn,
+        .data = opts.conflict_fn_data,
+    };
+
+    var ctx = install_engine.Context.init(std.heap.c_allocator, &f.file, .{
+        .install_root = install_root,
+        .trans_flags = opts.trans_flags,
+        .install_kind = kind,
+        .prior_headers = prior_headers,
+        .conflict_fn = if (opts.conflict_fn != null) conflictBridge else null,
+        .conflict_ctx = if (opts.conflict_fn != null) &bridge else null,
+    }) catch |err| {
+        setError("install init: {t}", .{err});
+        return -1;
+    };
+    defer ctx.deinit();
+
+    ctx.install() catch |err| {
+        if (ctx.last_path) |path| {
+            setError("rpm_file_install({s}): {t}", .{ path, err });
+        } else {
+            setError("rpm_file_install: {t}", .{err});
+        }
+        return -1;
+    };
     return 0;
 }
 
@@ -881,6 +1023,7 @@ test {
     _ = header;
     _ = pkgfile;
     _ = cpio;
+    _ = install_engine;
     _ = txn_config;
     // PGP submodules (PR #1 of plan-pure-zig-pgp.md). Imported here
     // only for test discovery; no runtime dependency.
