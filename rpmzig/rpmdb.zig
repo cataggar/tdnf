@@ -21,6 +21,7 @@ const header = @import("rpm_header");
 const pkgfile = @import("rpm_pkgfile");
 const rpmdb_write = @import("rpmdb_write.zig");
 pub const txn_config = @import("txn_config.zig");
+const scriptlet_engine = @import("scriptlet.zig");
 const c = sqlite.c;
 const libc = @cImport({
     @cInclude("stdlib.h");
@@ -38,6 +39,8 @@ pub const DEFAULT_SCRIPT_INTERPRETER = txn_config.DEFAULT_SCRIPT_INTERPRETER;
 pub const RpmDbWriter = rpmdb_write.Writer;
 pub const RpmDbInstallOptions = rpmdb_write.InstallOptions;
 pub const DEFAULT_INSTALL_COLOR = rpmdb_write.DEFAULT_INSTALL_COLOR;
+pub const ScriptletPhase = scriptlet_engine.Phase;
+pub const ScriptletOutcome = scriptlet_engine.Outcome;
 
 const PKG_TABLE = "Packages";
 
@@ -745,6 +748,25 @@ const CInstallOptions = extern struct {
     conflict_fn_data: ?*anyopaque,
 };
 
+const CScriptletOptions = extern struct {
+    install_root: ?[*:0]const u8,
+    trans_flags: u32,
+    rpmdefines: ?[*]const ?[*:0]const u8,
+    rpmdefine_count: usize,
+    arg1: c_int,
+    arg2: c_int,
+    script_fd: c_int,
+    redirect_stdout_to_stderr: c_int,
+};
+
+const CScriptletResult = extern struct {
+    ran: c_int,
+    critical: c_int,
+    outcome: u32,
+    exit_status: c_int,
+    signal_number: c_int,
+};
+
 const ConflictBridge = struct {
     cb: ?CInstallConflictFn,
     data: ?*anyopaque,
@@ -1064,6 +1086,91 @@ export fn tdnf_rpm_file_install(
             setError("rpm_file_install: {t}", .{err});
         }
         return -1;
+    };
+    return 0;
+}
+
+/// Run one package/transaction shell scriptlet extracted from a raw
+/// RPM main-header blob.
+export fn tdnf_rpm_header_run_scriptlet(
+    header_blob: ?[*]const u8,
+    header_len: usize,
+    phase: c_int,
+    options: ?*const CScriptletOptions,
+    result_out: ?*CScriptletResult,
+) i32 {
+    clearError();
+    const blob_ptr = header_blob orelse {
+        setError("null header_blob", .{});
+        return -1;
+    };
+    const opts = options orelse {
+        setError("null scriptlet options", .{});
+        return -1;
+    };
+    const out = result_out orelse {
+        setError("null scriptlet result", .{});
+        return -1;
+    };
+
+    const script_phase: scriptlet_engine.Phase = switch (phase) {
+        0 => .pre,
+        1 => .post,
+        2 => .preun,
+        3 => .postun,
+        4 => .pretrans,
+        5 => .posttrans,
+        else => {
+            setError("unsupported scriptlet phase: {d}", .{phase});
+            return -1;
+        },
+    };
+
+    var rpmdefines = std.ArrayList([]const u8).empty;
+    defer rpmdefines.deinit(std.heap.c_allocator);
+
+    if (opts.rpmdefine_count > 0 and opts.rpmdefines == null) {
+        setError("null rpmdefines with non-zero rpmdefine_count", .{});
+        return -1;
+    }
+    if (opts.rpmdefines) |raw_defines| {
+        for (0..opts.rpmdefine_count) |index| {
+            const define_ptr = raw_defines[index] orelse {
+                setError("scriptlet rpmdefine {d} is null", .{index});
+                return -1;
+            };
+            rpmdefines.append(std.heap.c_allocator, std.mem.span(define_ptr)) catch {
+                setError("out of memory", .{});
+                return -1;
+            };
+        }
+    }
+
+    const hdr = header.Header.parse(blob_ptr[0..header_len]) catch |err| {
+        setError("header.parse: {t}", .{err});
+        return -1;
+    };
+
+    const install_root = if (opts.install_root) |p| std.mem.span(p) else "";
+    const result = scriptlet_engine.runHeaderScript(std.heap.c_allocator, hdr, script_phase, .{
+        .install_root = install_root,
+        .trans_flags = opts.trans_flags,
+        .rpmdefines = rpmdefines.items,
+        .arg1 = if (opts.arg1 >= 0) opts.arg1 else null,
+        .arg2 = if (opts.arg2 >= 0) opts.arg2 else null,
+        .script_fd = if (opts.script_fd >= 0) opts.script_fd else null,
+        .redirect_stdout_to_stderr = opts.redirect_stdout_to_stderr != 0,
+    }) catch |err| {
+        setError("header_run_scriptlet: {t}", .{err});
+        return -1;
+    };
+
+    out.* = .{
+        .ran = if (result.ran) 1 else 0,
+        .critical = if (result.critical) 1 else 0,
+        .outcome = @intFromEnum(result.outcome),
+        .exit_status = result.exit_status,
+        .signal_number = result.signal_number,
     };
     return 0;
 }
