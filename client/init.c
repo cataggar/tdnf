@@ -133,7 +133,7 @@ TDNFRefreshSack(
         pRepo = ppRepoArray[i];
 
         if (pRepo->nEnabled && pRepo->pszSnapshotFile) {
-            dwError = TDNFApplySnapshot(pRepo, pSack, pRepo->pRepo);
+            dwError = TDNFApplySnapshot(pTdnf, pRepo, pSack, pRepo->pRepo);
             BAIL_ON_TDNF_ERROR(dwError);
         }
     }

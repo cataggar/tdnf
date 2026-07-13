@@ -1225,6 +1225,11 @@ TDNFSolvAddMinVersions(
         map_init(pPool->considered, pPool->nsolvables);
         map_setall(pPool->considered);
     }
+
+    TDNFQueryCrosscheckMinVersions(
+        pTdnf,
+        pMapMinVersions);
+
     map_subtract(pPool->considered, pMapMinVersions);
 
 cleanup:
@@ -1391,4 +1396,3 @@ cleanup:
 error:
     goto cleanup;
 }
-

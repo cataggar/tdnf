@@ -28,6 +28,9 @@ const detail_info = 1;
 const detail_changelog = 2;
 const detail_sourcepkg = 3;
 const detail_location = 4;
+const sep_field: u8 = 0x1f;
+const sep_group: u8 = 0x1e;
+const sep_item: u8 = 0x1d;
 
 threadlocal var last_query_error_buf: [512]u8 = undefined;
 threadlocal var last_query_error_len: usize = 0;
@@ -73,6 +76,29 @@ const InstalledLoadOptions = struct {
     need_files: bool = false,
     need_changelogs: bool = false,
 };
+
+const NameEvrQuery = struct {
+    name: []const u8,
+    epoch: ?u32,
+    version: []const u8,
+    release: ?[]const u8,
+};
+
+const NevraQuery = struct {
+    name: []const u8,
+    arch: []const u8,
+    epoch: ?u32,
+    version: []const u8,
+    release: ?[]const u8,
+};
+
+const PackageRefSpec = struct {
+    repo_id: []const u8,
+    nevra: NevraQuery,
+};
+
+const MinVersionEntry = NameEvrQuery;
+const SnapshotEntry = NameEvrQuery;
 
 const AdvisoryRef = struct {
     dataset_index: usize,
@@ -148,6 +174,7 @@ const LoadedDataset = struct {
     arena_state: std.heap.ArenaAllocator,
     repository: model.RepositoryModel,
     index: ?query_index.RepositoryIndex = null,
+    snapshot_entries: []const SnapshotEntry = &.{},
 
     fn deinit(self: *LoadedDataset) void {
         if (self.index) |*index| {
@@ -166,6 +193,35 @@ const LoadedDataset = struct {
             self.index = try query_index.RepositoryIndex.init(self.allocator(), &self.repository);
         }
         return &self.index.?;
+    }
+
+    fn packageAllowed(self: *const LoadedDataset, package_index: usize) bool {
+        if (package_index >= self.repository.packages.len) {
+            return false;
+        }
+        return self.packageAllowedPkg(self.repository.packages[package_index]);
+    }
+
+    fn packageAllowedPkg(self: *const LoadedDataset, pkg: model.Package) bool {
+        if (self.snapshot_entries.len == 0) {
+            return true;
+        }
+        for (self.snapshot_entries) |entry| {
+            if (!std.mem.eql(u8, pkg.nevra.name, entry.name)) {
+                continue;
+            }
+            if (query_index.compareEvr(
+                pkg.nevra.epoch,
+                pkg.nevra.version,
+                if (pkg.nevra.release.len == 0) null else pkg.nevra.release,
+                entry.epoch,
+                entry.version,
+                entry.release,
+            ) == 0) {
+                return true;
+            }
+        }
+        return false;
     }
 };
 
@@ -511,6 +567,327 @@ pub export fn TDNFRepoMdNativeUpdateAdvisoryIds(
     return 0;
 }
 
+pub export fn TDNFRepoMdNativeFindNevraMatches(
+    raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
+    repo_count: u32,
+    root_dir: ?[*:0]const u8,
+    raw_nevra: ?[*:0]const u8,
+    installed_only: c_int,
+    out_matches: ?*[*c][*c]u8,
+    out_count: ?*u32,
+) u32 {
+    clearError();
+    if (out_matches) |out| out.* = null;
+    if (out_count) |out| out.* = 0;
+
+    const nevra = spanRequired(raw_nevra, "nevra") orelse return c.ERROR_TDNF_INVALID_PARAMETER;
+    const matches_out = out_matches orelse return invalidParameter("null match output", .{});
+    const count_out = out_count orelse return invalidParameter("null count output", .{});
+
+    var ctx = NativeContext.init(std.heap.c_allocator);
+    defer ctx.deinit();
+
+    ctx.load(
+        raw_repos,
+        repo_count,
+        root_dir,
+        installed_only != 0,
+        .{},
+        .{},
+    ) catch |err| {
+        return mapQueryError(err);
+    };
+
+    const refs = findNevraMatches(&ctx, nevra, installed_only != 0) catch |err| {
+        return mapQueryError(err);
+    };
+    defer std.heap.c_allocator.free(refs);
+
+    const lines = serializePackageRefs(&ctx, refs) catch |err| {
+        return mapQueryError(err);
+    };
+    defer freeOwnedSlices(lines);
+
+    matches_out.* = (tryBuildCStringArray(lines) catch |err| {
+        return mapQueryError(err);
+    }) orelse null;
+    count_out.* = @intCast(lines.len);
+    return 0;
+}
+
+pub export fn TDNFRepoMdNativeFindNameEvrMatches(
+    raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
+    repo_count: u32,
+    raw_name_evr: ?[*:0]const u8,
+    out_matches: ?*[*c][*c]u8,
+    out_count: ?*u32,
+) u32 {
+    clearError();
+    if (out_matches) |out| out.* = null;
+    if (out_count) |out| out.* = 0;
+
+    const name_evr = spanRequired(raw_name_evr, "name=evr") orelse return c.ERROR_TDNF_INVALID_PARAMETER;
+    const matches_out = out_matches orelse return invalidParameter("null match output", .{});
+    const count_out = out_count orelse return invalidParameter("null count output", .{});
+
+    var ctx = NativeContext.init(std.heap.c_allocator);
+    defer ctx.deinit();
+
+    ctx.load(
+        raw_repos,
+        repo_count,
+        null,
+        false,
+        .{},
+        .{},
+    ) catch |err| {
+        return mapQueryError(err);
+    };
+
+    const refs = findNameEvrMatches(&ctx, name_evr) catch |err| {
+        return mapQueryError(err);
+    };
+    defer std.heap.c_allocator.free(refs);
+
+    const lines = serializePackageRefs(&ctx, refs) catch |err| {
+        return mapQueryError(err);
+    };
+    defer freeOwnedSlices(lines);
+
+    matches_out.* = (tryBuildCStringArray(lines) catch |err| {
+        return mapQueryError(err);
+    }) orelse null;
+    count_out.* = @intCast(lines.len);
+    return 0;
+}
+
+pub export fn TDNFRepoMdNativeUpdateInfoSummaryLines(
+    raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
+    repo_count: u32,
+    root_dir: ?[*:0]const u8,
+    package_specs: [*c][*c]u8,
+    security_only: u32,
+    raw_severity: ?[*:0]const u8,
+    out_lines: ?*[*c][*c]u8,
+    out_count: ?*u32,
+) u32 {
+    clearError();
+    if (out_lines) |out| out.* = null;
+    if (out_count) |out| out.* = 0;
+
+    const lines_out = out_lines orelse return invalidParameter("null summary output", .{});
+    const count_out = out_count orelse return invalidParameter("null summary count output", .{});
+    const severity = if (raw_severity != null) std.mem.span(raw_severity) else null;
+
+    var ctx = NativeContext.init(std.heap.c_allocator);
+    defer ctx.deinit();
+
+    ctx.load(
+        raw_repos,
+        repo_count,
+        root_dir,
+        true,
+        .{ .need_updateinfo = true },
+        .{},
+    ) catch |err| {
+        return mapQueryError(err);
+    };
+
+    const lines = computeUpdateInfoSummaryLines(&ctx, package_specs, security_only != 0, severity) catch |err| {
+        return mapQueryError(err);
+    };
+    defer freeOwnedSlices(lines);
+
+    lines_out.* = (tryBuildCStringArray(lines) catch |err| {
+        return mapQueryError(err);
+    }) orelse null;
+    count_out.* = @intCast(lines.len);
+    return 0;
+}
+
+pub export fn TDNFRepoMdNativeUpdateInfoLines(
+    raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
+    repo_count: u32,
+    root_dir: ?[*:0]const u8,
+    package_specs: [*c][*c]u8,
+    security_only: u32,
+    raw_severity: ?[*:0]const u8,
+    reboot_required: u32,
+    out_lines: ?*[*c][*c]u8,
+    out_count: ?*u32,
+) u32 {
+    clearError();
+    if (out_lines) |out| out.* = null;
+    if (out_count) |out| out.* = 0;
+
+    const lines_out = out_lines orelse return invalidParameter("null updateinfo output", .{});
+    const count_out = out_count orelse return invalidParameter("null updateinfo count output", .{});
+    const severity = if (raw_severity != null) std.mem.span(raw_severity) else null;
+
+    var ctx = NativeContext.init(std.heap.c_allocator);
+    defer ctx.deinit();
+
+    ctx.load(
+        raw_repos,
+        repo_count,
+        root_dir,
+        true,
+        .{ .need_updateinfo = true },
+        .{},
+    ) catch |err| {
+        return mapQueryError(err);
+    };
+
+    const lines = computeUpdateInfoLines(&ctx, package_specs, security_only != 0, severity, reboot_required != 0) catch |err| {
+        return mapQueryError(err);
+    };
+    defer freeOwnedSlices(lines);
+
+    lines_out.* = (tryBuildCStringArray(lines) catch |err| {
+        return mapQueryError(err);
+    }) orelse null;
+    count_out.* = @intCast(lines.len);
+    return 0;
+}
+
+pub export fn TDNFRepoMdNativeMinVersionExcludeLines(
+    raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
+    repo_count: u32,
+    root_dir: ?[*:0]const u8,
+    raw_minversions: [*c][*c]u8,
+    out_lines: ?*[*c][*c]u8,
+    out_count: ?*u32,
+) u32 {
+    clearError();
+    if (out_lines) |out| out.* = null;
+    if (out_count) |out| out.* = 0;
+
+    const lines_out = out_lines orelse return invalidParameter("null minversion output", .{});
+    const count_out = out_count orelse return invalidParameter("null minversion count output", .{});
+
+    var ctx = NativeContext.init(std.heap.c_allocator);
+    defer ctx.deinit();
+
+    ctx.load(
+        raw_repos,
+        repo_count,
+        root_dir,
+        true,
+        .{},
+        .{},
+    ) catch |err| {
+        return mapQueryError(err);
+    };
+
+    const entries = parseEntryArray(raw_minversions) catch |err| {
+        return mapQueryError(err);
+    };
+    defer std.heap.c_allocator.free(entries);
+
+    const lines = computeMinVersionExcludeLines(&ctx, entries) catch |err| {
+        return mapQueryError(err);
+    };
+    defer freeOwnedSlices(lines);
+
+    lines_out.* = (tryBuildCStringArray(lines) catch |err| {
+        return mapQueryError(err);
+    }) orelse null;
+    count_out.* = @intCast(lines.len);
+    return 0;
+}
+
+pub export fn TDNFRepoMdNativeDowngradeCandidateLines(
+    raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
+    repo_count: u32,
+    root_dir: ?[*:0]const u8,
+    raw_minversions: [*c][*c]u8,
+    raw_installed_ref: ?[*:0]const u8,
+    out_lines: ?*[*c][*c]u8,
+    out_count: ?*u32,
+) u32 {
+    clearError();
+    if (out_lines) |out| out.* = null;
+    if (out_count) |out| out.* = 0;
+
+    const installed_ref = spanRequired(raw_installed_ref, "installed package ref") orelse return c.ERROR_TDNF_INVALID_PARAMETER;
+    const lines_out = out_lines orelse return invalidParameter("null downgrade output", .{});
+    const count_out = out_count orelse return invalidParameter("null downgrade count output", .{});
+
+    var ctx = NativeContext.init(std.heap.c_allocator);
+    defer ctx.deinit();
+
+    ctx.load(
+        raw_repos,
+        repo_count,
+        root_dir,
+        false,
+        .{},
+        .{},
+    ) catch |err| {
+        return mapQueryError(err);
+    };
+
+    const entries = parseEntryArray(raw_minversions) catch |err| {
+        return mapQueryError(err);
+    };
+    defer std.heap.c_allocator.free(entries);
+
+    const lines = computeDowngradeCandidateLines(&ctx, entries, installed_ref) catch |err| {
+        return mapQueryError(err);
+    };
+    defer freeOwnedSlices(lines);
+
+    lines_out.* = (tryBuildCStringArray(lines) catch |err| {
+        return mapQueryError(err);
+    }) orelse null;
+    count_out.* = @intCast(lines.len);
+    return 0;
+}
+
+pub export fn TDNFRepoMdNativeRequiresForPackageRefs(
+    raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
+    repo_count: u32,
+    root_dir: ?[*:0]const u8,
+    raw_package_refs: [*c][*c]u8,
+    out_deps: ?*[*c][*c]u8,
+    out_count: ?*u32,
+) u32 {
+    clearError();
+    if (out_deps) |out| out.* = null;
+    if (out_count) |out| out.* = 0;
+
+    const deps_out = out_deps orelse return invalidParameter("null requires output", .{});
+    const count_out = out_count orelse return invalidParameter("null requires count output", .{});
+    if (raw_package_refs == null) {
+        return invalidParameter("null package refs", .{});
+    }
+
+    var ctx = NativeContext.init(std.heap.c_allocator);
+    defer ctx.deinit();
+
+    ctx.load(
+        raw_repos,
+        repo_count,
+        root_dir,
+        true,
+        .{},
+        .{ .need_relations = true },
+    ) catch |err| {
+        return mapQueryError(err);
+    };
+
+    const lines = computeRequiresLines(&ctx, raw_package_refs) catch |err| {
+        return mapQueryError(err);
+    };
+    defer freeOwnedSlices(lines);
+
+    deps_out.* = (tryBuildCStringArray(lines) catch |err| {
+        return mapQueryError(err);
+    }) orelse null;
+    count_out.* = @intCast(lines.len);
+    return 0;
+}
+
 fn clearError() void {
     last_query_error_len = 0;
 }
@@ -603,6 +980,10 @@ fn mapQueryError(err: anyerror) u32 {
 fn loadAvailableDataset(raw_repo: c.TDNF_REPOMD_NATIVE_REPO_INPUT, options: AvailableLoadOptions) !LoadedDataset {
     const repo_id = spanRequired(raw_repo.pszId, "repo id") orelse return error.InvalidParameter;
     const cache_dir = spanRequired(raw_repo.pszCacheDir, "repo cache dir") orelse return error.InvalidParameter;
+    const snapshot_file = if (raw_repo.pszSnapshotFile != null)
+        std.mem.span(raw_repo.pszSnapshotFile)
+    else
+        null;
 
     var arena_state = std.heap.ArenaAllocator.init(std.heap.c_allocator);
     errdefer arena_state.deinit();
@@ -667,11 +1048,17 @@ fn loadAvailableDataset(raw_repo: c.TDNF_REPOMD_NATIVE_REPO_INPUT, options: Avai
         };
     };
 
+    const snapshot_entries = if (snapshot_file) |path|
+        try parseSnapshotEntries(arena, path)
+    else
+        &[_]SnapshotEntry{};
+
     return .{
         .kind = .available,
         .repo_id = repo_id,
         .arena_state = arena_state,
         .repository = repository,
+        .snapshot_entries = snapshot_entries,
     };
 }
 
@@ -858,6 +1245,9 @@ fn selectUpDownCandidates(ctx: *NativeContext, specs: ?[*c][*c]u8, up: bool) ![]
                 continue;
             }
             for (dataset.repository.packages, 0..) |candidate, pkg_index| {
+                if (!dataset.packageAllowed(pkg_index)) {
+                    continue;
+                }
                 if (!std.mem.eql(u8, candidate.nevra.name, installed_pkg.nevra.name)) {
                     continue;
                 }
@@ -888,6 +1278,9 @@ fn searchPackages(ctx: *NativeContext, search_strings: [*c][*c]u8, start_index: 
             const matched = try index.searchText(dataset.allocator(), term);
             defer matched.deinit();
             for (matched.items) |pkg_index| {
+                if (!dataset.packageAllowed(pkg_index)) {
+                    continue;
+                }
                 try results.append(.{ .package = .{ .dataset_index = dataset_index, .package_index = pkg_index } });
             }
 
@@ -999,6 +1392,9 @@ fn appendScopePackages(list: *std.array_list.Managed(PackageRef), ctx: *NativeCo
             continue;
         }
         for (dataset.repository.packages, 0..) |_, pkg_index| {
+            if (!dataset.packageAllowed(pkg_index)) {
+                continue;
+            }
             try list.append(.{ .dataset_index = dataset_index, .package_index = pkg_index });
         }
     }
@@ -1084,6 +1480,9 @@ fn markSelectionMatches(dataset: *LoadedDataset, spec: []const u8, allow_filelis
 
     if (allow_filelist and spec.len != 0 and spec[0] == '/') {
         for (index.packagesProvidingFile(spec)) |pkg_index| {
+            if (!dataset.packageAllowed(pkg_index)) {
+                continue;
+            }
             seen[pkg_index] = true;
             matched = true;
         }
@@ -1092,6 +1491,9 @@ fn markSelectionMatches(dataset: *LoadedDataset, spec: []const u8, allow_filelis
     const name_matches = try index.matchNamePattern(dataset.allocator(), spec, .{ .ignore_case = ignore_case });
     defer name_matches.deinit();
     for (name_matches.items) |pkg_index| {
+        if (!dataset.packageAllowed(pkg_index)) {
+            continue;
+        }
         seen[pkg_index] = true;
         matched = true;
     }
@@ -1104,6 +1506,9 @@ fn markSelectionMatches(dataset: *LoadedDataset, spec: []const u8, allow_filelis
         if (provide_matches) |matches| {
             defer matches.deinit();
             for (matches.items) |pkg_index| {
+                if (!dataset.packageAllowed(pkg_index)) {
+                    continue;
+                }
                 seen[pkg_index] = true;
                 matched = true;
             }
@@ -1112,6 +1517,9 @@ fn markSelectionMatches(dataset: *LoadedDataset, spec: []const u8, allow_filelis
 
     if (query_index.DependencyQuery.parse(spec)) |query| {
         for (dataset.repository.packages, 0..) |pkg, pkg_index| {
+            if (!dataset.packageAllowed(pkg_index)) {
+                continue;
+            }
             if (!nameEql(pkg.nevra.name, query.name, ignore_case)) {
                 continue;
             }
@@ -1124,6 +1532,9 @@ fn markSelectionMatches(dataset: *LoadedDataset, spec: []const u8, allow_filelis
     } else |_| {}
 
     for (dataset.repository.packages, 0..) |pkg, pkg_index| {
+        if (!dataset.packageAllowed(pkg_index)) {
+            continue;
+        }
         if (packageMatchesCanonLike(dataset.allocator(), pkg, spec, ignore_case)) {
             seen[pkg_index] = true;
             matched = true;
@@ -1206,6 +1617,9 @@ fn selectProvidesMatchesForDataset(dataset: *LoadedDataset, dataset_index: usize
 
     if (spec.len != 0 and spec[0] == '/') {
         for (index.packagesProvidingFile(spec)) |pkg_index| {
+            if (!dataset.packageAllowed(pkg_index)) {
+                continue;
+            }
             seen[pkg_index] = true;
         }
     }
@@ -1218,6 +1632,9 @@ fn selectProvidesMatchesForDataset(dataset: *LoadedDataset, dataset_index: usize
         if (provide_matches) |matches| {
             defer matches.deinit();
             for (matches.items) |pkg_index| {
+                if (!dataset.packageAllowed(pkg_index)) {
+                    continue;
+                }
                 seen[pkg_index] = true;
             }
         }
@@ -1226,17 +1643,26 @@ fn selectProvidesMatchesForDataset(dataset: *LoadedDataset, dataset_index: usize
     const name_matches = try index.matchNamePattern(dataset.allocator(), spec, .{ .ignore_case = false });
     defer name_matches.deinit();
     for (name_matches.items) |pkg_index| {
+        if (!dataset.packageAllowed(pkg_index)) {
+            continue;
+        }
         seen[pkg_index] = true;
     }
     if (name_matches.items.len == 0) {
         const nocase = try index.matchNamePattern(dataset.allocator(), spec, .{ .ignore_case = true });
         defer nocase.deinit();
         for (nocase.items) |pkg_index| {
+            if (!dataset.packageAllowed(pkg_index)) {
+                continue;
+            }
             seen[pkg_index] = true;
         }
     }
 
     for (dataset.repository.packages, 0..) |pkg, pkg_index| {
+        if (!dataset.packageAllowed(pkg_index)) {
+            continue;
+        }
         if (packageMatchesCanonLike(dataset.allocator(), pkg, spec, false) or packageMatchesCanonLike(dataset.allocator(), pkg, spec, true)) {
             seen[pkg_index] = true;
         }
@@ -1420,16 +1846,68 @@ fn filterDuplicates(ctx: *NativeContext, refs: []PackageRef) ![]PackageRef {
     return try results.toOwnedSlice();
 }
 
-fn selectUpdateAdvisoryIds(ctx: *NativeContext, name: []const u8, arch: []const u8, evr: []const u8) ![][]const u8 {
-    const evr_parts = splitEvrQuery(evr);
-    var results = std.array_list.Managed([]const u8).init(std.heap.c_allocator);
+const EvrQueryParts = struct {
+    epoch: ?u32,
+    version: []const u8,
+    release: ?[]const u8,
+};
+
+fn splitEvrQuery(evr: []const u8) EvrQueryParts {
+    if (evr.len == 0) {
+        return .{
+            .epoch = null,
+            .version = "",
+            .release = null,
+        };
+    }
+
+    var epoch: ?u32 = null;
+    var body = evr;
+
+    if (std.mem.indexOfScalar(u8, evr, ':')) |separator| {
+        if (separator != 0) {
+            const candidate = evr[0..separator];
+            epoch = std.fmt.parseInt(u32, candidate, 10) catch null;
+            if (epoch != null) {
+                body = evr[separator + 1 ..];
+            }
+        }
+    }
+
+    if (body.len == 0) {
+        return .{
+            .epoch = epoch,
+            .version = "",
+            .release = null,
+        };
+    }
+
+    if (std.mem.lastIndexOfScalar(u8, body, '-')) |separator| {
+        if (separator != 0 and separator + 1 < body.len) {
+            return .{
+                .epoch = epoch,
+                .version = body[0..separator],
+                .release = body[separator + 1 ..],
+            };
+        }
+    }
+
+    return .{
+        .epoch = epoch,
+        .version = body,
+        .release = null,
+    };
+}
+
+fn selectUpdateAdvisoryRefs(ctx: *NativeContext, name: []const u8, arch: []const u8, evr_parts: EvrQueryParts) ![]AdvisoryRef {
+    var results = std.array_list.Managed(AdvisoryRef).init(std.heap.c_allocator);
     defer results.deinit();
 
-    for (ctx.datasets.items) |dataset| {
+    for (ctx.datasets.items, 0..) |dataset, dataset_index| {
         if (dataset.kind != .available or !dataset.repository.has_updateinfo) {
             continue;
         }
-        for (dataset.repository.advisories) |advisory| {
+        for (dataset.repository.advisories, 0..) |advisory, advisory_index| {
             var newer = false;
             for (advisory.packageEntries(dataset.repository.advisory_packages)) |advisory_pkg| {
                 if (!std.mem.eql(u8, advisory_pkg.nevra.name, name) or !std.mem.eql(u8, advisory_pkg.nevra.arch, arch)) {
@@ -1449,7 +1927,10 @@ fn selectUpdateAdvisoryIds(ctx: *NativeContext, name: []const u8, arch: []const 
                 }
             }
             if (newer) {
-                try results.append(advisory.id);
+                try results.append(.{
+                    .dataset_index = dataset_index,
+                    .advisory_index = advisory_index,
+                });
             }
         }
     }
@@ -1457,26 +1938,620 @@ fn selectUpdateAdvisoryIds(ctx: *NativeContext, name: []const u8, arch: []const 
     return try results.toOwnedSlice();
 }
 
-const EvrQueryParts = struct {
-    epoch: ?u32,
-    version: []const u8,
-    release: ?[]const u8,
-};
+fn selectUpdateAdvisoryIds(ctx: *NativeContext, name: []const u8, arch: []const u8, evr: []const u8) ![][]const u8 {
+    const refs = try selectUpdateAdvisoryRefs(ctx, name, arch, splitEvrQuery(evr));
+    defer std.heap.c_allocator.free(refs);
 
-fn splitEvrQuery(evr: []const u8) EvrQueryParts {
-    const text = std.fmt.allocPrint(std.heap.c_allocator, "pkg = {s}", .{evr}) catch {
-        return .{ .epoch = null, .version = evr, .release = null };
-    };
-    defer std.heap.c_allocator.free(text);
+    const out = try std.heap.c_allocator.alloc([]const u8, refs.len);
+    for (refs, 0..) |ref, index| {
+        out[index] = ctx.datasets.items[ref.dataset_index].repository.advisories[ref.advisory_index].id;
+    }
+    return out;
+}
 
-    const query = query_index.DependencyQuery.parse(text) catch {
-        return .{ .epoch = null, .version = evr, .release = null };
+fn parseSnapshotEntries(allocator: std.mem.Allocator, path: []const u8) ![]SnapshotEntry {
+    const bytes = readSmallFile(allocator, path, 8 * 1024 * 1024) catch |err| {
+        setError("failed to read snapshot file {s}: {t}", .{ path, err });
+        return err;
     };
+    return parseEntriesText(allocator, bytes);
+}
+
+fn parseEntryArray(raw_values: [*c][*c]u8) ![]NameEvrQuery {
+    if (raw_values == null) {
+        return try std.heap.c_allocator.alloc(NameEvrQuery, 0);
+    }
+
+    var count: usize = 0;
+    while (raw_values[count] != null) : (count += 1) {}
+    if (count == 0) {
+        return try std.heap.c_allocator.alloc(NameEvrQuery, 0);
+    }
+
+    const out = try std.heap.c_allocator.alloc(NameEvrQuery, count);
+    var populated: usize = 0;
+    errdefer std.heap.c_allocator.free(out);
+
+    var index: usize = 0;
+    while (index < count) : (index += 1) {
+        out[populated] = try parseNameEvrQuery(std.mem.span(raw_values[index]));
+        populated += 1;
+    }
+
+    return out[0..populated];
+}
+
+fn parseEntriesText(allocator: std.mem.Allocator, text: []const u8) ![]NameEvrQuery {
+    var count: usize = 0;
+    var iter_count = std.mem.splitScalar(u8, text, '\n');
+    while (iter_count.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        if (trimmed.len == 0 or trimmed[0] == '#') {
+            continue;
+        }
+        count += 1;
+    }
+
+    const out = try allocator.alloc(NameEvrQuery, count);
+    var populated: usize = 0;
+    errdefer allocator.free(out);
+
+    var iter = std.mem.splitScalar(u8, text, '\n');
+    while (iter.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        if (trimmed.len == 0 or trimmed[0] == '#') {
+            continue;
+        }
+        out[populated] = try parseNameEvrQuery(trimmed);
+        populated += 1;
+    }
+
+    return out[0..populated];
+}
+
+fn parseNameEvrQuery(text: []const u8) !NameEvrQuery {
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    const separator = std.mem.indexOfScalar(u8, trimmed, '=') orelse {
+        setError("invalid name=evr '{s}'", .{trimmed});
+        return error.InvalidParameter;
+    };
+    const name = std.mem.trim(u8, trimmed[0..separator], " \t\r\n");
+    const evr_text = std.mem.trim(u8, trimmed[separator + 1 ..], " \t\r\n");
+    if (name.len == 0 or evr_text.len == 0) {
+        setError("invalid name=evr '{s}'", .{trimmed});
+        return error.InvalidParameter;
+    }
+    const parts = splitEvrQuery(evr_text);
     return .{
-        .epoch = query.epoch,
-        .version = query.version orelse "",
-        .release = query.release,
+        .name = name,
+        .epoch = parts.epoch,
+        .version = parts.version,
+        .release = parts.release,
     };
+}
+
+fn parseNevraQuery(text: []const u8) !NevraQuery {
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    if (trimmed.len == 0) {
+        setError("empty nevra", .{});
+        return error.InvalidParameter;
+    }
+
+    const dot = std.mem.lastIndexOfScalar(u8, trimmed, '.') orelse {
+        setError("invalid nevra '{s}'", .{trimmed});
+        return error.InvalidParameter;
+    };
+    if (dot == 0 or dot + 1 >= trimmed.len) {
+        setError("invalid nevra '{s}'", .{trimmed});
+        return error.InvalidParameter;
+    }
+
+    const body = trimmed[0..dot];
+    const arch = trimmed[dot + 1 ..];
+    const last_dash = std.mem.lastIndexOfScalar(u8, body, '-') orelse {
+        setError("invalid nevra '{s}'", .{trimmed});
+        return error.InvalidParameter;
+    };
+    if (last_dash == 0 or last_dash + 1 >= body.len) {
+        setError("invalid nevra '{s}'", .{trimmed});
+        return error.InvalidParameter;
+    }
+    const second_dash = std.mem.lastIndexOfScalar(u8, body[0..last_dash], '-') orelse {
+        setError("invalid nevra '{s}'", .{trimmed});
+        return error.InvalidParameter;
+    };
+    if (second_dash == 0 or second_dash + 1 >= body.len) {
+        setError("invalid nevra '{s}'", .{trimmed});
+        return error.InvalidParameter;
+    }
+
+    const name = body[0..second_dash];
+    const evr_text = body[second_dash + 1 ..];
+    const parts = splitEvrQuery(evr_text);
+    if (parts.version.len == 0 and parts.release == null) {
+        setError("invalid nevra '{s}'", .{trimmed});
+        return error.InvalidParameter;
+    }
+
+    return .{
+        .name = name,
+        .arch = arch,
+        .epoch = parts.epoch,
+        .version = parts.version,
+        .release = parts.release,
+    };
+}
+
+fn parsePackageRefSpec(text: []const u8) !PackageRefSpec {
+    const separator = std.mem.indexOfScalar(u8, text, sep_field) orelse {
+        setError("invalid package ref '{s}'", .{text});
+        return error.InvalidParameter;
+    };
+    const repo_id = text[0..separator];
+    const nevra_text = text[separator + 1 ..];
+    if (repo_id.len == 0 or nevra_text.len == 0) {
+        setError("invalid package ref '{s}'", .{text});
+        return error.InvalidParameter;
+    }
+    return .{
+        .repo_id = repo_id,
+        .nevra = try parseNevraQuery(nevra_text),
+    };
+}
+
+fn packageMatchesNameEvr(pkg: model.Package, query: NameEvrQuery) bool {
+    if (!std.mem.eql(u8, pkg.nevra.name, query.name)) {
+        return false;
+    }
+    return query_index.compareEvr(
+        pkg.nevra.epoch,
+        pkg.nevra.version,
+        if (pkg.nevra.release.len == 0) null else pkg.nevra.release,
+        query.epoch,
+        query.version,
+        query.release,
+    ) == 0;
+}
+
+fn packageMatchesNevra(pkg: model.Package, query: NevraQuery) bool {
+    if (!std.mem.eql(u8, pkg.nevra.name, query.name) or !std.mem.eql(u8, pkg.nevra.arch, query.arch)) {
+        return false;
+    }
+    return query_index.compareEvr(
+        pkg.nevra.epoch,
+        pkg.nevra.version,
+        if (pkg.nevra.release.len == 0) null else pkg.nevra.release,
+        query.epoch,
+        query.version,
+        query.release,
+    ) == 0;
+}
+
+fn packagePassesMinVersions(pkg: model.Package, entries: []const MinVersionEntry) bool {
+    for (entries) |entry| {
+        if (!std.mem.eql(u8, pkg.nevra.name, entry.name)) {
+            continue;
+        }
+        if (query_index.compareEvr(
+            pkg.nevra.epoch,
+            pkg.nevra.version,
+            if (pkg.nevra.release.len == 0) null else pkg.nevra.release,
+            entry.epoch,
+            entry.version,
+            entry.release,
+        ) < 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn packageMatchLine(ctx: *NativeContext, ref: PackageRef) ![]const u8 {
+    const nevra = try pkgquery.nevraString(std.heap.c_allocator, ctx.package(ref));
+    defer std.heap.c_allocator.free(nevra);
+    return std.fmt.allocPrint(std.heap.c_allocator, "{s}{c}{s}", .{ ctx.repoId(ref), sep_field, nevra });
+}
+
+fn serializePackageRefs(ctx: *NativeContext, refs: []const PackageRef) ![][]const u8 {
+    const out = try std.heap.c_allocator.alloc([]const u8, refs.len);
+    var populated: usize = 0;
+    errdefer freeOwnedItems(out[0..populated]);
+    errdefer std.heap.c_allocator.free(out);
+
+    for (refs, 0..) |ref, index| {
+        out[index] = try packageMatchLine(ctx, ref);
+        populated += 1;
+    }
+    return out;
+}
+
+fn freeOwnedItems(items: []const []const u8) void {
+    for (items) |item| {
+        std.heap.c_allocator.free(item);
+    }
+}
+
+fn freeOwnedSlices(items: []const []const u8) void {
+    freeOwnedItems(items);
+    std.heap.c_allocator.free(items);
+}
+
+fn findNevraMatches(ctx: *NativeContext, nevra_text: []const u8, installed_only: bool) ![]PackageRef {
+    const query = try parseNevraQuery(nevra_text);
+    var results = std.array_list.Managed(PackageRef).init(std.heap.c_allocator);
+    defer results.deinit();
+
+    for (ctx.datasets.items, 0..) |dataset, dataset_index| {
+        if (installed_only and dataset.kind != .installed) {
+            continue;
+        }
+        if (!installed_only and dataset.kind != .available) {
+            continue;
+        }
+        for (dataset.repository.packages, 0..) |pkg, package_index| {
+            if (!installed_only and !dataset.packageAllowed(package_index)) {
+                continue;
+            }
+            if (packageMatchesNevra(pkg, query)) {
+                try results.append(.{ .dataset_index = dataset_index, .package_index = package_index });
+            }
+        }
+    }
+
+    return try results.toOwnedSlice();
+}
+
+fn findNameEvrMatches(ctx: *NativeContext, text: []const u8) ![]PackageRef {
+    const query = try parseNameEvrQuery(text);
+    var results = std.array_list.Managed(PackageRef).init(std.heap.c_allocator);
+    defer results.deinit();
+
+    for (ctx.datasets.items, 0..) |dataset, dataset_index| {
+        if (dataset.kind != .available) {
+            continue;
+        }
+        for (dataset.repository.packages, 0..) |pkg, package_index| {
+            if (packageMatchesNameEvr(pkg, query)) {
+                try results.append(.{ .dataset_index = dataset_index, .package_index = package_index });
+            }
+        }
+    }
+
+    return try results.toOwnedSlice();
+}
+
+fn computeMinVersionExcludeLines(ctx: *NativeContext, entries: []const MinVersionEntry) ![][]const u8 {
+    var refs = std.array_list.Managed(PackageRef).init(std.heap.c_allocator);
+    defer refs.deinit();
+
+    for (ctx.datasets.items, 0..) |dataset, dataset_index| {
+        for (dataset.repository.packages, 0..) |pkg, package_index| {
+            if (!packagePassesMinVersions(pkg, entries)) {
+                try refs.append(.{ .dataset_index = dataset_index, .package_index = package_index });
+            }
+        }
+    }
+
+    return serializePackageRefs(ctx, refs.items);
+}
+
+fn computeDowngradeCandidateLines(ctx: *NativeContext, entries: []const MinVersionEntry, installed_ref: []const u8) ![][]const u8 {
+    const installed = (try parsePackageRefSpec(installed_ref)).nevra;
+    var best: ?PackageRef = null;
+
+    for (ctx.datasets.items, 0..) |dataset, dataset_index| {
+        if (dataset.kind != .available) {
+            continue;
+        }
+        for (dataset.repository.packages, 0..) |pkg, package_index| {
+            if (!dataset.packageAllowed(package_index)) {
+                continue;
+            }
+            if (!packagePassesMinVersions(pkg, entries)) {
+                continue;
+            }
+            if (!std.mem.eql(u8, pkg.nevra.name, installed.name)) {
+                continue;
+            }
+            if (query_index.compareEvr(
+                pkg.nevra.epoch,
+                pkg.nevra.version,
+                if (pkg.nevra.release.len == 0) null else pkg.nevra.release,
+                installed.epoch,
+                installed.version,
+                installed.release,
+            ) >= 0) {
+                continue;
+            }
+
+            if (best == null) {
+                best = .{ .dataset_index = dataset_index, .package_index = package_index };
+            } else {
+                const best_pkg = ctx.package(best.?);
+                if (query_index.comparePackageVersions(pkg, best_pkg) > 0) {
+                    best = .{ .dataset_index = dataset_index, .package_index = package_index };
+                }
+            }
+        }
+    }
+
+    if (best) |ref| {
+        const out = try std.heap.c_allocator.alloc([]const u8, 1);
+        errdefer std.heap.c_allocator.free(out);
+        out[0] = try packageMatchLine(ctx, ref);
+        return out;
+    }
+
+    return try std.heap.c_allocator.alloc([]const u8, 0);
+}
+
+fn resolvePackageRef(ctx: *NativeContext, spec: PackageRefSpec) ?PackageRef {
+    for (ctx.datasets.items, 0..) |dataset, dataset_index| {
+        if (!std.mem.eql(u8, dataset.repo_id, spec.repo_id)) {
+            continue;
+        }
+        for (dataset.repository.packages, 0..) |pkg, package_index| {
+            if (packageMatchesNevra(pkg, spec.nevra)) {
+                return .{ .dataset_index = dataset_index, .package_index = package_index };
+            }
+        }
+    }
+    return null;
+}
+
+fn computeRequiresLines(ctx: *NativeContext, raw_package_refs: [*c][*c]u8) ![][]const u8 {
+    if (raw_package_refs == null) {
+        return try std.heap.c_allocator.alloc([]const u8, 0);
+    }
+
+    var results = std.array_list.Managed([]const u8).init(std.heap.c_allocator);
+    defer results.deinit();
+    errdefer freeOwnedItems(results.items);
+
+    var seen = std.StringHashMap(void).init(std.heap.c_allocator);
+    defer seen.deinit();
+
+    var index_ref: usize = 0;
+    while (raw_package_refs[index_ref] != null) : (index_ref += 1) {
+        const spec = try parsePackageRefSpec(std.mem.span(raw_package_refs[index_ref]));
+        const ref = resolvePackageRef(ctx, spec) orelse continue;
+        const pkg = ctx.package(ref);
+        for (pkg.relationsFor(.requires, ctx.relations(ref))) |relation| {
+            const dep = try pkgquery.formatRelation(std.heap.c_allocator, relation);
+            const gop = seen.getOrPut(dep) catch |err| {
+                std.heap.c_allocator.free(dep);
+                return err;
+            };
+            if (gop.found_existing) {
+                std.heap.c_allocator.free(dep);
+                continue;
+            }
+            results.append(dep) catch |err| {
+                std.heap.c_allocator.free(dep);
+                return err;
+            };
+        }
+    }
+
+    return try results.toOwnedSlice();
+}
+
+fn selectInstalledUpdateInfoPackageRefs(ctx: *NativeContext, package_specs: [*c][*c]u8) ![]PackageRef {
+    const installed_index = ctx.installedDatasetIndex() orelse return try std.heap.c_allocator.alloc(PackageRef, 0);
+    const dataset = &ctx.datasets.items[installed_index];
+
+    if (package_specs != null and package_specs[0] != null) {
+        var results = std.array_list.Managed(PackageRef).init(std.heap.c_allocator);
+        defer results.deinit();
+        var spec_index: usize = 0;
+        while (package_specs[spec_index] != null) : (spec_index += 1) {
+            const matched = try selectPackageMatchesForDataset(
+                dataset,
+                installed_index,
+                std.mem.span(package_specs[spec_index]),
+                false,
+                true,
+            );
+            defer std.heap.c_allocator.free(matched);
+            try results.appendSlice(matched);
+        }
+        return dedupeOwnedPackageRefs(try results.toOwnedSlice());
+    }
+
+    var results = std.array_list.Managed(PackageRef).init(std.heap.c_allocator);
+    defer results.deinit();
+    for (dataset.repository.packages, 0..) |_, package_index| {
+        try results.append(.{ .dataset_index = installed_index, .package_index = package_index });
+    }
+    return try results.toOwnedSlice();
+}
+
+fn advisoryTypeValue(advisory: model.Advisory) u32 {
+    return switch (advisory.kind) {
+        .security => c.UPDATE_SECURITY,
+        .bugfix => c.UPDATE_BUGFIX,
+        .enhancement => c.UPDATE_ENHANCEMENT,
+        else => c.UPDATE_UNKNOWN,
+    };
+}
+
+fn severityPasses(advisory: model.Advisory, severity: ?[]const u8) bool {
+    if (severity == null) {
+        return true;
+    }
+    if (advisory.severity == null) {
+        return false;
+    }
+    const requested = std.fmt.parseFloat(f64, severity.?) catch 0;
+    const actual = std.fmt.parseFloat(f64, advisory.severity.?) catch 0;
+    return requested <= actual;
+}
+
+fn advisoryPassesFilters(advisory: model.Advisory, security_only: bool, severity: ?[]const u8, reboot_required: bool) bool {
+    if (security_only and advisory.kind != .security) {
+        return false;
+    }
+    if (!security_only and !severityPasses(advisory, severity)) {
+        return false;
+    }
+    if (reboot_required and !advisory.reboot_suggested) {
+        return false;
+    }
+    return true;
+}
+
+fn advisoryDateText(advisory: model.Advisory) ?[]const u8 {
+    return advisory.updated orelse advisory.issued;
+}
+
+fn formatPackageEvrParts(allocator: std.mem.Allocator, epoch: ?u32, version: []const u8, release: []const u8) ![]const u8 {
+    if (epoch) |value| {
+        if (value != 0) {
+            return std.fmt.allocPrint(allocator, "{d}:{s}-{s}", .{ value, version, release });
+        }
+    }
+    if (release.len != 0) {
+        return std.fmt.allocPrint(allocator, "{s}-{s}", .{ version, release });
+    }
+    return allocator.dupe(u8, version);
+}
+
+fn serializeUpdateInfoEntry(dataset: *const LoadedDataset, advisory: model.Advisory) ![]const u8 {
+    var out = std.array_list.Managed(u8).init(std.heap.c_allocator);
+    defer out.deinit();
+    const header = try std.fmt.allocPrint(
+        std.heap.c_allocator,
+        "{d}{c}{d}{c}{s}{c}{s}{c}{s}",
+        .{
+            advisoryTypeValue(advisory),
+            sep_field,
+            if (advisory.reboot_suggested) @as(u32, 1) else @as(u32, 0),
+            sep_field,
+            advisory.id,
+            sep_field,
+            advisory.description orelse "",
+            sep_field,
+            advisoryDateText(advisory) orelse "",
+        },
+    );
+    defer std.heap.c_allocator.free(header);
+    try out.appendSlice(header);
+
+    const packages = advisory.packageEntries(dataset.repository.advisory_packages);
+    if (packages.len != 0) {
+        try out.append(sep_field);
+    }
+    var index_pkg = packages.len;
+    var first = true;
+    while (index_pkg > 0) {
+        index_pkg -= 1;
+        const advisory_pkg = packages[index_pkg];
+        if (!first) {
+            try out.append(sep_group);
+        }
+        first = false;
+        const evr = try formatPackageEvrParts(
+            std.heap.c_allocator,
+            advisory_pkg.nevra.epoch,
+            advisory_pkg.nevra.version,
+            advisory_pkg.nevra.release,
+        );
+        defer std.heap.c_allocator.free(evr);
+        const pkg_text = try std.fmt.allocPrint(
+            std.heap.c_allocator,
+            "{s}{c}{s}{c}{s}{c}{s}",
+            .{
+                advisory_pkg.nevra.name,
+                sep_item,
+                evr,
+                sep_item,
+                advisory_pkg.nevra.arch,
+                sep_item,
+                advisory_pkg.filename orelse "",
+            },
+        );
+        defer std.heap.c_allocator.free(pkg_text);
+        try out.appendSlice(pkg_text);
+    }
+
+    return out.toOwnedSlice();
+}
+
+fn computeUpdateInfoSummaryLines(ctx: *NativeContext, package_specs: [*c][*c]u8, security_only: bool, severity: ?[]const u8) ![][]const u8 {
+    const refs = try selectInstalledUpdateInfoPackageRefs(ctx, package_specs);
+    defer std.heap.c_allocator.free(refs);
+
+    var counts = [_]u32{ 0, 0, 0, 0 };
+
+    for (refs) |ref| {
+        const pkg = ctx.package(ref);
+        const advisory_refs = try selectUpdateAdvisoryRefs(
+            ctx,
+            pkg.nevra.name,
+            pkg.nevra.arch,
+            .{
+                .epoch = pkg.nevra.epoch,
+                .version = pkg.nevra.version,
+                .release = if (pkg.nevra.release.len == 0) null else pkg.nevra.release,
+            },
+        );
+        defer std.heap.c_allocator.free(advisory_refs);
+
+        for (advisory_refs) |adv_ref| {
+            const advisory = ctx.datasets.items[adv_ref.dataset_index].repository.advisories[adv_ref.advisory_index];
+            if (!advisoryPassesFilters(advisory, security_only, severity, false)) {
+                continue;
+            }
+            counts[advisoryTypeValue(advisory)] += 1;
+        }
+    }
+
+    const out = try std.heap.c_allocator.alloc([]const u8, counts.len);
+    var populated: usize = 0;
+    errdefer freeOwnedItems(out[0..populated]);
+    errdefer std.heap.c_allocator.free(out);
+
+    for (counts, 0..) |count, index| {
+        out[index] = try std.fmt.allocPrint(std.heap.c_allocator, "{d}{c}{d}", .{ index, sep_field, count });
+        populated += 1;
+    }
+    return out;
+}
+
+fn computeUpdateInfoLines(ctx: *NativeContext, package_specs: [*c][*c]u8, security_only: bool, severity: ?[]const u8, reboot_required: bool) ![][]const u8 {
+    const refs = try selectInstalledUpdateInfoPackageRefs(ctx, package_specs);
+    defer std.heap.c_allocator.free(refs);
+
+    var results = std.array_list.Managed([]const u8).init(std.heap.c_allocator);
+    defer results.deinit();
+    errdefer freeOwnedItems(results.items);
+
+    for (refs) |ref| {
+        const pkg = ctx.package(ref);
+        const advisory_refs = try selectUpdateAdvisoryRefs(
+            ctx,
+            pkg.nevra.name,
+            pkg.nevra.arch,
+            .{
+                .epoch = pkg.nevra.epoch,
+                .version = pkg.nevra.version,
+                .release = if (pkg.nevra.release.len == 0) null else pkg.nevra.release,
+            },
+        );
+        defer std.heap.c_allocator.free(advisory_refs);
+
+        for (advisory_refs) |adv_ref| {
+            const dataset = &ctx.datasets.items[adv_ref.dataset_index];
+            const advisory = dataset.repository.advisories[adv_ref.advisory_index];
+            if (!advisoryPassesFilters(advisory, security_only, severity, reboot_required)) {
+                continue;
+            }
+            try results.append(try serializeUpdateInfoEntry(dataset, advisory));
+        }
+    }
+
+    std.mem.reverse([]const u8, results.items);
+    return try results.toOwnedSlice();
 }
 
 fn tryBuildCStringArray(items: []const []const u8) !?[*c][*c]u8 {

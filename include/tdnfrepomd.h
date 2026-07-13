@@ -51,6 +51,7 @@ typedef struct _TDNF_REPOMD_NATIVE_REPO_INPUT
 {
     const char *pszId;
     const char *pszCacheDir;
+    const char *pszSnapshotFile;
 } TDNF_REPOMD_NATIVE_REPO_INPUT, *PTDNF_REPOMD_NATIVE_REPO_INPUT;
 
 #ifndef RPMDB_REPORT_PROGRESS
@@ -268,6 +269,113 @@ TDNFRepoMdNativeUpdateAdvisoryIds(
     const char *pszArch,
     const char *pszEvr,
     char ***pppszAdvisoryIds,
+    uint32_t *pdwCount
+    );
+
+/*
+ * Find exact NEVRA matches in either the installed rpmdb (`nInstalled != 0`)
+ * or the enabled available repositories (`nInstalled == 0`). Returned lines
+ * are serialized as `repo<US>nevra`.
+ */
+uint32_t
+TDNFRepoMdNativeFindNevraMatches(
+    const TDNF_REPOMD_NATIVE_REPO_INPUT *pRepos,
+    uint32_t dwRepoCount,
+    const char *pszInstallRoot,
+    const char *pszNevra,
+    int nInstalled,
+    char ***pppszMatches,
+    uint32_t *pdwCount
+    );
+
+/*
+ * Find exact `name=EVR` matches in a single available repository. Returned
+ * lines are serialized as `repo<US>nevra`.
+ */
+uint32_t
+TDNFRepoMdNativeFindNameEvrMatches(
+    const TDNF_REPOMD_NATIVE_REPO_INPUT *pRepos,
+    uint32_t dwRepoCount,
+    const char *pszNameEvr,
+    char ***pppszMatches,
+    uint32_t *pdwCount
+    );
+
+/*
+ * Compute updateinfo summary counts for installed packages, applying the same
+ * security/severity filtering as `client/updateinfo.c`. Returned lines are
+ * serialized as `type<US>count`.
+ */
+uint32_t
+TDNFRepoMdNativeUpdateInfoSummaryLines(
+    const TDNF_REPOMD_NATIVE_REPO_INPUT *pRepos,
+    uint32_t dwRepoCount,
+    const char *pszInstallRoot,
+    char **ppszPackageNameSpecs,
+    uint32_t dwSecurity,
+    const char *pszSeverity,
+    char ***pppszLines,
+    uint32_t *pdwCount
+    );
+
+/*
+ * Compute updateinfo advisory detail lines for installed packages, applying
+ * the same security/severity/reboot filtering as `client/updateinfo.c`.
+ */
+uint32_t
+TDNFRepoMdNativeUpdateInfoLines(
+    const TDNF_REPOMD_NATIVE_REPO_INPUT *pRepos,
+    uint32_t dwRepoCount,
+    const char *pszInstallRoot,
+    char **ppszPackageNameSpecs,
+    uint32_t dwSecurity,
+    const char *pszSeverity,
+    uint32_t dwRebootRequired,
+    char ***pppszLines,
+    uint32_t *pdwCount
+    );
+
+/*
+ * Compute the set of packages filtered out by the configured minversion
+ * constraints. Returned lines are serialized as `repo<US>nevra`.
+ */
+uint32_t
+TDNFRepoMdNativeMinVersionExcludeLines(
+    const TDNF_REPOMD_NATIVE_REPO_INPUT *pRepos,
+    uint32_t dwRepoCount,
+    const char *pszInstallRoot,
+    char **ppszMinVersions,
+    char ***pppszLines,
+    uint32_t *pdwCount
+    );
+
+/*
+ * Compute the best downgrade candidate for the supplied installed package
+ * under the current repository snapshot/minversion constraints. Returns either
+ * zero lines or one serialized `repo<US>nevra` line.
+ */
+uint32_t
+TDNFRepoMdNativeDowngradeCandidateLines(
+    const TDNF_REPOMD_NATIVE_REPO_INPUT *pRepos,
+    uint32_t dwRepoCount,
+    const char *pszInstallRoot,
+    char **ppszMinVersions,
+    const char *pszInstalledRepoNevra,
+    char ***pppszLines,
+    uint32_t *pdwCount
+    );
+
+/*
+ * Return unique `requires` dependency strings for the serialized package
+ * references (`repo<US>nevra`) supplied in `ppszPackageRefs`.
+ */
+uint32_t
+TDNFRepoMdNativeRequiresForPackageRefs(
+    const TDNF_REPOMD_NATIVE_REPO_INPUT *pRepos,
+    uint32_t dwRepoCount,
+    const char *pszInstallRoot,
+    char **ppszPackageRefs,
+    char ***pppszDeps,
     uint32_t *pdwCount
     );
 

@@ -137,6 +137,14 @@ TDNFUpdateInfoSummary(
         SolvFreePackageList(pUpdateAdvPkgList);
         pUpdateAdvPkgList = NULL;
     }
+
+    TDNFQueryCrosscheckUpdateInfoSummary(
+        pTdnf,
+        ppszPackageNameSpecs,
+        dwSecurity,
+        pszSeverity,
+        pSummary);
+
     *ppSummary = pSummary;
 
 cleanup:
