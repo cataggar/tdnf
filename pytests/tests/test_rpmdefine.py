@@ -26,15 +26,23 @@ def teardown_test(utils):
         shutil.rmtree(INSTALLROOT)
 
 
-@pytest.mark.parametrize("dbpath", ["/usr/lib/rpm", "/usr/lib/sysimage/rpm/"])
-def test_install(utils, dbpath):
-    pkgname = utils.config["mulversion_pkgname"]
+def run_install(utils, pkgname, dbpath, define_args):
     ret = utils.run(['tdnf', 'install',
                      '-y', '--nogpgcheck',
                      '--installroot', INSTALLROOT,
-                     '--releasever=5.0',
-                     '--rpmdefine', f"_dbpath {dbpath}",
-                     pkgname])
+                     '--releasever=5.0'] +
+                    define_args + [pkgname])
     assert ret['retval'] == 0
     assert os.path.isdir(os.path.join(INSTALLROOT, dbpath.lstrip("/")))
     assert os.path.isfile(os.path.join(INSTALLROOT, dbpath.lstrip("/"), "rpmdb.sqlite"))
+
+
+@pytest.mark.parametrize("dbpath", ["/usr/lib/rpm", "/usr/lib/sysimage/rpm/"])
+def test_install(utils, dbpath):
+    pkgname = utils.config["mulversion_pkgname"]
+    run_install(utils, pkgname, dbpath, ['--rpmdefine', f"_dbpath {dbpath}"])
+    shutil.rmtree(INSTALLROOT)
+
+    run_install(
+        utils, pkgname, dbpath,
+        [f'--setopt=rpmdefine=_dbpath={dbpath}'])

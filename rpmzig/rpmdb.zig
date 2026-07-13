@@ -19,14 +19,23 @@ const std = @import("std");
 const sqlite = @import("sqlite");
 const header = @import("rpm_header");
 const pkgfile = @import("rpm_pkgfile");
+pub const txn_config = @import("txn_config.zig");
 const c = sqlite.c;
 const libc = @cImport({
     @cInclude("stdlib.h");
 });
 
+pub const TxnConfig = txn_config.TxnConfig;
+pub const TxnMacro = txn_config.Macro;
+pub const ParsedRpmDefine = txn_config.ParsedRpmDefine;
+pub const parseRpmDefine = txn_config.parseRpmDefine;
+pub const macroFromName = txn_config.macroFromName;
+pub const DEFAULT_DBPATH = txn_config.DEFAULT_DBPATH;
+pub const DEFAULT_TMPPATH = txn_config.DEFAULT_TMPPATH;
+pub const DEFAULT_INSTALL_SCRIPT_PATH = txn_config.DEFAULT_INSTALL_SCRIPT_PATH;
+pub const DEFAULT_SCRIPT_INTERPRETER = txn_config.DEFAULT_SCRIPT_INTERPRETER;
+
 const PKG_TABLE = "Packages";
-const DEFAULT_ROOT = "/";
-const DEFAULT_DB_PATH = "var/lib/rpm/rpmdb.sqlite";
 
 threadlocal var last_error_buf: [256]u8 = undefined;
 threadlocal var last_error_len: usize = 0;
@@ -846,12 +855,7 @@ export fn tdnf_rpm_file_files_next(
 // -------------------------------------------------------------------
 
 fn buildDbPath(buf: []u8, root: []const u8) ![]const u8 {
-    const effective_root = if (root.len == 0) DEFAULT_ROOT else root;
-    var trimmed = std.mem.trimEnd(u8, effective_root, "/");
-    if (trimmed.len == 0) trimmed = "";
-    const needed = trimmed.len + 1 + DEFAULT_DB_PATH.len + 1;
-    if (needed > buf.len) return error.PathTooLong;
-    return try std.fmt.bufPrintZ(buf, "{s}/{s}", .{ trimmed, DEFAULT_DB_PATH });
+    return txn_config.buildDefaultRpmDbSqlitePath(buf, root);
 }
 
 test "buildDbPath default root" {
@@ -877,6 +881,7 @@ test {
     _ = header;
     _ = pkgfile;
     _ = cpio;
+    _ = txn_config;
     // PGP submodules (PR #1 of plan-pure-zig-pgp.md). Imported here
     // only for test discovery; no runtime dependency.
     _ = @import("pgp/armor.zig");

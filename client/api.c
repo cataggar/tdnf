@@ -16,6 +16,7 @@ static int instanceLockFd = -1;
 
 static void TdnfExitHandler(void);
 static void IsTdnfAlreadyRunning(void);
+static uint32_t TDNFApplyRpmDefine(const char *pszValue);
 
 static void TdnfExitHandler(void)
 {
@@ -638,7 +639,8 @@ TDNFOpenHandle(
     for (cn = pTdnf->pArgs->cn_setopts->first_child; cn; cn = cn->next) {
         /* set macros from command line */
         if (strcmp(cn->name, "rpmdefine") == 0) {
-            rpmDefineMacro(NULL, cn->value, 0);
+            dwError = TDNFApplyRpmDefine(cn->value);
+            BAIL_ON_TDNF_ERROR(dwError);
         }
     }
 
@@ -693,6 +695,51 @@ error:
     {
         SolvFreeSack(pSack);
     }
+    goto cleanup;
+}
+
+static uint32_t
+TDNFApplyRpmDefine(
+    const char *pszValue
+    )
+{
+    uint32_t dwError = 0;
+    char *pszNormalized = NULL;
+    const char *pszEquals = NULL;
+    const char *pszMacroValue = pszValue;
+    const char *pszSpace = NULL;
+    const char *pszTab = NULL;
+
+    if (IsNullOrEmptyString(pszValue))
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    pszEquals = strchr(pszValue, '=');
+    pszSpace = strchr(pszValue, ' ');
+    pszTab = strchr(pszValue, '\t');
+
+    if (pszEquals && !pszSpace && !pszTab)
+    {
+        dwError = TDNFAllocateStringPrintf(
+                      &pszNormalized,
+                      "%.*s %s",
+                      (int)(pszEquals - pszValue),
+                      pszValue,
+                      pszEquals + 1);
+        BAIL_ON_TDNF_ERROR(dwError);
+
+        pszMacroValue = pszNormalized;
+    }
+
+    rpmDefineMacro(NULL, pszMacroValue, 0);
+
+cleanup:
+    TDNF_SAFE_FREE_MEMORY(pszNormalized);
+    return dwError;
+
+error:
     goto cleanup;
 }
 
