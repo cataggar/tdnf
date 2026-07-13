@@ -113,8 +113,8 @@ pub fn build(b: *Build) void {
     const rpmzig_transaction_check = b.option(
         bool,
         "rpmzig-transaction-check",
-        "Use rpmzig's native transaction ordering and final dependency/conflict check (default false)",
-    ) orelse false;
+        "Use rpmzig's native transaction ordering and final dependency/conflict check (default true; pass -Drpmzig-transaction-check=false to fall back to the legacy librpm ordering/check path)",
+    ) orelse true;
     const rpmzig_lua = b.option(
         bool,
         "rpmzig-lua",
