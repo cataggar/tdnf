@@ -109,6 +109,11 @@ pub fn build(b: *Build) void {
         "rpmzig-verify",
         "Replace librpm signature verification with rpmzig's pure-Zig OpenPGP verifier (default false)",
     ) orelse false;
+    const native_query_crosscheck = b.option(
+        bool,
+        "native-query-crosscheck",
+        "Run log-only native metadata query crosschecks for list/search/provides/repoquery/updateinfo (default false)",
+    ) orelse false;
     const prefix = b.install_prefix;
     const libdir = "lib";
     const full_libdir = b.fmt("{s}/{s}", .{ prefix, libdir });
@@ -755,6 +760,7 @@ pub fn build(b: *Build) void {
     tdnf_so_mod.addIncludePath(b.path("client"));
     tdnf_so_mod.addSystemIncludePath(libsolv_include);
     tdnf_so_mod.addSystemIncludePath(libsolvext_include);
+    if (native_query_crosscheck) tdnf_so_mod.addCMacro("TDNF_NATIVE_QUERY_CROSSCHECK", "1");
     if (build_with_rpm_6x) tdnf_so_mod.addCMacro("BUILD_WITH_RPM_6X", "1");
     if (rpmzig_verify) {
         // TDNF_RPMZIG_VERIFY gates the rpmzig entry point
@@ -769,6 +775,7 @@ pub fn build(b: *Build) void {
         .files = &.{
             "api.c",      "client.c",   "config.c",    "eventdata.c",
             "goal.c",     "gpgcheck.c", "init.c",      "packageutils.c",
+            "querycrosscheck.c",
             "plugins.c",  "repo.c",     "repoutils.c", "remoterepo.c",
             "repolist.c", "resolve.c",  "rpmtrans.c",  "updateinfo.c",
             "utils.c",    "history.c",  "varsdir.c",

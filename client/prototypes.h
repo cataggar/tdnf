@@ -20,6 +20,52 @@ TDNFApplyScopeFilter(
     TDNF_SCOPE nScope
     );
 
+void
+TDNFQueryCrosscheckList(
+    PTDNF pTdnf,
+    TDNF_SCOPE nScope,
+    char **ppszPackageNameSpecs,
+    TDNF_PKG_DETAIL nDetail,
+    uint32_t dwLibError,
+    PTDNF_PKG_INFO pLibPkgInfos,
+    uint32_t dwLibCount
+    );
+
+void
+TDNFQueryCrosscheckSearch(
+    PTDNF pTdnf,
+    char **ppszSearchStrings,
+    int nStartIndex,
+    int nEndIndex,
+    uint32_t dwLibError,
+    PTDNF_PKG_INFO pLibPkgInfos,
+    uint32_t dwLibCount
+    );
+
+void
+TDNFQueryCrosscheckProvides(
+    PTDNF pTdnf,
+    const char *pszSpec,
+    uint32_t dwLibError,
+    PTDNF_PKG_INFO pLibPkgInfos
+    );
+
+void
+TDNFQueryCrosscheckRepoQuery(
+    PTDNF pTdnf,
+    PTDNF_REPOQUERY_ARGS pRepoqueryArgs,
+    uint32_t dwLibError,
+    PTDNF_PKG_INFO pLibPkgInfos,
+    uint32_t dwLibCount
+    );
+
+void
+TDNFQueryCrosscheckUpdateAdvisories(
+    PTDNF pTdnf,
+    Id dwPkgId,
+    PSolvPackageList pPkgList
+    );
+
 //gpgcheck.c
 uint32_t
 ReadGPGKeyFile(

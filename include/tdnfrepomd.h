@@ -11,6 +11,8 @@ extern "C" {
 #endif
 
 typedef struct s_Repo Repo;
+typedef struct _TDNF_PKG_INFO TDNF_PKG_INFO, *PTDNF_PKG_INFO;
+typedef struct _TDNF_REPOQUERY_ARGS TDNF_REPOQUERY_ARGS, *PTDNF_REPOQUERY_ARGS;
 
 typedef struct tdnf_repomd_doc TDNF_REPOMD_DOC;
 
@@ -44,6 +46,12 @@ typedef struct _TDNF_REPOMD_RECORD
     int nHasOpenSize;
     int nHasDatabaseVersion;
 } TDNF_REPOMD_RECORD;
+
+typedef struct _TDNF_REPOMD_NATIVE_REPO_INPUT
+{
+    const char *pszId;
+    const char *pszCacheDir;
+} TDNF_REPOMD_NATIVE_REPO_INPUT, *PTDNF_REPOMD_NATIVE_REPO_INPUT;
 
 #ifndef RPMDB_REPORT_PROGRESS
 #define RPMDB_REPORT_PROGRESS           (1 << 8)
@@ -138,6 +146,15 @@ TDNFRepoMdNativeLastError(
     );
 
 /*
+ * Return the last native query-layer crosscheck error produced by the
+ * current thread.
+ */
+const char*
+TDNFRepoMdNativeQueryLastError(
+    void
+    );
+
+/*
  * Parse repo metadata with the native Zig parsers and populate an existing
  * libsolv Repo using manual-construction APIs. Optional metadata paths may be
  * NULL. The caller owns `pRepo`.
@@ -177,6 +194,81 @@ TDNFRepoMdNativeAddRpm(
     const char *pszPath,
     int nFlags,
     uint32_t *pdwSolvableId
+    );
+
+/*
+ * Run the native metadata-backed implementation of `tdnf list` / `info`
+ * style queries. `nScope` and `nDetail` use the TDNF_SCOPE /
+ * TDNF_PKG_DETAIL integer values from tdnftypes.h.
+ */
+uint32_t
+TDNFRepoMdNativeList(
+    const TDNF_REPOMD_NATIVE_REPO_INPUT *pRepos,
+    uint32_t dwRepoCount,
+    const char *pszInstallRoot,
+    int nScope,
+    char **ppszPackageNameSpecs,
+    int nDetail,
+    PTDNF_PKG_INFO *ppPkgInfo,
+    uint32_t *pdwCount
+    );
+
+/*
+ * Run the native metadata-backed implementation of `tdnf search`.
+ */
+uint32_t
+TDNFRepoMdNativeSearch(
+    const TDNF_REPOMD_NATIVE_REPO_INPUT *pRepos,
+    uint32_t dwRepoCount,
+    const char *pszInstallRoot,
+    char **ppszSearchStrings,
+    int nStartIndex,
+    int nEndIndex,
+    PTDNF_PKG_INFO *ppPkgInfo,
+    uint32_t *punCount
+    );
+
+/*
+ * Run the native metadata-backed implementation of `tdnf provides` /
+ * `whatprovides`.
+ */
+uint32_t
+TDNFRepoMdNativeProvides(
+    const TDNF_REPOMD_NATIVE_REPO_INPUT *pRepos,
+    uint32_t dwRepoCount,
+    const char *pszInstallRoot,
+    const char *pszSpec,
+    PTDNF_PKG_INFO *ppPkgInfo
+    );
+
+/*
+ * Run the native metadata-backed implementation of repoquery-style
+ * selectors and field population. `pRepoqueryArgs` uses the public
+ * TDNF_REPOQUERY_ARGS layout from tdnftypes.h.
+ */
+uint32_t
+TDNFRepoMdNativeRepoQuery(
+    const TDNF_REPOMD_NATIVE_REPO_INPUT *pRepos,
+    uint32_t dwRepoCount,
+    const char *pszInstallRoot,
+    const TDNF_REPOQUERY_ARGS *pRepoqueryArgs,
+    PTDNF_PKG_INFO *ppPkgInfo,
+    uint32_t *pdwCount
+    );
+
+/*
+ * Return advisory ids whose updateinfo collections are newer than the
+ * supplied installed package NEVRA.
+ */
+uint32_t
+TDNFRepoMdNativeUpdateAdvisoryIds(
+    const TDNF_REPOMD_NATIVE_REPO_INPUT *pRepos,
+    uint32_t dwRepoCount,
+    const char *pszName,
+    const char *pszArch,
+    const char *pszEvr,
+    char ***pppszAdvisoryIds,
+    uint32_t *pdwCount
     );
 
 #ifdef __cplusplus
