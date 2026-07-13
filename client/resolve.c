@@ -407,6 +407,7 @@ TDNFPrepareSinglePkg(
              nAlterType == ALTER_DOWNGRADEALL)
     {
         dwError = TDNFAddPackagesForDowngrade(
+                      pTdnf,
                       pSack,
                       queueGoal,
                       pszPkgName);
@@ -486,6 +487,7 @@ TDNFResolveBuildDependencies(
     PSolvQuery pQuery = NULL;
     PSolvPackageList pPkgList = NULL;
     Queue qDeps = {0};
+    Queue qGoalPkgs = {0};
     const char *pszDep = NULL;
 
     if(!pTdnf || !pTdnf->pSack || !ppszPackageNameSpecs)
@@ -512,9 +514,11 @@ TDNFResolveBuildDependencies(
     }
 
     queue_init(&qDeps);
+    queue_init(&qGoalPkgs);
 
     if (queueGoal->count > 0) {
         /* queueGoal has the command line packages */
+        queue_insertn(&qGoalPkgs, 0, queueGoal->count, queueGoal->elements);
         dwError = SolvRequiresFromQueue(pTdnf->pSack->pPool, queueGoal, &qDeps);
         BAIL_ON_TDNF_ERROR(dwError);
     }
@@ -524,6 +528,12 @@ TDNFResolveBuildDependencies(
         dwError = SolvRequiresFromQueue(pTdnf->pSack->pPool, &pPkgList->queuePackages, &qDeps);
         BAIL_ON_TDNF_ERROR(dwError);
     }
+
+    TDNFQueryCrosscheckBuildDependencies(
+        pTdnf,
+        &qGoalPkgs,
+        pPkgList,
+        &qDeps);
 
     for (i = 0; i < qDeps.count; i++) {
         pszDep = pool_dep2str(pTdnf->pSack->pPool, qDeps.elements[i]);
@@ -547,6 +557,7 @@ TDNFResolveBuildDependencies(
 
 cleanup:
     queue_free(&qDeps);
+    queue_free(&qGoalPkgs);
     if(pQuery) {
         SolvFreeQuery(pQuery);
     }

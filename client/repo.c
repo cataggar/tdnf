@@ -11,6 +11,7 @@
 
 uint32_t
 TDNFApplySnapshot(
+    PTDNF pTdnf,
     PTDNF_REPO_DATA pRepoData,
     PSolvSack pSack,
     Repo* pRepo
@@ -23,7 +24,7 @@ TDNFApplySnapshot(
     int i;
     Queue qResult = {0};
 
-    if(!pRepoData || !pRepoData->pszSnapshotFile || !pSack || !pSack->pPool)
+    if(!pTdnf || !pRepoData || !pRepoData->pszSnapshotFile || !pSack || !pSack->pPool)
     {
         dwError = ERROR_TDNF_INVALID_PARAMETER;
         BAIL_ON_TDNF_ERROR(dwError);
@@ -44,6 +45,11 @@ TDNFApplySnapshot(
                                                         pszPkg, &qResult);
         BAIL_ON_TDNF_ERROR(dwError);
     }
+
+    TDNFQueryCrosscheckSnapshot(
+        pTdnf,
+        pRepoData,
+        &qResult);
 
     if (!pPool->considered)
     {

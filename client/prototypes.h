@@ -66,6 +66,62 @@ TDNFQueryCrosscheckUpdateAdvisories(
     PSolvPackageList pPkgList
     );
 
+void
+TDNFQueryCrosscheckUpdateInfoSummary(
+    PTDNF pTdnf,
+    char **ppszPackageNameSpecs,
+    uint32_t dwSecurity,
+    const char *pszSeverity,
+    PTDNF_UPDATEINFO_SUMMARY pSummary
+    );
+
+void
+TDNFQueryCrosscheckUpdateInfo(
+    PTDNF pTdnf,
+    char **ppszPackageNameSpecs,
+    uint32_t dwSecurity,
+    const char *pszSeverity,
+    uint32_t dwRebootRequired,
+    PTDNF_UPDATEINFO pUpdateInfo
+    );
+
+void
+TDNFQueryCrosscheckNevraLookup(
+    PTDNF pTdnf,
+    const char *pszNevra,
+    int nInstalled,
+    Queue *pLibResult
+    );
+
+void
+TDNFQueryCrosscheckSnapshot(
+    PTDNF pTdnf,
+    PTDNF_REPO_DATA pRepoData,
+    Queue *pLibResult
+    );
+
+void
+TDNFQueryCrosscheckMinVersions(
+    PTDNF pTdnf,
+    Map *pMapMinVersions
+    );
+
+void
+TDNFQueryCrosscheckDowngradeCandidate(
+    PTDNF pTdnf,
+    Id dwInstalled,
+    uint32_t dwLibError,
+    Id dwLibDowngradeId
+    );
+
+void
+TDNFQueryCrosscheckBuildDependencies(
+    PTDNF pTdnf,
+    Queue *pGoalPkgs,
+    PSolvPackageList pPkgList,
+    Queue *pLibDeps
+    );
+
 //gpgcheck.c
 uint32_t
 ReadGPGKeyFile(
@@ -296,6 +352,7 @@ TDNFPopulatePkgInfoArray(
 
 uint32_t
 TDNFPackageGetDowngrade(
+    PTDNF pTdnf,
     Id dwInstalled,
     PSolvSack pSack,
     PSolvPackageList pAvailabePkgList,
@@ -362,6 +419,7 @@ TDNFVerifyInstallPackage(
 
 uint32_t
 TDNFAddPackagesForDowngrade(
+    PTDNF pTdnf,
     PSolvSack pSack,
     Queue* pQueueGoal,
     const char* pszPkgName
@@ -593,6 +651,7 @@ TDNFReadConfFilesFromDir(
 
 uint32_t
 TDNFApplySnapshot(
+    PTDNF pTdnf,
     PTDNF_REPO_DATA pRepoData,
     PSolvSack pSack,
     Repo* pRepo

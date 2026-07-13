@@ -21,6 +21,12 @@ QueryCrosscheckInstallRoot(
     PTDNF pTdnf
     );
 
+static int
+QueryCrosscheckReposHaveRepodata(
+    PTDNF_REPOMD_NATIVE_REPO_INPUT pRepos,
+    uint32_t dwRepoCount
+    );
+
 static void
 QueryCrosscheckLog(
     const char *pszPrefix,
@@ -72,6 +78,89 @@ QueryCrosscheckSerializeUpdateAdvisories(
     PTDNF pTdnf,
     PSolvPackageList pPkgList,
     char ***pppszIds,
+    uint32_t *pdwCount
+    );
+
+static uint32_t
+QueryCrosscheckSerializeQueueMatches(
+    Pool *pPool,
+    Queue *pQueue,
+    char ***pppszLines,
+    uint32_t *pdwCount
+    );
+
+static uint32_t
+QueryCrosscheckSerializePkgInfoMatches(
+    PTDNF_PKG_INFO pPkgInfos,
+    uint32_t dwCount,
+    char ***pppszLines
+    );
+
+static uint32_t
+QueryCrosscheckSerializeMinVersionMap(
+    Pool *pPool,
+    Map *pMap,
+    char ***pppszLines,
+    uint32_t *pdwCount
+    );
+
+static uint32_t
+QueryCrosscheckSerializeRequiresQueue(
+    Pool *pPool,
+    Queue *pQueue,
+    char ***pppszLines,
+    uint32_t *pdwCount
+    );
+
+static uint32_t
+QueryCrosscheckSerializeUpdateInfoSummary(
+    PTDNF_UPDATEINFO_SUMMARY pSummary,
+    char ***pppszLines,
+    uint32_t *pdwCount
+    );
+
+static uint32_t
+QueryCrosscheckSerializeUpdateInfo(
+    PTDNF_UPDATEINFO pInfo,
+    char ***pppszLines,
+    uint32_t *pdwCount
+    );
+
+static uint32_t
+QueryCrosscheckAppendUpdateInfoLine(
+    FILE *pMem,
+    PTDNF_UPDATEINFO pInfo
+    );
+
+static uint32_t
+QueryCrosscheckAppendUpdateInfoPkgs(
+    FILE *pMem,
+    PTDNF_UPDATEINFO_PKG pPkg
+    );
+
+static uint32_t
+QueryCrosscheckBuildSingleRepoInput(
+    PTDNF pTdnf,
+    PTDNF_REPO_DATA pRepoData,
+    TDNF_REPOMD_NATIVE_REPO_INPUT *pRepo
+    );
+
+static uint32_t
+QueryCrosscheckSerializePackageIdLine(
+    Pool *pPool,
+    Id dwPkgId,
+    char **ppszLine
+    );
+
+static void
+QueryCrosscheckSortStringArray(
+    char **ppszLines,
+    uint32_t dwCount
+    );
+
+static void
+QueryCrosscheckDedupeSortedStringArray(
+    char **ppszLines,
     uint32_t *pdwCount
     );
 
@@ -185,6 +274,17 @@ TDNFQueryCrosscheckList(
                         nDetail,
                         &pNativePkgInfos,
                         &dwNativeCount);
+
+    if(dwLibError &&
+       dwNativeError == ERROR_TDNF_FILE_NOT_FOUND &&
+       !QueryCrosscheckReposHaveRepodata(pRepos, dwRepoCount))
+    {
+        QueryCrosscheckLog(
+            "list",
+            "skipping native error comparison because repo metadata is unavailable after legacy error %u\n",
+            dwLibError);
+        goto cleanup;
+    }
 
     if(dwNativeError != dwLibError)
     {
@@ -619,6 +719,614 @@ error:
     goto cleanup;
 }
 
+void
+TDNFQueryCrosscheckUpdateInfoSummary(
+    PTDNF pTdnf,
+    char **ppszPackageNameSpecs,
+    uint32_t dwSecurity,
+    const char *pszSeverity,
+    PTDNF_UPDATEINFO_SUMMARY pSummary
+    )
+{
+    uint32_t dwError = 0;
+    uint32_t dwNativeError = 0;
+    uint32_t dwRepoCount = 0;
+    uint32_t dwLegacyCount = 0;
+    uint32_t dwNativeCount = 0;
+    PTDNF_REPOMD_NATIVE_REPO_INPUT pRepos = NULL;
+    char **ppszLegacy = NULL;
+    char **ppszNative = NULL;
+
+    if(!pTdnf || !pSummary)
+    {
+        goto cleanup;
+    }
+
+    dwError = QueryCrosscheckBuildRepoInputs(pTdnf, &pRepos, &dwRepoCount);
+    if(dwError)
+    {
+        QueryCrosscheckLog("updateinfo-summary", "failed to build repo inputs (%u)\n", dwError);
+        goto cleanup;
+    }
+
+    dwError = QueryCrosscheckSerializeUpdateInfoSummary(
+                  pSummary,
+                  &ppszLegacy,
+                  &dwLegacyCount);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    dwNativeError = TDNFRepoMdNativeUpdateInfoSummaryLines(
+                        pRepos,
+                        dwRepoCount,
+                        QueryCrosscheckInstallRoot(pTdnf),
+                        ppszPackageNameSpecs,
+                        dwSecurity,
+                        pszSeverity,
+                        &ppszNative,
+                        &dwNativeCount);
+    if(dwNativeError)
+    {
+        QueryCrosscheckLog(
+            "updateinfo-summary",
+            "native summary failed (%u): %s\n",
+            dwNativeError,
+            TDNFRepoMdNativeQueryLastError());
+        goto cleanup;
+    }
+
+    dwError = QueryCrosscheckCompareLineArrays(
+                  "updateinfo-summary",
+                  ppszLegacy,
+                  dwLegacyCount,
+                  ppszNative,
+                  dwNativeCount);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+cleanup:
+    TDNFFreeStringArray(ppszLegacy);
+    TDNFFreeStringArray(ppszNative);
+    QueryCrosscheckFreeRepoInputs(pRepos, dwRepoCount);
+    return;
+error:
+    QueryCrosscheckLog("updateinfo-summary", "serialization failure (%u)\n", dwError);
+    goto cleanup;
+}
+
+void
+TDNFQueryCrosscheckUpdateInfo(
+    PTDNF pTdnf,
+    char **ppszPackageNameSpecs,
+    uint32_t dwSecurity,
+    const char *pszSeverity,
+    uint32_t dwRebootRequired,
+    PTDNF_UPDATEINFO pUpdateInfo
+    )
+{
+    uint32_t dwError = 0;
+    uint32_t dwNativeError = 0;
+    uint32_t dwRepoCount = 0;
+    uint32_t dwLegacyCount = 0;
+    uint32_t dwNativeCount = 0;
+    PTDNF_REPOMD_NATIVE_REPO_INPUT pRepos = NULL;
+    char **ppszLegacy = NULL;
+    char **ppszNative = NULL;
+
+    if(!pTdnf)
+    {
+        goto cleanup;
+    }
+
+    dwError = QueryCrosscheckBuildRepoInputs(pTdnf, &pRepos, &dwRepoCount);
+    if(dwError)
+    {
+        QueryCrosscheckLog("updateinfo-info", "failed to build repo inputs (%u)\n", dwError);
+        goto cleanup;
+    }
+
+    dwError = QueryCrosscheckSerializeUpdateInfo(
+                  pUpdateInfo,
+                  &ppszLegacy,
+                  &dwLegacyCount);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    dwNativeError = TDNFRepoMdNativeUpdateInfoLines(
+                        pRepos,
+                        dwRepoCount,
+                        QueryCrosscheckInstallRoot(pTdnf),
+                        ppszPackageNameSpecs,
+                        dwSecurity,
+                        pszSeverity,
+                        dwRebootRequired,
+                        &ppszNative,
+                        &dwNativeCount);
+    if(dwNativeError)
+    {
+        QueryCrosscheckLog(
+            "updateinfo-info",
+            "native updateinfo failed (%u): %s\n",
+            dwNativeError,
+            TDNFRepoMdNativeQueryLastError());
+        goto cleanup;
+    }
+
+    dwError = QueryCrosscheckCompareLineArrays(
+                  "updateinfo-info",
+                  ppszLegacy,
+                  dwLegacyCount,
+                  ppszNative,
+                  dwNativeCount);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+cleanup:
+    TDNFFreeStringArray(ppszLegacy);
+    TDNFFreeStringArray(ppszNative);
+    QueryCrosscheckFreeRepoInputs(pRepos, dwRepoCount);
+    return;
+error:
+    QueryCrosscheckLog("updateinfo-info", "serialization failure (%u)\n", dwError);
+    goto cleanup;
+}
+
+void
+TDNFQueryCrosscheckNevraLookup(
+    PTDNF pTdnf,
+    const char *pszNevra,
+    int nInstalled,
+    Queue *pLibResult
+    )
+{
+    uint32_t dwError = 0;
+    uint32_t dwNativeError = 0;
+    uint32_t dwRepoCount = 0;
+    uint32_t dwLegacyCount = 0;
+    uint32_t dwNativeCount = 0;
+    PTDNF_REPOMD_NATIVE_REPO_INPUT pRepos = NULL;
+    char **ppszLegacy = NULL;
+    char **ppszNative = NULL;
+    const char *pszPrefix = nInstalled ? "nevra-installed" : "nevra-available";
+
+    if(!pTdnf || !pTdnf->pSack || IsNullOrEmptyString(pszNevra))
+    {
+        goto cleanup;
+    }
+
+    dwError = QueryCrosscheckBuildRepoInputs(pTdnf, &pRepos, &dwRepoCount);
+    if(dwError)
+    {
+        QueryCrosscheckLog(pszPrefix, "failed to build repo inputs (%u)\n", dwError);
+        goto cleanup;
+    }
+
+    dwError = QueryCrosscheckSerializeQueueMatches(
+                  pTdnf->pSack->pPool,
+                  pLibResult,
+                  &ppszLegacy,
+                  &dwLegacyCount);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    dwNativeError = TDNFRepoMdNativeFindNevraMatches(
+                        pRepos,
+                        dwRepoCount,
+                        QueryCrosscheckInstallRoot(pTdnf),
+                        pszNevra,
+                        nInstalled,
+                        &ppszNative,
+                        &dwNativeCount);
+    if(dwNativeError)
+    {
+        QueryCrosscheckLog(
+            pszPrefix,
+            "native nevra lookup failed (%u): %s\n",
+            dwNativeError,
+            TDNFRepoMdNativeQueryLastError());
+        goto cleanup;
+    }
+
+    dwError = QueryCrosscheckCompareLineArrays(
+                  pszPrefix,
+                  ppszLegacy,
+                  dwLegacyCount,
+                  ppszNative,
+                  dwNativeCount);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+cleanup:
+    TDNFFreeStringArray(ppszLegacy);
+    TDNFFreeStringArray(ppszNative);
+    QueryCrosscheckFreeRepoInputs(pRepos, dwRepoCount);
+    return;
+error:
+    QueryCrosscheckLog(pszPrefix, "serialization failure (%u)\n", dwError);
+    goto cleanup;
+}
+
+void
+TDNFQueryCrosscheckSnapshot(
+    PTDNF pTdnf,
+    PTDNF_REPO_DATA pRepoData,
+    Queue *pLibResult
+    )
+{
+    uint32_t dwError = 0;
+    uint32_t dwNativeError = 0;
+    uint32_t dwLegacyCount = 0;
+    uint32_t dwNativeCount = 0;
+    TDNF_REPOMD_NATIVE_REPO_INPUT repo = {0};
+    PTDNF_PKG_INFO pNativePkgInfos = NULL;
+    char **ppszLegacy = NULL;
+    char **ppszNative = NULL;
+
+    if(!pTdnf || !pTdnf->pSack || !pRepoData || IsNullOrEmptyString(pRepoData->pszSnapshotFile))
+    {
+        goto cleanup;
+    }
+
+    dwError = QueryCrosscheckBuildSingleRepoInput(pTdnf, pRepoData, &repo);
+    if(dwError)
+    {
+        QueryCrosscheckLog("snapshot", "failed to build repo input (%u)\n", dwError);
+        goto cleanup;
+    }
+
+    dwError = QueryCrosscheckSerializeQueueMatches(
+                  pTdnf->pSack->pPool,
+                  pLibResult,
+                  &ppszLegacy,
+                  &dwLegacyCount);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    dwNativeError = TDNFRepoMdNativeList(
+                        &repo,
+                        1,
+                        NULL,
+                        SCOPE_AVAILABLE,
+                        NULL,
+                        DETAIL_LIST,
+                        &pNativePkgInfos,
+                        &dwNativeCount);
+    if(dwNativeError)
+    {
+        QueryCrosscheckLog(
+            "snapshot",
+            "native snapshot list failed (%u): %s\n",
+            dwNativeError,
+            TDNFRepoMdNativeQueryLastError());
+        goto cleanup;
+    }
+
+    dwError = QueryCrosscheckSerializePkgInfoMatches(
+                  pNativePkgInfos,
+                  dwNativeCount,
+                  &ppszNative);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    QueryCrosscheckSortStringArray(ppszLegacy, dwLegacyCount);
+    QueryCrosscheckSortStringArray(ppszNative, dwNativeCount);
+    QueryCrosscheckDedupeSortedStringArray(ppszLegacy, &dwLegacyCount);
+    QueryCrosscheckDedupeSortedStringArray(ppszNative, &dwNativeCount);
+
+    dwError = QueryCrosscheckCompareLineArrays(
+                  "snapshot",
+                  ppszLegacy,
+                  dwLegacyCount,
+                  ppszNative,
+                  dwNativeCount);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+cleanup:
+    TDNFFreeStringArray(ppszLegacy);
+    TDNFFreeStringArray(ppszNative);
+    TDNFFreePackageInfoArray(pNativePkgInfos, dwNativeCount);
+    {
+        char *pszCacheDir = (char *)repo.pszCacheDir;
+        TDNF_SAFE_FREE_MEMORY(pszCacheDir);
+        repo.pszCacheDir = NULL;
+    }
+    return;
+error:
+    QueryCrosscheckLog("snapshot", "serialization failure (%u)\n", dwError);
+    goto cleanup;
+}
+
+void
+TDNFQueryCrosscheckMinVersions(
+    PTDNF pTdnf,
+    Map *pMapMinVersions
+    )
+{
+    uint32_t dwError = 0;
+    uint32_t dwNativeError = 0;
+    uint32_t dwRepoCount = 0;
+    uint32_t dwLegacyCount = 0;
+    uint32_t dwNativeCount = 0;
+    PTDNF_REPOMD_NATIVE_REPO_INPUT pRepos = NULL;
+    char **ppszLegacy = NULL;
+    char **ppszNative = NULL;
+
+    if(!pTdnf || !pTdnf->pSack || !pMapMinVersions ||
+       !pTdnf->pConf || !pTdnf->pConf->ppszMinVersions)
+    {
+        goto cleanup;
+    }
+
+    dwError = QueryCrosscheckBuildRepoInputs(pTdnf, &pRepos, &dwRepoCount);
+    if(dwError)
+    {
+        QueryCrosscheckLog("minversions", "failed to build repo inputs (%u)\n", dwError);
+        goto cleanup;
+    }
+
+    dwError = QueryCrosscheckSerializeMinVersionMap(
+                  pTdnf->pSack->pPool,
+                  pMapMinVersions,
+                  &ppszLegacy,
+                  &dwLegacyCount);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    dwNativeError = TDNFRepoMdNativeMinVersionExcludeLines(
+                        pRepos,
+                        dwRepoCount,
+                        QueryCrosscheckInstallRoot(pTdnf),
+                        pTdnf->pConf->ppszMinVersions,
+                        &ppszNative,
+                        &dwNativeCount);
+    if(dwNativeError)
+    {
+        QueryCrosscheckLog(
+            "minversions",
+            "native minversion filter failed (%u): %s\n",
+            dwNativeError,
+            TDNFRepoMdNativeQueryLastError());
+        goto cleanup;
+    }
+
+    QueryCrosscheckSortStringArray(ppszLegacy, dwLegacyCount);
+    QueryCrosscheckSortStringArray(ppszNative, dwNativeCount);
+
+    dwError = QueryCrosscheckCompareLineArrays(
+                  "minversions",
+                  ppszLegacy,
+                  dwLegacyCount,
+                  ppszNative,
+                  dwNativeCount);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+cleanup:
+    TDNFFreeStringArray(ppszLegacy);
+    TDNFFreeStringArray(ppszNative);
+    QueryCrosscheckFreeRepoInputs(pRepos, dwRepoCount);
+    return;
+error:
+    QueryCrosscheckLog("minversions", "serialization failure (%u)\n", dwError);
+    goto cleanup;
+}
+
+void
+TDNFQueryCrosscheckDowngradeCandidate(
+    PTDNF pTdnf,
+    Id dwInstalled,
+    uint32_t dwLibError,
+    Id dwLibDowngradeId
+    )
+{
+    uint32_t dwError = 0;
+    uint32_t dwNativeError = 0;
+    uint32_t dwRepoCount = 0;
+    uint32_t dwLegacyCount = 0;
+    uint32_t dwNativeCount = 0;
+    PTDNF_REPOMD_NATIVE_REPO_INPUT pRepos = NULL;
+    char **ppszLegacy = NULL;
+    char **ppszNative = NULL;
+    char *pszInstalled = NULL;
+
+    if(!pTdnf || !pTdnf->pSack)
+    {
+        goto cleanup;
+    }
+
+    dwError = QueryCrosscheckBuildRepoInputs(pTdnf, &pRepos, &dwRepoCount);
+    if(dwError)
+    {
+        QueryCrosscheckLog("downgrade", "failed to build repo inputs (%u)\n", dwError);
+        goto cleanup;
+    }
+
+    dwError = QueryCrosscheckSerializePackageIdLine(
+                  pTdnf->pSack->pPool,
+                  dwInstalled,
+                  &pszInstalled);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    if(!dwLibError)
+    {
+        dwError = TDNFAllocateMemory(2, sizeof(char *), (void **)&ppszLegacy);
+        BAIL_ON_TDNF_ERROR(dwError);
+        dwError = QueryCrosscheckSerializePackageIdLine(
+                      pTdnf->pSack->pPool,
+                      dwLibDowngradeId,
+                      &ppszLegacy[0]);
+        BAIL_ON_TDNF_ERROR(dwError);
+        dwLegacyCount = 1;
+    }
+    else if(dwLibError != ERROR_TDNF_NO_DOWNGRADE_PATH)
+    {
+        QueryCrosscheckLog("downgrade", "skipping comparison for legacy error %u\n", dwLibError);
+        goto cleanup;
+    }
+
+    dwNativeError = TDNFRepoMdNativeDowngradeCandidateLines(
+                        pRepos,
+                        dwRepoCount,
+                        QueryCrosscheckInstallRoot(pTdnf),
+                        (pTdnf->pConf) ? pTdnf->pConf->ppszMinVersions : NULL,
+                        pszInstalled,
+                        &ppszNative,
+                        &dwNativeCount);
+    if(dwNativeError)
+    {
+        QueryCrosscheckLog(
+            "downgrade",
+            "native downgrade selection failed (%u): %s\n",
+            dwNativeError,
+            TDNFRepoMdNativeQueryLastError());
+        goto cleanup;
+    }
+
+    dwError = QueryCrosscheckCompareLineArrays(
+                  "downgrade",
+                  ppszLegacy,
+                  dwLegacyCount,
+                  ppszNative,
+                  dwNativeCount);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+cleanup:
+    TDNF_SAFE_FREE_MEMORY(pszInstalled);
+    TDNFFreeStringArray(ppszLegacy);
+    TDNFFreeStringArray(ppszNative);
+    QueryCrosscheckFreeRepoInputs(pRepos, dwRepoCount);
+    return;
+error:
+    QueryCrosscheckLog("downgrade", "serialization failure (%u)\n", dwError);
+    goto cleanup;
+}
+
+void
+TDNFQueryCrosscheckBuildDependencies(
+    PTDNF pTdnf,
+    Queue *pGoalPkgs,
+    PSolvPackageList pPkgList,
+    Queue *pLibDeps
+    )
+{
+    uint32_t dwError = 0;
+    uint32_t dwNativeError = 0;
+    uint32_t dwRepoCount = 0;
+    uint32_t dwLegacyCount = 0;
+    uint32_t dwNativeCount = 0;
+    uint32_t dwPkgCount = 0;
+    PTDNF_REPOMD_NATIVE_REPO_INPUT pRepos = NULL;
+    char **ppszLegacy = NULL;
+    char **ppszNative = NULL;
+    char **ppszPkgRefs = NULL;
+    Pool *pPool = NULL;
+    int i = 0;
+
+    if(!pTdnf || !pTdnf->pSack || !pLibDeps)
+    {
+        goto cleanup;
+    }
+
+    pPool = pTdnf->pSack->pPool;
+
+    if(pGoalPkgs)
+    {
+        for(i = 0; i < pGoalPkgs->count; i++)
+        {
+            Solvable *pSolv = pool_id2solvable(pPool, pGoalPkgs->elements[i]);
+            if(pSolv && pSolv->repo && !strcmp(pSolv->repo->name, CMDLINE_REPO_NAME))
+            {
+                QueryCrosscheckLog("builddeps", "skipping comparison for @cmdline package refs\n");
+                goto cleanup;
+            }
+            dwPkgCount++;
+        }
+    }
+    if(pPkgList)
+    {
+        for(i = 0; i < pPkgList->queuePackages.count; i++)
+        {
+            Solvable *pSolv = pool_id2solvable(pPool, pPkgList->queuePackages.elements[i]);
+            if(pSolv && pSolv->repo && !strcmp(pSolv->repo->name, CMDLINE_REPO_NAME))
+            {
+                QueryCrosscheckLog("builddeps", "skipping comparison for @cmdline package refs\n");
+                goto cleanup;
+            }
+            dwPkgCount++;
+        }
+    }
+    if(!dwPkgCount)
+    {
+        goto cleanup;
+    }
+
+    dwError = QueryCrosscheckBuildRepoInputs(pTdnf, &pRepos, &dwRepoCount);
+    if(dwError)
+    {
+        QueryCrosscheckLog("builddeps", "failed to build repo inputs (%u)\n", dwError);
+        goto cleanup;
+    }
+
+    dwError = TDNFAllocateMemory(dwPkgCount + 1, sizeof(char *), (void **)&ppszPkgRefs);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    dwPkgCount = 0;
+    if(pGoalPkgs)
+    {
+        for(i = 0; i < pGoalPkgs->count; i++)
+        {
+            dwError = QueryCrosscheckSerializePackageIdLine(
+                          pPool,
+                          pGoalPkgs->elements[i],
+                          &ppszPkgRefs[dwPkgCount++]);
+            BAIL_ON_TDNF_ERROR(dwError);
+        }
+    }
+    if(pPkgList)
+    {
+        for(i = 0; i < pPkgList->queuePackages.count; i++)
+        {
+            dwError = QueryCrosscheckSerializePackageIdLine(
+                          pPool,
+                          pPkgList->queuePackages.elements[i],
+                          &ppszPkgRefs[dwPkgCount++]);
+            BAIL_ON_TDNF_ERROR(dwError);
+        }
+    }
+
+    dwError = QueryCrosscheckSerializeRequiresQueue(
+                  pPool,
+                  pLibDeps,
+                  &ppszLegacy,
+                  &dwLegacyCount);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    dwNativeError = TDNFRepoMdNativeRequiresForPackageRefs(
+                        pRepos,
+                        dwRepoCount,
+                        QueryCrosscheckInstallRoot(pTdnf),
+                        ppszPkgRefs,
+                        &ppszNative,
+                        &dwNativeCount);
+    if(dwNativeError)
+    {
+        QueryCrosscheckLog(
+            "builddeps",
+            "native requires extraction failed (%u): %s\n",
+            dwNativeError,
+            TDNFRepoMdNativeQueryLastError());
+        goto cleanup;
+    }
+
+    dwError = QueryCrosscheckCompareLineArrays(
+                  "builddeps",
+                  ppszLegacy,
+                  dwLegacyCount,
+                  ppszNative,
+                  dwNativeCount);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+cleanup:
+    TDNFFreeStringArray(ppszLegacy);
+    TDNFFreeStringArray(ppszNative);
+    TDNFFreeStringArray(ppszPkgRefs);
+    QueryCrosscheckFreeRepoInputs(pRepos, dwRepoCount);
+    return;
+error:
+    QueryCrosscheckLog("builddeps", "serialization failure (%u)\n", dwError);
+    goto cleanup;
+}
+
 static uint32_t
 QueryCrosscheckBuildRepoInputs(
     PTDNF pTdnf,
@@ -677,6 +1385,7 @@ QueryCrosscheckBuildRepoInputs(
             BAIL_ON_TDNF_ERROR(dwError);
 
             pRepos[dwCount].pszId = pRepoData->pszId;
+            pRepos[dwCount].pszSnapshotFile = pRepoData->pszSnapshotFile;
             dwCount++;
         }
         pRepoData = pRepoData->pNext;
@@ -689,6 +1398,45 @@ cleanup:
     return dwError;
 error:
     QueryCrosscheckFreeRepoInputs(pRepos, dwCount);
+    goto cleanup;
+}
+
+static uint32_t
+QueryCrosscheckBuildSingleRepoInput(
+    PTDNF pTdnf,
+    PTDNF_REPO_DATA pRepoData,
+    TDNF_REPOMD_NATIVE_REPO_INPUT *pRepo
+    )
+{
+    uint32_t dwError = 0;
+
+    if(!pTdnf || !pRepoData || !pRepo)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    memset(pRepo, 0, sizeof(*pRepo));
+
+    dwError = TDNFGetCachePath(
+                  pTdnf,
+                  pRepoData,
+                  NULL,
+                  NULL,
+                  (char **)&pRepo->pszCacheDir);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    pRepo->pszId = pRepoData->pszId;
+    pRepo->pszSnapshotFile = pRepoData->pszSnapshotFile;
+
+cleanup:
+    return dwError;
+error:
+    {
+        char *pszCacheDir = (char *)pRepo->pszCacheDir;
+        TDNF_SAFE_FREE_MEMORY(pszCacheDir);
+        pRepo->pszCacheDir = NULL;
+    }
     goto cleanup;
 }
 
@@ -725,6 +1473,47 @@ QueryCrosscheckInstallRoot(
         return NULL;
     }
     return pTdnf->pArgs->pszInstallRoot;
+}
+
+static int
+QueryCrosscheckReposHaveRepodata(
+    PTDNF_REPOMD_NATIVE_REPO_INPUT pRepos,
+    uint32_t dwRepoCount
+    )
+{
+    uint32_t dwIndex = 0;
+    char *pszRepoMd = NULL;
+    int nFound = 1;
+    struct stat st = {0};
+
+    for(dwIndex = 0; dwIndex < dwRepoCount; dwIndex++)
+    {
+        if(IsNullOrEmptyString(pRepos[dwIndex].pszCacheDir))
+        {
+            continue;
+        }
+
+        if(TDNFAllocateStringPrintf(
+               &pszRepoMd,
+               "%s/repodata/repomd.xml",
+               pRepos[dwIndex].pszCacheDir))
+        {
+            continue;
+        }
+
+        if(stat(pszRepoMd, &st) < 0)
+        {
+            nFound = 0;
+        }
+
+        TDNF_SAFE_FREE_MEMORY(pszRepoMd);
+        if(!nFound)
+        {
+            break;
+        }
+    }
+
+    return nFound;
 }
 
 #if defined(__clang__)
@@ -816,6 +1605,129 @@ QueryCrosscheckCompareLineArrays(
 
 cleanup:
     return dwError;
+}
+
+static uint32_t
+QueryCrosscheckSerializePackageIdLine(
+    Pool *pPool,
+    Id dwPkgId,
+    char **ppszLine
+    )
+{
+    uint32_t dwError = 0;
+    Solvable *pSolv = NULL;
+    const char *pszRepo = "";
+    const char *pszNevra = NULL;
+    char *pszLine = NULL;
+
+    if(!pPool || !ppszLine)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    pSolv = pool_id2solvable(pPool, dwPkgId);
+    if(!pSolv)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    if(pSolv->repo && pSolv->repo->name)
+    {
+        pszRepo = pSolv->repo->name;
+    }
+    pszNevra = pool_solvable2str(pPool, pSolv);
+    if(!pszNevra)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    dwError = TDNFAllocateStringPrintf(
+                  &pszLine,
+                  "%s%c%s",
+                  pszRepo,
+                  0x1f,
+                  pszNevra);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    *ppszLine = pszLine;
+
+cleanup:
+    return dwError;
+error:
+    if(ppszLine)
+    {
+        *ppszLine = NULL;
+    }
+    TDNF_SAFE_FREE_MEMORY(pszLine);
+    goto cleanup;
+}
+
+static int
+QueryCrosscheckCompareStrings(
+    const void *pLeft,
+    const void *pRight
+    )
+{
+    const char *pszLeft = *(const char * const *)pLeft;
+    const char *pszRight = *(const char * const *)pRight;
+    return strcmp(pszLeft ? pszLeft : "", pszRight ? pszRight : "");
+}
+
+static void
+QueryCrosscheckSortStringArray(
+    char **ppszLines,
+    uint32_t dwCount
+    )
+{
+    if(ppszLines && dwCount > 1)
+    {
+        qsort(ppszLines,
+              dwCount,
+              sizeof(char *),
+              QueryCrosscheckCompareStrings);
+    }
+}
+
+static void
+QueryCrosscheckDedupeSortedStringArray(
+    char **ppszLines,
+    uint32_t *pdwCount
+    )
+{
+    uint32_t dwOriginalCount = 0;
+    uint32_t dwRead = 0;
+    uint32_t dwWrite = 0;
+
+    if(!ppszLines || !pdwCount || *pdwCount < 2)
+    {
+        return;
+    }
+
+    dwOriginalCount = *pdwCount;
+    dwWrite = 1;
+    for(dwRead = 1; dwRead < dwOriginalCount; dwRead++)
+    {
+        const char *pszPrev = ppszLines[dwWrite - 1] ? ppszLines[dwWrite - 1] : "";
+        const char *pszCurrent = ppszLines[dwRead] ? ppszLines[dwRead] : "";
+
+        if(!strcmp(pszPrev, pszCurrent))
+        {
+            TDNF_SAFE_FREE_MEMORY(ppszLines[dwRead]);
+            continue;
+        }
+
+        ppszLines[dwWrite++] = ppszLines[dwRead];
+    }
+
+    *pdwCount = dwWrite;
+
+    while(dwWrite < dwOriginalCount)
+    {
+        ppszLines[dwWrite++] = NULL;
+    }
 }
 
 static uint32_t
@@ -1267,6 +2179,426 @@ error:
 }
 
 static uint32_t
+QueryCrosscheckSerializeQueueMatches(
+    Pool *pPool,
+    Queue *pQueue,
+    char ***pppszLines,
+    uint32_t *pdwCount
+    )
+{
+    uint32_t dwError = 0;
+    uint32_t dwCount = 0;
+    uint32_t i = 0;
+    char **ppszLines = NULL;
+
+    if(!pPool || !pppszLines || !pdwCount)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    dwCount = (pQueue) ? (uint32_t)pQueue->count : 0;
+    dwError = TDNFAllocateMemory(
+                  dwCount + 1,
+                  sizeof(char *),
+                  (void **)&ppszLines);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    for(i = 0; i < dwCount; i++)
+    {
+        dwError = QueryCrosscheckSerializePackageIdLine(
+                      pPool,
+                      pQueue->elements[i],
+                      &ppszLines[i]);
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    *pppszLines = ppszLines;
+    *pdwCount = dwCount;
+
+cleanup:
+    return dwError;
+error:
+    if(ppszLines)
+    {
+        TDNFFreeStringArray(ppszLines);
+    }
+    goto cleanup;
+}
+
+static uint32_t
+QueryCrosscheckSerializePkgInfoMatches(
+    PTDNF_PKG_INFO pPkgInfos,
+    uint32_t dwCount,
+    char ***pppszLines
+    )
+{
+    uint32_t dwError = 0;
+    uint32_t i = 0;
+    char **ppszLines = NULL;
+
+    if(!pppszLines)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    dwError = TDNFAllocateMemory(
+                  dwCount + 1,
+                  sizeof(char *),
+                  (void **)&ppszLines);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    for(i = 0; i < dwCount; i++)
+    {
+        char *pszNevra = NULL;
+        const char *pszName = pPkgInfos[i].pszName ? pPkgInfos[i].pszName : "";
+        const char *pszEvr = pPkgInfos[i].pszEVR ? pPkgInfos[i].pszEVR : "";
+        const char *pszArch = pPkgInfos[i].pszArch ? pPkgInfos[i].pszArch : "";
+
+        if(!IsNullOrEmptyString(pszArch))
+        {
+            dwError = TDNFAllocateStringPrintf(
+                          &pszNevra,
+                          "%s-%s.%s",
+                          pszName,
+                          pszEvr,
+                          pszArch);
+        }
+        else
+        {
+            dwError = TDNFAllocateStringPrintf(
+                          &pszNevra,
+                          "%s-%s",
+                          pszName,
+                          pszEvr);
+        }
+        BAIL_ON_TDNF_ERROR(dwError);
+
+        dwError = TDNFAllocateStringPrintf(
+                      &ppszLines[i],
+                      "%s%c%s",
+                      pPkgInfos[i].pszRepoName ? pPkgInfos[i].pszRepoName : "",
+                      0x1f,
+                      pszNevra);
+        TDNF_SAFE_FREE_MEMORY(pszNevra);
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    *pppszLines = ppszLines;
+
+cleanup:
+    return dwError;
+error:
+    if(ppszLines)
+    {
+        TDNFFreeStringArray(ppszLines);
+    }
+    goto cleanup;
+}
+
+static uint32_t
+QueryCrosscheckSerializeMinVersionMap(
+    Pool *pPool,
+    Map *pMap,
+    char ***pppszLines,
+    uint32_t *pdwCount
+    )
+{
+    uint32_t dwError = 0;
+    uint32_t dwCount = 0;
+    uint32_t i = 0;
+    char **ppszLines = NULL;
+    Pool *pool = pPool;
+    Id p = 0;
+
+    if(!pPool || !pppszLines || !pdwCount)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    if(pMap)
+    {
+        FOR_POOL_SOLVABLES(p)
+        {
+            if(MAPTST(pMap, p))
+            {
+                dwCount++;
+            }
+        }
+    }
+
+    dwError = TDNFAllocateMemory(
+                  dwCount + 1,
+                  sizeof(char *),
+                  (void **)&ppszLines);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    if(pMap)
+    {
+        FOR_POOL_SOLVABLES(p)
+        {
+            if(!MAPTST(pMap, p))
+            {
+                continue;
+            }
+            dwError = QueryCrosscheckSerializePackageIdLine(
+                          pPool,
+                          p,
+                          &ppszLines[i++]);
+            BAIL_ON_TDNF_ERROR(dwError);
+        }
+    }
+
+    *pppszLines = ppszLines;
+    *pdwCount = dwCount;
+
+cleanup:
+    return dwError;
+error:
+    if(ppszLines)
+    {
+        TDNFFreeStringArray(ppszLines);
+    }
+    goto cleanup;
+}
+
+static uint32_t
+QueryCrosscheckSerializeRequiresQueue(
+    Pool *pPool,
+    Queue *pQueue,
+    char ***pppszLines,
+    uint32_t *pdwCount
+    )
+{
+    uint32_t dwError = 0;
+    uint32_t dwCount = 0;
+    uint32_t i = 0;
+    char **ppszLines = NULL;
+
+    if(!pPool || !pppszLines || !pdwCount)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    dwCount = (pQueue) ? (uint32_t)pQueue->count : 0;
+    dwError = TDNFAllocateMemory(
+                  dwCount + 1,
+                  sizeof(char *),
+                  (void **)&ppszLines);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    for(i = 0; i < dwCount; i++)
+    {
+        const char *pszDep = pool_dep2str(pPool, pQueue->elements[i]);
+        if(!pszDep)
+        {
+            dwError = ERROR_TDNF_INVALID_PARAMETER;
+            BAIL_ON_TDNF_ERROR(dwError);
+        }
+
+        dwError = TDNFAllocateString(pszDep, &ppszLines[i]);
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    *pppszLines = ppszLines;
+    *pdwCount = dwCount;
+
+cleanup:
+    return dwError;
+error:
+    if(ppszLines)
+    {
+        TDNFFreeStringArray(ppszLines);
+    }
+    goto cleanup;
+}
+
+static uint32_t
+QueryCrosscheckSerializeUpdateInfoSummary(
+    PTDNF_UPDATEINFO_SUMMARY pSummary,
+    char ***pppszLines,
+    uint32_t *pdwCount
+    )
+{
+    uint32_t dwError = 0;
+    uint32_t i = 0;
+    char **ppszLines = NULL;
+
+    if(!pSummary || !pppszLines || !pdwCount)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    dwError = TDNFAllocateMemory(
+                  UPDATE_ENHANCEMENT + 2,
+                  sizeof(char *),
+                  (void **)&ppszLines);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    for(i = 0; i <= UPDATE_ENHANCEMENT; i++)
+    {
+        dwError = TDNFAllocateStringPrintf(
+                      &ppszLines[i],
+                      "%u%c%u",
+                      pSummary[i].nType,
+                      0x1f,
+                      pSummary[i].nCount);
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    *pppszLines = ppszLines;
+    *pdwCount = UPDATE_ENHANCEMENT + 1;
+
+cleanup:
+    return dwError;
+error:
+    if(ppszLines)
+    {
+        TDNFFreeStringArray(ppszLines);
+    }
+    goto cleanup;
+}
+
+static uint32_t
+QueryCrosscheckSerializeUpdateInfo(
+    PTDNF_UPDATEINFO pInfo,
+    char ***pppszLines,
+    uint32_t *pdwCount
+    )
+{
+    uint32_t dwError = 0;
+    uint32_t dwCount = 0;
+    uint32_t i = 0;
+    char **ppszLines = NULL;
+    PTDNF_UPDATEINFO pCurrent = NULL;
+
+    if(!pppszLines || !pdwCount)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    for(pCurrent = pInfo; pCurrent; pCurrent = pCurrent->pNext)
+    {
+        dwCount++;
+    }
+
+    dwError = TDNFAllocateMemory(
+                  dwCount + 1,
+                  sizeof(char *),
+                  (void **)&ppszLines);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    for(pCurrent = pInfo; pCurrent; pCurrent = pCurrent->pNext)
+    {
+        FILE *pMem = NULL;
+        size_t nSize = 0;
+        char *pszLine = NULL;
+
+        pMem = open_memstream(&pszLine, &nSize);
+        if(!pMem)
+        {
+            dwError = ERROR_TDNF_OUT_OF_MEMORY;
+            BAIL_ON_TDNF_ERROR(dwError);
+        }
+        dwError = QueryCrosscheckAppendUpdateInfoLine(pMem, pCurrent);
+        fclose(pMem);
+        pMem = NULL;
+        BAIL_ON_TDNF_ERROR(dwError);
+        ppszLines[i++] = pszLine;
+    }
+
+    *pppszLines = ppszLines;
+    *pdwCount = dwCount;
+
+cleanup:
+    return dwError;
+error:
+    if(ppszLines)
+    {
+        TDNFFreeStringArray(ppszLines);
+    }
+    goto cleanup;
+}
+
+static uint32_t
+QueryCrosscheckAppendUpdateInfoLine(
+    FILE *pMem,
+    PTDNF_UPDATEINFO pInfo
+    )
+{
+    uint32_t dwError = 0;
+
+    if(!pMem || !pInfo)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    fprintf(pMem,
+            "%u%c%u%c%s%c%s%c%s",
+            pInfo->nType,
+            0x1f,
+            pInfo->nRebootRequired,
+            0x1f,
+            pInfo->pszID ? pInfo->pszID : "",
+            0x1f,
+            pInfo->pszDescription ? pInfo->pszDescription : "",
+            0x1f,
+            pInfo->pszDate ? pInfo->pszDate : "");
+
+    if(pInfo->pPackages)
+    {
+        fputc(0x1f, pMem);
+        dwError = QueryCrosscheckAppendUpdateInfoPkgs(pMem, pInfo->pPackages);
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+cleanup:
+    return dwError;
+error:
+    goto cleanup;
+}
+
+static uint32_t
+QueryCrosscheckAppendUpdateInfoPkgs(
+    FILE *pMem,
+    PTDNF_UPDATEINFO_PKG pPkg
+    )
+{
+    int nFirst = 1;
+
+    if(!pMem)
+    {
+        return ERROR_TDNF_INVALID_PARAMETER;
+    }
+
+    while(pPkg)
+    {
+        if(!nFirst)
+        {
+            fputc(0x1e, pMem);
+        }
+        nFirst = 0;
+        fprintf(pMem,
+                "%s%c%s%c%s%c%s",
+                pPkg->pszName ? pPkg->pszName : "",
+                0x1d,
+                pPkg->pszEVR ? pPkg->pszEVR : "",
+                0x1d,
+                pPkg->pszArch ? pPkg->pszArch : "",
+                0x1d,
+                pPkg->pszFileName ? pPkg->pszFileName : "");
+        pPkg = pPkg->pNext;
+    }
+    return 0;
+}
+
+static uint32_t
 QueryCrosscheckCompactUserInstalled(
     PTDNF_PKG_INFO pPkgInfos,
     uint32_t *pdwCount,
@@ -1490,6 +2822,104 @@ TDNFQueryCrosscheckUpdateAdvisories(
     (void)pTdnf;
     (void)dwPkgId;
     (void)pPkgList;
+}
+
+void
+TDNFQueryCrosscheckUpdateInfoSummary(
+    PTDNF pTdnf,
+    char **ppszPackageNameSpecs,
+    uint32_t dwSecurity,
+    const char *pszSeverity,
+    PTDNF_UPDATEINFO_SUMMARY pSummary
+    )
+{
+    (void)pTdnf;
+    (void)ppszPackageNameSpecs;
+    (void)dwSecurity;
+    (void)pszSeverity;
+    (void)pSummary;
+}
+
+void
+TDNFQueryCrosscheckUpdateInfo(
+    PTDNF pTdnf,
+    char **ppszPackageNameSpecs,
+    uint32_t dwSecurity,
+    const char *pszSeverity,
+    uint32_t dwRebootRequired,
+    PTDNF_UPDATEINFO pUpdateInfo
+    )
+{
+    (void)pTdnf;
+    (void)ppszPackageNameSpecs;
+    (void)dwSecurity;
+    (void)pszSeverity;
+    (void)dwRebootRequired;
+    (void)pUpdateInfo;
+}
+
+void
+TDNFQueryCrosscheckNevraLookup(
+    PTDNF pTdnf,
+    const char *pszNevra,
+    int nInstalled,
+    Queue *pLibResult
+    )
+{
+    (void)pTdnf;
+    (void)pszNevra;
+    (void)nInstalled;
+    (void)pLibResult;
+}
+
+void
+TDNFQueryCrosscheckSnapshot(
+    PTDNF pTdnf,
+    PTDNF_REPO_DATA pRepoData,
+    Queue *pLibResult
+    )
+{
+    (void)pTdnf;
+    (void)pRepoData;
+    (void)pLibResult;
+}
+
+void
+TDNFQueryCrosscheckMinVersions(
+    PTDNF pTdnf,
+    Map *pMapMinVersions
+    )
+{
+    (void)pTdnf;
+    (void)pMapMinVersions;
+}
+
+void
+TDNFQueryCrosscheckDowngradeCandidate(
+    PTDNF pTdnf,
+    Id dwInstalled,
+    uint32_t dwLibError,
+    Id dwLibDowngradeId
+    )
+{
+    (void)pTdnf;
+    (void)dwInstalled;
+    (void)dwLibError;
+    (void)dwLibDowngradeId;
+}
+
+void
+TDNFQueryCrosscheckBuildDependencies(
+    PTDNF pTdnf,
+    Queue *pGoalPkgs,
+    PSolvPackageList pPkgList,
+    Queue *pLibDeps
+    )
+{
+    (void)pTdnf;
+    (void)pGoalPkgs;
+    (void)pPkgList;
+    (void)pLibDeps;
 }
 
 #endif

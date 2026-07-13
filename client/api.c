@@ -2038,6 +2038,14 @@ TDNFUpdateInfo(
         pUpdateAdvPkgList = NULL;
     }
 
+    TDNFQueryCrosscheckUpdateInfo(
+        pTdnf,
+        ppszPackageNameSpecs,
+        dwSecurity,
+        pszSeverity,
+        dwRebootRequired,
+        pUpdateInfos);
+
     if(!pUpdateInfos)
     {
         pr_info("\n%d updates.\n", nUpdates);
@@ -2223,6 +2231,12 @@ TDNFHistoryResolve(
                                                   pszPkgName, &qResult, SOLV_NEVRA_UNINSTALLED);
             BAIL_ON_TDNF_ERROR(dwError);
 
+            TDNFQueryCrosscheckNevraLookup(
+                pTdnf,
+                pszPkgName,
+                SOLV_NEVRA_UNINSTALLED,
+                &qResult);
+
             if (qResult.count == 0)
             {
                 dwError = TDNFAddNotResolved(ppszPkgsNotResolved, pszPkgName);
@@ -2239,6 +2253,12 @@ TDNFHistoryResolve(
                 dwError = SolvFindSolvablesByNevraStr(pTdnf->pSack->pPool,
                                                       pszPkgName, &qInstalled, SOLV_NEVRA_INSTALLED);
                 BAIL_ON_TDNF_ERROR(dwError);
+
+                TDNFQueryCrosscheckNevraLookup(
+                    pTdnf,
+                    pszPkgName,
+                    SOLV_NEVRA_INSTALLED,
+                    &qInstalled);
 
                 if (qInstalled.count == 0)
                 {
@@ -2267,6 +2287,12 @@ TDNFHistoryResolve(
 
             dwError = SolvFindSolvablesByNevraStr(pTdnf->pSack->pPool, pszPkgName, &qErase, SOLV_NEVRA_INSTALLED);
             BAIL_ON_TDNF_ERROR(dwError);
+
+            TDNFQueryCrosscheckNevraLookup(
+                pTdnf,
+                pszPkgName,
+                SOLV_NEVRA_INSTALLED,
+                &qErase);
         }
         else
         {

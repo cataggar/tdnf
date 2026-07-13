@@ -631,6 +631,7 @@ error:
 
 uint32_t
 TDNFPackageGetDowngrade(
+    PTDNF pTdnf,
     Id dwInstalled,
     PSolvSack pSack,
     PSolvPackageList pAvailabePkgList,
@@ -694,8 +695,19 @@ TDNFPackageGetDowngrade(
     if(dwDownGradeId == 0)
     {
         dwError = ERROR_TDNF_NO_DOWNGRADE_PATH;
+        TDNFQueryCrosscheckDowngradeCandidate(
+            pTdnf,
+            dwInstalled,
+            dwError,
+            dwDownGradeId);
         BAIL_ON_TDNF_ERROR(dwError);
     }
+
+    TDNFQueryCrosscheckDowngradeCandidate(
+        pTdnf,
+        dwInstalled,
+        0,
+        dwDownGradeId);
 
     *pdwDowngradePkgId = dwDownGradeId;
 cleanup:
@@ -1012,6 +1024,7 @@ error:
 
 uint32_t
 TDNFAddPackagesForDowngrade(
+    PTDNF pTdnf,
     PSolvSack pSack,
     Queue* pQueueGoal,
     const char* pszPkgName
@@ -1024,7 +1037,7 @@ TDNFAddPackagesForDowngrade(
     Id dwDownGradeId = 0;
     char* pszName = NULL;
 
-    if(!pSack || !pQueueGoal || IsNullOrEmptyString(pszPkgName))
+    if(!pTdnf || !pSack || !pQueueGoal || IsNullOrEmptyString(pszPkgName))
     {
         dwError = ERROR_TDNF_INVALID_PARAMETER;
         BAIL_ON_TDNF_ERROR(dwError);
@@ -1049,6 +1062,7 @@ TDNFAddPackagesForDowngrade(
     BAIL_ON_TDNF_ERROR(dwError);
 
     dwError = TDNFPackageGetDowngrade(
+                  pTdnf,
                   dwInstalledId,
                   pSack,
                   pAvailabePkgList,
@@ -1389,4 +1403,3 @@ cleanup:
 error:
     goto cleanup;
 }
-

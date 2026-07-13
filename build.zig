@@ -112,7 +112,7 @@ pub fn build(b: *Build) void {
     const native_query_crosscheck = b.option(
         bool,
         "native-query-crosscheck",
-        "Run log-only native metadata query crosschecks for list/search/provides/repoquery/updateinfo (default false)",
+        "Run log-only native metadata query/history crosschecks for list/search/provides/repoquery/updateinfo/snapshot/minversion/history lookups (default false)",
     ) orelse false;
     const prefix = b.install_prefix;
     const libdir = "lib";
