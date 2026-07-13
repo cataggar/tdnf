@@ -41,6 +41,26 @@ typedef struct _TDNF_CACHED_RPM_LIST
     PTDNF_CACHED_RPM_ENTRY pHead;
 } TDNF_CACHED_RPM_LIST, *PTDNF_CACHED_RPM_LIST;
 
+typedef enum
+{
+    TDNF_RPM_TS_ITEM_INSTALL = 1,
+    TDNF_RPM_TS_ITEM_UPGRADE = 2,
+    TDNF_RPM_TS_ITEM_REINSTALL = 3,
+    TDNF_RPM_TS_ITEM_ERASE = 4
+} TDNF_RPM_TS_ITEM_TYPE;
+
+typedef struct _TDNF_RPM_TS_ITEM
+{
+    TDNF_RPM_TS_ITEM_TYPE nType;
+    Header pHeader;
+    uint32_t dwDbOffset;
+    char *pszPath;
+    char *pszName;
+    char *pszEVR;
+    char *pszArch;
+    struct _TDNF_RPM_TS_ITEM *pNext;
+} TDNF_RPM_TS_ITEM, *PTDNF_RPM_TS_ITEM;
+
 typedef struct _TDNF_RPM_TS_
 {
     int                     nQuiet;
@@ -49,6 +69,11 @@ typedef struct _TDNF_RPM_TS_
     rpmprobFilterFlags      nProbFilterFlags;
     FD_t                    pFD;
     PTDNF_CACHED_RPM_LIST   pCachedRpmsArray;
+    uint32_t                dwTransactionItemCount;
+    PTDNF_RPM_TS_ITEM       pTransactionItems;
+    PTDNF_RPM_TS_ITEM       pTransactionItemsTail;
+    char                    **ppszNativeProblems;
+    uint32_t                dwNativeProblemCount;
 } TDNFRPMTS, *PTDNFRPMTS;
 
 typedef struct _TDNF_REPO_METADATA

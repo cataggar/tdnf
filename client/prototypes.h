@@ -866,7 +866,7 @@ TDNFTransAddErasePkgs(
 uint32_t
 TDNFTransAddErasePkg(
     PTDNFRPMTS pTS,
-    const char* pszPkgName
+    PTDNF_PKG_INFO pInfo
     );
 
 uint32_t

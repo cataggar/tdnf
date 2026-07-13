@@ -17,6 +17,64 @@
 #define INSTALL_UPGRADE 1
 #define INSTALL_REINSTALL 2
 
+static void
+TDNFClearNativeProblems(
+    PTDNFRPMTS pTS
+    );
+
+static void
+TDNFFreeTransactionItems(
+    PTDNFRPMTS pTS
+    );
+
+#ifdef TDNF_RPMZIG_TRANSACTION_CHECK
+static uint32_t
+TDNFRecordTransactionItem(
+    PTDNFRPMTS pTS,
+    TDNF_RPM_TS_ITEM_TYPE nType,
+    Header pHeader,
+    const char *pszPath,
+    uint32_t dwDbOffset,
+    const char *pszName,
+    const char *pszEVR,
+    const char *pszArch
+    );
+
+static uint32_t
+TDNFCreateRebuiltTS(
+    PTDNF pTdnf,
+    PTDNFRPMTS pTS,
+    rpmts *ppNewTS
+    );
+
+static uint32_t
+TDNFRpmAddRecordedItem(
+    rpmts pTS,
+    PTDNF_RPM_TS_ITEM pItem
+    );
+
+static uint32_t
+TDNFParseTransactionOrderLine(
+    const char *pszLine,
+    uint32_t dwLimit,
+    uint32_t *pdwIndex
+    );
+
+static uint32_t
+TDNFRebuildTransactionInNativeOrder(
+    PTDNFRPMTS pTS,
+    PTDNF pTdnf,
+    char **ppszOrderLines,
+    uint32_t dwOrderCount
+    );
+
+static uint32_t
+TDNFNativeOrderAndCheck(
+    PTDNFRPMTS pTS,
+    PTDNF pTdnf
+    );
+#endif
+
 static uint32_t
 TDNFRpmCleanupTS(PTDNF pTdnf,
                  PTDNFRPMTS pTS)
@@ -47,6 +105,8 @@ TDNFRpmCleanupTS(PTDNF pTdnf,
         }
         TDNFFreeCachedRpmsArray(pTS->pCachedRpmsArray);
     }
+    TDNFClearNativeProblems(pTS);
+    TDNFFreeTransactionItems(pTS);
     TDNF_SAFE_FREE_MEMORY(pTS);
 
 error:
@@ -427,6 +487,519 @@ error:
     goto cleanup;
 }
 
+static void
+TDNFClearNativeProblems(
+    PTDNFRPMTS pTS
+    )
+{
+    if(!pTS)
+    {
+        return;
+    }
+
+    if(pTS->ppszNativeProblems)
+    {
+        TDNFFreeStringArray(pTS->ppszNativeProblems);
+        pTS->ppszNativeProblems = NULL;
+    }
+    pTS->dwNativeProblemCount = 0;
+}
+
+static void
+TDNFFreeTransactionItems(
+    PTDNFRPMTS pTS
+    )
+{
+    PTDNF_RPM_TS_ITEM pItem = NULL;
+    PTDNF_RPM_TS_ITEM pNext = NULL;
+
+    if(!pTS)
+    {
+        return;
+    }
+
+    pItem = pTS->pTransactionItems;
+    while(pItem)
+    {
+        pNext = pItem->pNext;
+        if(pItem->pHeader)
+        {
+            headerFree(pItem->pHeader);
+        }
+        TDNF_SAFE_FREE_MEMORY(pItem->pszPath);
+        TDNF_SAFE_FREE_MEMORY(pItem->pszName);
+        TDNF_SAFE_FREE_MEMORY(pItem->pszEVR);
+        TDNF_SAFE_FREE_MEMORY(pItem->pszArch);
+        TDNF_SAFE_FREE_MEMORY(pItem);
+        pItem = pNext;
+    }
+
+    pTS->pTransactionItems = NULL;
+    pTS->pTransactionItemsTail = NULL;
+    pTS->dwTransactionItemCount = 0;
+}
+
+#ifdef TDNF_RPMZIG_TRANSACTION_CHECK
+static uint32_t
+TDNFRecordTransactionItem(
+    PTDNFRPMTS pTS,
+    TDNF_RPM_TS_ITEM_TYPE nType,
+    Header pHeader,
+    const char *pszPath,
+    uint32_t dwDbOffset,
+    const char *pszName,
+    const char *pszEVR,
+    const char *pszArch
+    )
+{
+    uint32_t dwError = 0;
+    PTDNF_RPM_TS_ITEM pItem = NULL;
+
+    if(!pTS || !pHeader)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    dwError = TDNFAllocateMemory(1, sizeof(TDNF_RPM_TS_ITEM), (void **)&pItem);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    pItem->nType = nType;
+    pItem->pHeader = headerLink(pHeader);
+    if(!pItem->pHeader)
+    {
+        dwError = ERROR_TDNF_OUT_OF_MEMORY;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+    pItem->dwDbOffset = dwDbOffset;
+
+    if(!IsNullOrEmptyString(pszPath))
+    {
+        dwError = TDNFAllocateString(pszPath, &pItem->pszPath);
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+    if(!IsNullOrEmptyString(pszName))
+    {
+        dwError = TDNFAllocateString(pszName, &pItem->pszName);
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+    if(!IsNullOrEmptyString(pszEVR))
+    {
+        dwError = TDNFAllocateString(pszEVR, &pItem->pszEVR);
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+    if(!IsNullOrEmptyString(pszArch))
+    {
+        dwError = TDNFAllocateString(pszArch, &pItem->pszArch);
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    if(pTS->pTransactionItemsTail)
+    {
+        pTS->pTransactionItemsTail->pNext = pItem;
+    }
+    else
+    {
+        pTS->pTransactionItems = pItem;
+    }
+    pTS->pTransactionItemsTail = pItem;
+    pTS->dwTransactionItemCount++;
+
+cleanup:
+    return dwError;
+
+error:
+    if(pItem)
+    {
+        if(pItem->pHeader)
+        {
+            headerFree(pItem->pHeader);
+        }
+        TDNF_SAFE_FREE_MEMORY(pItem->pszPath);
+        TDNF_SAFE_FREE_MEMORY(pItem->pszName);
+        TDNF_SAFE_FREE_MEMORY(pItem->pszEVR);
+        TDNF_SAFE_FREE_MEMORY(pItem->pszArch);
+        TDNF_SAFE_FREE_MEMORY(pItem);
+    }
+    goto cleanup;
+}
+
+static uint32_t
+TDNFCreateRebuiltTS(
+    PTDNF pTdnf,
+    PTDNFRPMTS pTS,
+    rpmts *ppNewTS
+    )
+{
+    uint32_t dwError = 0;
+    rpmts pNewTS = NULL;
+
+    if(!pTdnf || !pTdnf->pArgs || !pTS || !pTS->pTS || !ppNewTS)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    pNewTS = rpmtsCreate();
+    if(!pNewTS)
+    {
+        dwError = ERROR_TDNF_RPMTS_CREATE_FAILED;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    if(rpmtsSetRootDir(pNewTS, pTdnf->pArgs->pszInstallRoot))
+    {
+        dwError = ERROR_TDNF_RPMTS_BAD_ROOT_DIR;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    if(rpmtsSetNotifyCallback(pNewTS, TDNFRpmCB, (void*)pTS))
+    {
+        dwError = ERROR_TDNF_RPMTS_SET_CB_FAILED;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    rpmtsSetNotifyStyle(pNewTS, rpmtsGetNotifyStyle(pTS->pTS));
+    rpmtsSetColor(pNewTS, rpmtsColor(pTS->pTS));
+    rpmtsSetPrefColor(pNewTS, rpmtsPrefColor(pTS->pTS));
+    rpmtsSetFlags(pNewTS, rpmtsFlags(pTS->pTS));
+    rpmtsSetVSFlags(pNewTS, rpmtsVSFlags(pTS->pTS));
+    rpmtsSetVfyFlags(pNewTS, rpmtsVfyFlags(pTS->pTS));
+    rpmtsSetVfyLevel(pNewTS, rpmtsVfyLevel(pTS->pTS));
+
+    *ppNewTS = pNewTS;
+
+cleanup:
+    return dwError;
+
+error:
+    if(pNewTS)
+    {
+        rpmtsCloseDB(pNewTS);
+        rpmtsFree(pNewTS);
+    }
+    if(ppNewTS)
+    {
+        *ppNewTS = NULL;
+    }
+    goto cleanup;
+}
+
+static uint32_t
+TDNFRpmAddRecordedItem(
+    rpmts pTS,
+    PTDNF_RPM_TS_ITEM pItem
+    )
+{
+    uint32_t dwError = 0;
+
+    if(!pTS || !pItem || !pItem->pHeader)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    switch(pItem->nType)
+    {
+        case TDNF_RPM_TS_ITEM_INSTALL:
+        case TDNF_RPM_TS_ITEM_UPGRADE:
+            dwError = rpmtsAddInstallElement(
+                          pTS,
+                          pItem->pHeader,
+                          (fnpyKey)pItem->pszPath,
+                          pItem->nType == TDNF_RPM_TS_ITEM_UPGRADE,
+                          NULL);
+            BAIL_ON_TDNF_RPM_ERROR(dwError);
+            break;
+
+        case TDNF_RPM_TS_ITEM_REINSTALL:
+            dwError = rpmtsAddReinstallElement(
+                          pTS,
+                          pItem->pHeader,
+                          (fnpyKey)pItem->pszPath);
+            BAIL_ON_TDNF_RPM_ERROR(dwError);
+            break;
+
+        case TDNF_RPM_TS_ITEM_ERASE:
+            dwError = rpmtsAddEraseElement(
+                          pTS,
+                          pItem->pHeader,
+                          pItem->dwDbOffset);
+            BAIL_ON_TDNF_RPM_ERROR(dwError);
+            break;
+
+        default:
+            dwError = ERROR_TDNF_INVALID_PARAMETER;
+            BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+cleanup:
+    return dwError;
+
+error:
+    goto cleanup;
+}
+
+static uint32_t
+TDNFParseTransactionOrderLine(
+    const char *pszLine,
+    uint32_t dwLimit,
+    uint32_t *pdwIndex
+    )
+{
+    uint32_t dwError = 0;
+    char *pszEnd = NULL;
+    unsigned long ulValue = 0;
+
+    if(IsNullOrEmptyString(pszLine) || !pdwIndex)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    errno = 0;
+    ulValue = strtoul(pszLine, &pszEnd, 10);
+    if(errno != 0 || !pszEnd || *pszEnd != '\0' || ulValue >= dwLimit)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    *pdwIndex = (uint32_t)ulValue;
+
+cleanup:
+    return dwError;
+
+error:
+    if(pdwIndex)
+    {
+        *pdwIndex = 0;
+    }
+    goto cleanup;
+}
+
+static uint32_t
+TDNFRebuildTransactionInNativeOrder(
+    PTDNFRPMTS pTS,
+    PTDNF pTdnf,
+    char **ppszOrderLines,
+    uint32_t dwOrderCount
+    )
+{
+    uint32_t dwError = 0;
+    rpmts pNewTS = NULL;
+    PTDNF_RPM_TS_ITEM *ppItems = NULL;
+    uint8_t *pbSeen = NULL;
+    PTDNF_RPM_TS_ITEM pItem = NULL;
+    uint32_t dwIndex = 0;
+    uint32_t dwCount = 0;
+
+    if(!pTS || !pTdnf || !ppszOrderLines ||
+       dwOrderCount != pTS->dwTransactionItemCount)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    dwCount = pTS->dwTransactionItemCount;
+
+    dwError = TDNFAllocateMemory(
+                  dwCount,
+                  sizeof(PTDNF_RPM_TS_ITEM),
+                  (void **)&ppItems);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    dwError = TDNFAllocateMemory(
+                  dwCount,
+                  sizeof(uint8_t),
+                  (void **)&pbSeen);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    pItem = pTS->pTransactionItems;
+    for(dwIndex = 0; dwIndex < dwCount && pItem; dwIndex++)
+    {
+        ppItems[dwIndex] = pItem;
+        pItem = pItem->pNext;
+    }
+    if(dwIndex != dwCount || pItem)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    dwError = TDNFCreateRebuiltTS(pTdnf, pTS, &pNewTS);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    for(dwIndex = 0; dwIndex < dwCount; dwIndex++)
+    {
+        uint32_t dwOrderIndex = 0;
+
+        dwError = TDNFParseTransactionOrderLine(
+                      ppszOrderLines[dwIndex],
+                      dwCount,
+                      &dwOrderIndex);
+        BAIL_ON_TDNF_ERROR(dwError);
+
+        if(pbSeen[dwOrderIndex])
+        {
+            dwError = ERROR_TDNF_INVALID_PARAMETER;
+            BAIL_ON_TDNF_ERROR(dwError);
+        }
+
+        pbSeen[dwOrderIndex] = 1;
+        dwError = TDNFRpmAddRecordedItem(pNewTS, ppItems[dwOrderIndex]);
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    rpmtsCloseDB(pTS->pTS);
+    rpmtsFree(pTS->pTS);
+    pTS->pTS = pNewTS;
+    pNewTS = NULL;
+
+cleanup:
+    TDNF_SAFE_FREE_MEMORY(pbSeen);
+    TDNF_SAFE_FREE_MEMORY(ppItems);
+    if(pNewTS)
+    {
+        rpmtsCloseDB(pNewTS);
+        rpmtsFree(pNewTS);
+    }
+    return dwError;
+
+error:
+    goto cleanup;
+}
+
+static uint32_t
+TDNFNativeOrderAndCheck(
+    PTDNFRPMTS pTS,
+    PTDNF pTdnf
+    )
+{
+    uint32_t dwError = 0;
+    TDNF_REPOMD_NATIVE_TRANSACTION_ITEM *pInputs = NULL;
+    PTDNF_RPM_TS_ITEM pItem = NULL;
+    char **ppszOrderLines = NULL;
+    char **ppszProblemLines = NULL;
+    uint32_t dwOrderCount = 0;
+    uint32_t dwProblemCount = 0;
+    uint32_t dwIndex = 0;
+    const char *pszLastError = NULL;
+
+    if(!pTS || !pTdnf)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    TDNFClearNativeProblems(pTS);
+
+    if(!pTS->dwTransactionItemCount)
+    {
+        goto cleanup;
+    }
+
+    dwError = TDNFAllocateMemory(
+                  pTS->dwTransactionItemCount,
+                  sizeof(TDNF_REPOMD_NATIVE_TRANSACTION_ITEM),
+                  (void **)&pInputs);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    pItem = pTS->pTransactionItems;
+    while(pItem)
+    {
+        if(dwIndex >= pTS->dwTransactionItemCount)
+        {
+            dwError = ERROR_TDNF_INVALID_PARAMETER;
+            BAIL_ON_TDNF_ERROR(dwError);
+        }
+
+        switch(pItem->nType)
+        {
+            case TDNF_RPM_TS_ITEM_INSTALL:
+            case TDNF_RPM_TS_ITEM_UPGRADE:
+                pInputs[dwIndex].dwOperation =
+                    TDNF_REPOMD_NATIVE_TRANSACTION_OP_INSTALL;
+                break;
+
+            case TDNF_RPM_TS_ITEM_REINSTALL:
+                pInputs[dwIndex].dwOperation =
+                    TDNF_REPOMD_NATIVE_TRANSACTION_OP_REINSTALL;
+                break;
+
+            case TDNF_RPM_TS_ITEM_ERASE:
+                pInputs[dwIndex].dwOperation =
+                    TDNF_REPOMD_NATIVE_TRANSACTION_OP_ERASE;
+                break;
+
+            default:
+                dwError = ERROR_TDNF_INVALID_PARAMETER;
+                BAIL_ON_TDNF_ERROR(dwError);
+        }
+
+        pInputs[dwIndex].pszPath = pItem->pszPath;
+        pInputs[dwIndex].pszName = pItem->pszName;
+        pInputs[dwIndex].pszEVR = pItem->pszEVR;
+        pInputs[dwIndex].pszArch = pItem->pszArch;
+
+        dwIndex++;
+        pItem = pItem->pNext;
+    }
+
+    if(dwIndex != pTS->dwTransactionItemCount)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    dwError = TDNFRepoMdNativeTransactionSolve(
+                  pInputs,
+                  pTS->dwTransactionItemCount,
+                  TDNFNativeQueryInstallRoot(pTdnf),
+                  &ppszOrderLines,
+                  &dwOrderCount,
+                  &ppszProblemLines,
+                  &dwProblemCount);
+    if(dwError)
+    {
+        pszLastError = TDNFRepoMdNativeTransactionLastError();
+        if(!IsNullOrEmptyString(pszLastError))
+        {
+            pr_err("rpmzig-transaction-check: %s\n", pszLastError);
+        }
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    if(dwProblemCount)
+    {
+        pTS->ppszNativeProblems = ppszProblemLines;
+        pTS->dwNativeProblemCount = dwProblemCount;
+        ppszProblemLines = NULL;
+        dwError = ERROR_TDNF_RPM_CHECK;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    dwError = TDNFRebuildTransactionInNativeOrder(
+                  pTS,
+                  pTdnf,
+                  ppszOrderLines,
+                  dwOrderCount);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+cleanup:
+    TDNF_SAFE_FREE_MEMORY(pInputs);
+    TDNFFreeStringArray(ppszOrderLines);
+    if(ppszProblemLines)
+    {
+        TDNFFreeStringArray(ppszProblemLines);
+    }
+    return dwError;
+
+error:
+    goto cleanup;
+}
+#endif
+
 static uint32_t
 TDNFDetectPreTransFailure(
     rpmts pTS,
@@ -516,6 +1089,7 @@ error:
     goto cleanup;
 }
 
+#ifndef TDNF_RPMZIG_TRANSACTION_CHECK
 static int
 doCheck(PTDNFRPMTS pTS)
 {
@@ -534,9 +1108,9 @@ doCheck(PTDNFRPMTS pTS)
         }
         rpmpsFree(ps);
     }
-
     return nResult;
 }
+#endif
 
 static void
 reportProblems(PTDNFRPMTS pTS)
@@ -544,6 +1118,23 @@ reportProblems(PTDNFRPMTS pTS)
     rpmps ps = NULL;
     rpmpsi psi = NULL;
     char *pErrorStr = NULL;
+
+    if(!pTS)
+    {
+        goto cleanup;
+    }
+
+    if(pTS->ppszNativeProblems && pTS->dwNativeProblemCount)
+    {
+        uint32_t dwIndex = 0;
+
+        pr_crit("Found %u problems\n", pTS->dwNativeProblemCount);
+        for(dwIndex = 0; dwIndex < pTS->dwNativeProblemCount; dwIndex++)
+        {
+            pr_crit("%s\n", pTS->ppszNativeProblems[dwIndex]);
+        }
+        goto cleanup;
+    }
 
     ps = rpmtsProblems(pTS->pTS);
     if(ps)
@@ -667,11 +1258,16 @@ TDNFRunTransaction(
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
+#ifdef TDNF_RPMZIG_TRANSACTION_CHECK
+    dwError = TDNFNativeOrderAndCheck(pTS, pTdnf);
+    BAIL_ON_TDNF_ERROR(dwError);
+#else
     dwError = rpmtsOrder(pTS->pTS);
     BAIL_ON_TDNF_ERROR(dwError);
 
     dwError = doCheck(pTS);
     BAIL_ON_TDNF_ERROR(dwError);
+#endif
 
     rpmtsClean(pTS->pTS);
     /* we checked already for the signature during TDNFTransAddInstallPkgs() */
@@ -948,6 +1544,23 @@ TDNFTransAddInstallPkg(
         BAIL_ON_TDNF_RPM_ERROR(dwError);
     }
 
+#ifdef TDNF_RPMZIG_TRANSACTION_CHECK
+    dwError = TDNFRecordTransactionItem(
+                  pTS,
+                  nInstallFlag == INSTALL_REINSTALL ?
+                      TDNF_RPM_TS_ITEM_REINSTALL :
+                      (nInstallFlag == INSTALL_UPGRADE ?
+                           TDNF_RPM_TS_ITEM_UPGRADE :
+                           TDNF_RPM_TS_ITEM_INSTALL),
+                  rpmHeader,
+                  pszFilePath,
+                  0,
+                  NULL,
+                  NULL,
+                  NULL);
+    BAIL_ON_TDNF_ERROR(dwError);
+#endif
+
     /* add to cached array only when file is actually in cache dir */
     if(pTS->pCachedRpmsArray &&
         !strncmp(pszFilePath, pTdnf->pConf->pszCacheDir,
@@ -989,7 +1602,6 @@ TDNFTransAddErasePkgs(
 {
     uint32_t dwError = 0;
     PTDNF_PKG_INFO pInfo;
-    char *pszFullName = NULL;
 
     if(!pInfos)
     {
@@ -999,14 +1611,10 @@ TDNFTransAddErasePkgs(
 
     for(pInfo = pInfos; pInfo; pInfo = pInfo->pNext)
     {
-        dwError = TDNFAllocateStringPrintf(&pszFullName, "%s-%s", pInfo->pszName, pInfo->pszEVR);
-        BAIL_ON_TDNF_ERROR(dwError);
-        dwError = TDNFTransAddErasePkg(pTS, pszFullName);
+        dwError = TDNFTransAddErasePkg(pTS, pInfo);
         BAIL_ON_TDNF_ERROR(dwError);
     }
-
 cleanup:
-    TDNF_SAFE_FREE_MEMORY(pszFullName);
     return dwError;
 
 error:
@@ -1020,20 +1628,36 @@ error:
 uint32_t
 TDNFTransAddErasePkg(
     PTDNFRPMTS pTS,
-    const char* pkgName
+    PTDNF_PKG_INFO pInfo
     )
 {
     uint32_t dwError = 0;
     Header pRpmHeader = NULL;
     rpmdbMatchIterator pIterator = NULL;
+    char *pszFullName = NULL;
+    const char *pszPkgName = NULL;
+    const char *pszPkgEvr = NULL;
+#ifdef TDNF_RPMZIG_TRANSACTION_CHECK
+    const char *pszPkgArch = NULL;
+#endif
 
-    if(!pTS || IsNullOrEmptyString(pkgName))
+    if(!pTS || !pInfo || IsNullOrEmptyString(pInfo->pszName) ||
+       IsNullOrEmptyString(pInfo->pszEVR))
     {
         dwError = ERROR_TDNF_INVALID_PARAMETER;
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    pIterator = rpmtsInitIterator(pTS->pTS, (rpmTag)RPMDBI_LABEL, pkgName, 0);
+    pszPkgName = pInfo->pszName;
+    pszPkgEvr = pInfo->pszEVR;
+#ifdef TDNF_RPMZIG_TRANSACTION_CHECK
+    pszPkgArch = pInfo->pszArch;
+#endif
+
+    dwError = TDNFAllocateStringPrintf(&pszFullName, "%s-%s", pszPkgName, pszPkgEvr);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    pIterator = rpmtsInitIterator(pTS->pTS, (rpmTag)RPMDBI_LABEL, pszFullName, 0);
     while ((pRpmHeader = rpmdbNextIterator(pIterator)) != NULL)
     {
         uint32_t nOffset = rpmdbGetIteratorOffset(pIterator);
@@ -1041,10 +1665,24 @@ TDNFTransAddErasePkg(
         {
             dwError = rpmtsAddEraseElement(pTS->pTS, pRpmHeader, nOffset);
             BAIL_ON_TDNF_ERROR(dwError);
+
+#ifdef TDNF_RPMZIG_TRANSACTION_CHECK
+            dwError = TDNFRecordTransactionItem(
+                          pTS,
+                          TDNF_RPM_TS_ITEM_ERASE,
+                          pRpmHeader,
+                          NULL,
+                          nOffset,
+                          pszPkgName,
+                          pszPkgEvr,
+                          pszPkgArch);
+            BAIL_ON_TDNF_ERROR(dwError);
+#endif
         }
     }
 
 cleanup:
+    TDNF_SAFE_FREE_MEMORY(pszFullName);
     if(pIterator)
     {
         rpmdbFreeIterator(pIterator);

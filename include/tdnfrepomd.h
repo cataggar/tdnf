@@ -54,6 +54,21 @@ typedef struct _TDNF_REPOMD_NATIVE_REPO_INPUT
     const char *pszSnapshotFile;
 } TDNF_REPOMD_NATIVE_REPO_INPUT, *PTDNF_REPOMD_NATIVE_REPO_INPUT;
 
+enum {
+    TDNF_REPOMD_NATIVE_TRANSACTION_OP_INSTALL = 1,
+    TDNF_REPOMD_NATIVE_TRANSACTION_OP_REINSTALL = 2,
+    TDNF_REPOMD_NATIVE_TRANSACTION_OP_ERASE = 3,
+};
+
+typedef struct _TDNF_REPOMD_NATIVE_TRANSACTION_ITEM
+{
+    uint32_t dwOperation;
+    const char *pszPath;
+    const char *pszName;
+    const char *pszEVR;
+    const char *pszArch;
+} TDNF_REPOMD_NATIVE_TRANSACTION_ITEM, *PTDNF_REPOMD_NATIVE_TRANSACTION_ITEM;
+
 #ifndef RPMDB_REPORT_PROGRESS
 #define RPMDB_REPORT_PROGRESS           (1 << 8)
 #define RPM_ADD_WITH_PKGID             (1 << 9)
@@ -156,6 +171,15 @@ TDNFRepoMdNativeQueryLastError(
     );
 
 /*
+ * Return the last native transaction ordering/check error produced by the
+ * current thread.
+ */
+const char*
+TDNFRepoMdNativeTransactionLastError(
+    void
+    );
+
+/*
  * Parse repo metadata with the native Zig parsers and populate an existing
  * libsolv Repo using manual-construction APIs. Optional metadata paths may be
  * NULL. The caller owns `pRepo`.
@@ -240,6 +264,25 @@ TDNFRepoMdNativeProvides(
     const char *pszInstallRoot,
     const char *pszSpec,
     PTDNF_PKG_INFO *ppPkgInfo
+    );
+
+/*
+ * Run the native rpmzig transaction ordering and final dependency/conflict
+ * verification pass on a prepared transaction. On success `pppszOrderLines`
+ * receives one decimal input-index string per transaction element in the
+ * native execution order, and `pppszProblemLines` receives zero or more
+ * user-facing problem messages. Both outputs are NULL-terminated arrays owned
+ * by the caller and must be freed with TDNFFreeStringArray().
+ */
+uint32_t
+TDNFRepoMdNativeTransactionSolve(
+    const TDNF_REPOMD_NATIVE_TRANSACTION_ITEM *pItems,
+    uint32_t dwItemCount,
+    const char *pszInstallRoot,
+    char ***pppszOrderLines,
+    uint32_t *pdwOrderCount,
+    char ***pppszProblemLines,
+    uint32_t *pdwProblemCount
     );
 
 /*

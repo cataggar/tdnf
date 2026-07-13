@@ -100,6 +100,11 @@ pub fn build(b: *Build) void {
         "Plugin install directory (relative to prefix, default: lib/tdnf-plugins)",
     ) orelse "lib/tdnf-plugins";
 
+    const rpmzig_transaction_check = b.option(
+        bool,
+        "rpmzig-transaction-check",
+        "Use rpmzig's native transaction ordering and final dependency/conflict check (default false)",
+    ) orelse false;
     const prefix = b.install_prefix;
     const libdir = "lib";
     const full_libdir = b.fmt("{s}/{s}", .{ prefix, libdir });
@@ -749,6 +754,9 @@ pub fn build(b: *Build) void {
     tdnf_so_mod.addSystemIncludePath(libsolvext_include);
     if (build_with_rpm_6x) tdnf_so_mod.addCMacro("BUILD_WITH_RPM_6X", "1");
     tdnf_so_mod.addIncludePath(b.path("rpmzig"));
+    if (rpmzig_transaction_check) {
+        tdnf_so_mod.addCMacro("TDNF_RPMZIG_TRANSACTION_CHECK", "1");
+    }
     tdnf_so_mod.addCSourceFiles(.{
         .root = b.path("client"),
         .files = &.{

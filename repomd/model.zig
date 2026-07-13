@@ -188,6 +188,7 @@ pub const Relation = struct {
     version: ?[]const u8 = null,
     release: ?[]const u8 = null,
     pre: bool = false,
+    sense: u32 = 0,
 };
 
 pub const FileEntry = struct {
