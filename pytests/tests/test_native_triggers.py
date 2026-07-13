@@ -89,6 +89,11 @@ def native_db_install(db_root, rpm_path, install_tid):
     return int(result.stdout.strip())
 
 
+def native_db_replace(db_root, old_hnum, rpm_path, install_tid):
+    result = run([WRITE_TOOL, 'replace', db_root, str(old_hnum), rpm_path, str(install_tid), str(install_tid), '3'])
+    return int(result.stdout.strip())
+
+
 def native_db_erase(db_root, hnum):
     run([WRITE_TOOL, 'erase-hnum', db_root, str(hnum)])
 
@@ -104,15 +109,18 @@ def native_run_scriptlet(rpm_path, phase, tmp_dir, arg1):
     ], check=False)
 
 
-def native_run_trigger(rpm_path, phase, db_root, tmp_dir):
-    return run([
+def native_run_trigger(rpm_path, phase, db_root, tmp_dir, arg2=None):
+    cmd = [
         TRIGGER_TOOL,
         '--db-root', db_root,
         '--install-root', '/',
         '--phase', phase,
         '--rpmdefine', native_tmp_define(tmp_dir),
-        rpm_path,
-    ], check=False)
+    ]
+    if arg2 is not None:
+        cmd += ['--arg2', str(arg2)]
+    cmd.append(rpm_path)
+    return run(cmd, check=False)
 
 
 def real_install(db_root, rpm_path):
@@ -524,6 +532,180 @@ def test_native_trigger_warning_exit_codes_match_real_rpm(phase, code, expect_ta
     assert read_log(case['real']['log_path']) == read_log(case['native']['log_path'])
     assert rpm_installed(case['real']['db_root'], target_name) == expect_target_installed
     assert rpm_installed(case['native']['db_root'], target_name) == expect_target_installed
+
+
+def build_target_upgrade_spec(name, version, payload_path):
+    payload_parent = payload_path.parent
+    return f'''Summary: Native trigger upgrade arg2 fixture target
+Name: {name}
+Version: {version}
+Release: 1
+License: MIT
+BuildArch: noarch
+
+%description
+Native trigger upgrade arg2 fixture target.
+
+%prep
+%build
+%install
+mkdir -p %{{buildroot}}{payload_parent}
+echo payload-{version} > %{{buildroot}}{payload_path}
+
+%files
+{payload_path}
+'''
+
+
+def build_owner_argcapture_spec(name, target_name, payload_path, log_path):
+    """
+    Trigger scripts that log both `$1` and `$2` for every phase.
+
+    Used to cross-check `%triggerin/%triggerun/%triggerpostun`
+    argument conventions between real rpm and the native executor
+    across install -> upgrade -> erase.
+    """
+    payload_parent = payload_path.parent
+
+    def trigger_block(phase):
+        return (
+            f'%{phase} -- {target_name}\n'
+            f'echo {phase}:$1:$2 >> "{log_path}"\n'
+        )
+
+    return f'''Summary: Native trigger upgrade arg2 fixture owner
+Name: {name}
+Version: 1.0.0
+Release: 1
+License: MIT
+BuildArch: noarch
+
+%description
+Native trigger upgrade arg2 fixture owner.
+
+%prep
+%build
+%install
+mkdir -p %{{buildroot}}{payload_parent}
+echo owner > %{{buildroot}}{payload_path}
+
+{trigger_block('triggerin')}
+{trigger_block('triggerun')}
+{trigger_block('triggerpostun')}
+
+%files
+{payload_path}
+'''
+
+
+def test_native_trigger_upgrade_arg2_matches_real_rpm():
+    """
+    Crosscheck: for an owner package with %triggerin/%triggerun/
+    %triggerpostun on a target, the native executor must reproduce
+    real rpm's `$1`/`$2` sequence across install -> upgrade -> erase.
+
+    Real rpm's log (verified in the epic write-up):
+        triggerin:1:1                 (install target v1)
+        triggerin:1:2                 (upgrade v1->v2, both briefly co-installed)
+        triggerun:1:1                 (upgrade cleanup, new v2 survives)
+        triggerpostun:1:1             (upgrade cleanup, new v2 survives)
+        triggerun:1:0                 (plain erase v2)
+        triggerpostun:1:0             (plain erase v2)
+
+    The native executor now matches this via the trigger engine's
+    `arg2_override_present/value` fields wired from
+    client/rpmtrans_native.c.
+    """
+    case = make_case('upgrade-arg2')
+    target_name = 'tdnf-native-trigger-upgrade-target'
+    owner_name = 'tdnf-native-trigger-upgrade-owner'
+
+    def build_env(env):
+        target_v1 = build_rpm(
+            env['build_dir'] / 'target-v1',
+            target_name,
+            '1.0.0',
+            build_target_upgrade_spec(target_name, '1.0.0', env['files_dir'] / 'target.txt'),
+        )
+        target_v2 = build_rpm(
+            env['build_dir'] / 'target-v2',
+            target_name,
+            '2.0.0',
+            build_target_upgrade_spec(target_name, '2.0.0', env['files_dir'] / 'target.txt'),
+        )
+        owner = build_rpm(
+            env['build_dir'] / 'owner',
+            owner_name,
+            '1.0.0',
+            build_owner_argcapture_spec(
+                owner_name,
+                target_name,
+                env['files_dir'] / 'owner.txt',
+                env['log_path'],
+            ),
+        )
+        return target_v1, target_v2, owner
+
+    real_v1, real_v2, real_owner = build_env(case['real'])
+    native_v1, native_v2, native_owner = build_env(case['native'])
+
+    # Real rpm sequence: install owner, install target v1, upgrade v1->v2, erase v2.
+    rpm_initdb(case['real']['db_root'])
+    assert real_install(case['real']['db_root'], real_owner).returncode == 0
+    assert real_install(case['real']['db_root'], real_v1).returncode == 0
+    assert real_upgrade(case['real']['db_root'], real_v2).returncode == 0
+    assert real_erase(case['real']['db_root'], target_name).returncode == 0
+    real_log = read_log(case['real']['log_path'])
+
+    assert real_log == [
+        'triggerin:1:1',
+        'triggerin:1:2',
+        'triggerun:1:1',
+        'triggerpostun:1:1',
+        'triggerun:1:0',
+        'triggerpostun:1:0',
+    ], f'unexpected real rpm log: {real_log}'
+
+    # Native simulation. write_replace collapses the two-instance
+    # state, so we drive the trigger engine using the explicit arg2
+    # override for the upgrade-only phases, mirroring what
+    # client/rpmtrans_native.c does in ProcessInstallItem +
+    # EraseOldAfterReplace.
+    owner_hnum = native_db_install(case['native']['db_root'], native_owner, 1)
+    assert owner_hnum == 1
+
+    # Install target v1 (fresh).
+    v1_hnum = native_db_install(case['native']['db_root'], native_v1, 2)
+    r = native_run_trigger(native_v1, 'triggerin', case['native']['db_root'], case['native']['tmp_dir'])
+    assert r.returncode == 0, r
+
+    # Upgrade target v1 -> v2 (write_replace deletes old row, inserts new
+    # under a fresh hnum — the DB briefly held two rows during the
+    # transaction, but at this point only the new row survives).
+    v2_hnum = native_db_replace(case['native']['db_root'], v1_hnum, native_v2, 3)
+    # %triggerin on new during upgrade: arg2 override = 1 + nPriors = 2.
+    r = native_run_trigger(native_v2, 'triggerin', case['native']['db_root'], case['native']['tmp_dir'], arg2=2)
+    assert r.returncode == 0, r
+    # %triggerun on old during upgrade: arg2 override = 1.
+    r = native_run_trigger(native_v1, 'triggerun', case['native']['db_root'], case['native']['tmp_dir'], arg2=1)
+    assert r.returncode == 0, r
+    # %triggerpostun on old during upgrade: arg2 override = 1.
+    r = native_run_trigger(native_v1, 'triggerpostun', case['native']['db_root'], case['native']['tmp_dir'], arg2=1)
+    assert r.returncode == 0, r
+
+    # Plain erase v2: no override (engine computes from rpmdb).
+    r = native_run_trigger(native_v2, 'triggerun', case['native']['db_root'], case['native']['tmp_dir'])
+    assert r.returncode == 0, r
+    native_db_erase(case['native']['db_root'], v2_hnum)
+    r = native_run_trigger(native_v2, 'triggerpostun', case['native']['db_root'], case['native']['tmp_dir'])
+    assert r.returncode == 0, r
+
+    native_log = read_log(case['native']['log_path'])
+    assert native_log == real_log, (
+        f'native trigger arg1/arg2 sequence diverges from real rpm:\n'
+        f'  real:   {real_log}\n'
+        f'  native: {native_log}'
+    )
 
 
 @pytest.fixture(scope='module', autouse=True)

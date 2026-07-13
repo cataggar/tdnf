@@ -551,6 +551,25 @@ typedef struct tdnf_rpm_trigger_options {
      * onto stdout before exec.
      */
     int redirect_stdout_to_stderr;
+    /**
+     * Optional explicit `$2` argument for the trigger scripts.
+     *
+     * When `arg2_override_present == 0` the engine derives `$2`
+     * from the current triggering-package instance count in the
+     * rpmdb (real rpm's plain-install/plain-erase formula). When
+     * non-zero, `arg2_override_value` is passed verbatim.
+     *
+     * The composed native transaction executor uses this to match
+     * real rpm's upgrade semantics: `%triggerin` on the new package
+     * during upgrade fires with `nPriors + 1` (real rpm briefly
+     * has both old and new co-installed), and `%triggerun` /
+     * `%triggerpostun` on the OLD package during upgrade cleanup
+     * fire with `1` (the new instance survives). Plain install and
+     * plain erase leave the override at 0 and let the engine
+     * compute `$2` from the rpmdb.
+     */
+    int arg2_override_present;
+    int arg2_override_value;
 } tdnf_rpm_trigger_options;
 
 typedef struct tdnf_rpm_trigger_result {

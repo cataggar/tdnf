@@ -217,7 +217,9 @@ RunTriggers(
     const char *pszInstallRoot,
     uint32_t dwTransFlags,
     int nScriptFd,
-    int nRedirectToStderr
+    int nRedirectToStderr,
+    int nArg2OverridePresent,
+    int nArg2OverrideValue
     )
 {
     tdnf_rpm_trigger_options options;
@@ -233,6 +235,8 @@ RunTriggers(
     options.rpmdefine_count = 0;
     options.script_fd = nScriptFd;
     options.redirect_stdout_to_stderr = nRedirectToStderr;
+    options.arg2_override_present = nArg2OverridePresent;
+    options.arg2_override_value = nArg2OverrideValue;
 
     if (tdnf_rpm_header_run_triggers(pbBlob, nLen, phase, &options, &result) != 0)
     {
@@ -417,9 +421,13 @@ FreePriorRows(
 
 /*
  * Per-package sub-phase for erasing the OLD version(s) already
- * replaced by an UPGRADE/REINSTALL step. Runs %preun/%postun with
+ * replaced by an UPGRADE/REINSTALL step. Runs %triggerun ->
+ * %preun -> file-erase -> %postun -> %triggerpostun, all with
  * arg1=1 (one instance of the name remains: the newly installed
- * one). Filesystem cleanup relies on the erase engine's default
+ * one) and arg2=1 override on the triggers (the new instance
+ * survives so `$2` reflects that surviving instance, matching
+ * real rpm's transient two-instance state for upgrades).
+ * Filesystem cleanup relies on the erase engine's default
  * keep-path probe: paths still owned by the new package are kept,
  * files/directories unique to the old package are removed.
  */
@@ -441,6 +449,20 @@ EraseOldAfterReplace(
     erase_options.trans_flags = dwTransFlags;
     erase_options.keep_path_fn = NULL;
     erase_options.keep_path_fn_data = NULL;
+
+    /*
+     * %triggerun on the OLD blob BEFORE %preun. arg2=1 override:
+     * after this upgrade step the new instance is what remains, so
+     * real rpm passes `$2 = 1` here regardless of what the current
+     * rpmdb row count is (write_replace already atomically swapped
+     * the row so the DB now shows only the new version).
+     */
+    dwError = RunTriggers(pbOldBlob, nOldLen,
+                          TDNF_RPM_TRIGGER_PHASE_TRIGGERUN, "%triggerun",
+                          pszNevra, pszInstallRoot, dwTransFlags,
+                          nScriptFd, nRedirectToStderr,
+                          /*override present*/ 1, /*value*/ 1);
+    BAIL_ON_TDNF_ERROR(dwError);
 
     /* %preun on old (arg1=1: one instance survives = the new one) */
     dwError = RunScriptlet(pbOldBlob, nOldLen,
@@ -478,6 +500,17 @@ EraseOldAfterReplace(
                            TDNF_RPM_SCRIPTLET_PHASE_POSTUN, "%postun",
                            pszNevra, pszInstallRoot, dwTransFlags,
                            1, -1, nScriptFd, nRedirectToStderr);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    /*
+     * %triggerpostun on the OLD blob AFTER %postun. Same arg2=1
+     * override reasoning as %triggerun above.
+     */
+    dwError = RunTriggers(pbOldBlob, nOldLen,
+                          TDNF_RPM_TRIGGER_PHASE_TRIGGERPOSTUN, "%triggerpostun",
+                          pszNevra, pszInstallRoot, dwTransFlags,
+                          nScriptFd, nRedirectToStderr,
+                          /*override present*/ 1, /*value*/ 1);
     BAIL_ON_TDNF_ERROR(dwError);
 
 cleanup:
@@ -652,15 +685,37 @@ ProcessInstallItem(
         {
             /*
              * Multi-instance upgrade path (>=2 prior rows sharing
-             * the new package's name) is uncommon on tdnf-managed
-             * systems and would require replacing one row plus
-             * separately erasing every other matching row. Refuse
-             * for now with a clear diagnostic; a follow-up PR can
-             * add proper support if we hit a real user scenario.
+             * the new package's name).
+             *
+             * tdnf's dependency resolver marks installonly packages
+             * (installonlypkgs — kernel, kernel-modules, ...) as
+             * INSTALL items rather than UPGRADE items, and prunes
+             * the installonly_limit via separate ERASE items. See
+             * client/goal.c for the resolver behaviour and
+             * pytests/tests/test_multiinstall.py for the exercised
+             * workflow. As a result, UPGRADE items reach the
+             * executor with exactly nPriors == 1 in every path
+             * tdnf's own code takes today.
+             *
+             * The only way we'd see nPriors >= 2 here is an
+             * externally-manipulated rpmdb: e.g. a user manually
+             * used `rpm -i --force` to install two versions of a
+             * non-installonly package outside tdnf, then asked
+             * tdnf to upgrade it. That is not a supported workflow.
+             * Refuse loudly (not silently) so the user knows what
+             * happened; falling back to librpm would not be safer
+             * since the librpm path handled this by erasing all
+             * priors, which is very likely not what the user
+             * wanted either.
              */
-            pr_err("rpmzig-transaction-execute: %s has %zu prior "
-                   "installed instances; multi-instance upgrade not "
-                   "yet supported in the native executor\n",
+            pr_err("rpmzig-transaction-execute: package '%s' has %zu "
+                   "prior installed instances in the rpmdb, but tdnf's "
+                   "transaction resolver expected at most one for an "
+                   "UPGRADE item. This usually indicates the rpmdb was "
+                   "modified outside tdnf (e.g. `rpm -i --force` for "
+                   "the same package). Use `rpm -e` to remove the "
+                   "extra instance(s) first, or install the package "
+                   "as installonly.\n",
                    pItem->pszName, nPriors);
             dwError = ERROR_TDNF_TRANSACTION_FAILED;
             BAIL_ON_TDNF_ERROR(dwError);
@@ -676,11 +731,22 @@ ProcessInstallItem(
                                nArg1, -1, nScriptFd, nRedirectToStderr);
         BAIL_ON_TDNF_ERROR(dwError);
 
-        /* %triggerin fired by OTHER installed pkgs targeting this name. */
+        /*
+         * %triggerin fired by OTHER installed pkgs targeting this
+         * name. For fresh install, arg2 defaults to the rpmdb count
+         * (which is 1 after write_install). For upgrade/reinstall,
+         * write_replace atomically swapped the row so the rpmdb
+         * still shows exactly one instance — but real rpm's
+         * transient state briefly has BOTH the old and new
+         * installed at %triggerin time, so `$2` = 1 (new) + nPriors
+         * (old rows that get erased below). Override accordingly.
+         */
         dwError = RunTriggers(pbBlob, nLen,
                               TDNF_RPM_TRIGGER_PHASE_TRIGGERIN, "%triggerin",
                               pszNevra, pszInstallRoot, dwTransFlags,
-                              nScriptFd, nRedirectToStderr);
+                              nScriptFd, nRedirectToStderr,
+                              /*override present*/ nPriors > 0 ? 1 : 0,
+                              /*value*/ (int)(1 + nPriors));
         BAIL_ON_TDNF_ERROR(dwError);
 
         /*
@@ -773,7 +839,8 @@ ProcessEraseItem(
         dwError = RunTriggers(pbBlob, nLen,
                               TDNF_RPM_TRIGGER_PHASE_TRIGGERUN, "%triggerun",
                               pszNevra, pszInstallRoot, dwTransFlags,
-                              nScriptFd, nRedirectToStderr);
+                              nScriptFd, nRedirectToStderr,
+                              /*override present*/ 0, /*value*/ 0);
         BAIL_ON_TDNF_ERROR(dwError);
 
         /* %preun on the erased package (arg1 = 0 for total removal) */
@@ -824,7 +891,8 @@ ProcessEraseItem(
         dwError = RunTriggers(pbBlob, nLen,
                               TDNF_RPM_TRIGGER_PHASE_TRIGGERPOSTUN, "%triggerpostun",
                               pszNevra, pszInstallRoot, dwTransFlags,
-                              nScriptFd, nRedirectToStderr);
+                              nScriptFd, nRedirectToStderr,
+                              /*override present*/ 0, /*value*/ 0);
         BAIL_ON_TDNF_ERROR(dwError);
     }
 

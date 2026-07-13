@@ -896,6 +896,16 @@ const CTriggerOptions = extern struct {
     rpmdefine_count: usize,
     script_fd: c_int,
     redirect_stdout_to_stderr: c_int,
+    /// Optional explicit `$2` argument for trigger scripts. When
+    /// `arg2_override_present` is 0, the engine derives `$2` from
+    /// the current rpmdb state (real rpm's plain-erase / plain-
+    /// install formula). When non-zero, `arg2_override_value` is
+    /// passed verbatim as `$2` — the executor uses this to match
+    /// real rpm's upgrade semantics where the transient two-
+    /// instance state is not visible after `write_replace`. See
+    /// `Options.arg2_override` in rpmzig/trigger.zig for details.
+    arg2_override_present: c_int,
+    arg2_override_value: c_int,
 };
 
 const CTriggerResult = extern struct {
@@ -1413,6 +1423,7 @@ export fn tdnf_rpm_header_run_triggers(
         .rpmdefines = rpmdefines.items,
         .script_fd = if (opts.script_fd >= 0) opts.script_fd else null,
         .redirect_stdout_to_stderr = opts.redirect_stdout_to_stderr != 0,
+        .arg2_override = if (opts.arg2_override_present != 0) opts.arg2_override_value else null,
     }) catch |err| {
         setError("header_run_triggers: {t}", .{err});
         return -1;

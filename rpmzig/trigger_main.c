@@ -84,6 +84,8 @@ int main(int argc, char **argv)
         .rpmdefine_count = 0,
         .script_fd = -1,
         .redirect_stdout_to_stderr = 0,
+        .arg2_override_present = 0,
+        .arg2_override_value = 0,
     };
     const char **rpmdefines = NULL;
     int phase_set = 0;
@@ -135,6 +137,21 @@ int main(int argc, char **argv)
             options.script_fd = (int)value;
         } else if (!strcmp(argv[i], "--redirect-stdout-to-stderr")) {
             options.redirect_stdout_to_stderr = 1;
+        } else if (!strcmp(argv[i], "--arg2")) {
+            char *end = NULL;
+            long value;
+            if (i + 1 >= argc) {
+                fprintf(stderr, "missing argument for --arg2\n");
+                return 2;
+            }
+            errno = 0;
+            value = strtol(argv[++i], &end, 10);
+            if (errno != 0 || !end || *end != '\0') {
+                fprintf(stderr, "invalid --arg2 value: %s\n", argv[i]);
+                return 2;
+            }
+            options.arg2_override_present = 1;
+            options.arg2_override_value = (int)value;
         } else if (!strcmp(argv[i], "--tsflag")) {
             uint32_t flag = 0;
             if (i + 1 >= argc) {
@@ -186,7 +203,7 @@ int main(int argc, char **argv)
                 "--phase triggerin|triggerun|triggerpostun "
                 "[--rpmdefine TEXT ...] "
                 "[--tsflag noscripts|notriggers|notriggerin|notriggerun|notriggerpostun ...] "
-                "[--script-fd N] [--redirect-stdout-to-stderr] <package.rpm>\n",
+                "[--script-fd N] [--redirect-stdout-to-stderr] [--arg2 N] <package.rpm>\n",
                 argv[0]);
         return 2;
     }
