@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const c = @cImport({
     @cInclude("errno.h");
     @cInclude("stdio.h");
@@ -34,10 +35,16 @@ const sep_item: u8 = 0x1d;
 
 threadlocal var last_query_error_buf: [512]u8 = undefined;
 threadlocal var last_query_error_len: usize = 0;
+threadlocal var query_alloc_test_enabled = false;
+threadlocal var query_alloc_fail_after: ?usize = null;
+threadlocal var query_alloc_call_count: usize = 0;
+threadlocal var query_alloc_active_count: usize = 0;
 
 const NativeQueryError = error{
     OutOfMemory,
     InvalidParameter,
+    NoMatch,
+    NoData,
     InvalidRepoMetadata,
     InvalidRpmHeader,
     FileNotFound,
@@ -476,6 +483,8 @@ pub export fn TDNFRepoMdNativeRepoQuery(
     const args = repoquery_args orelse return invalidParameter("null repoquery args", .{});
     const out_items = out_pkg_info orelse return invalidParameter("null pkginfo output", .{});
     const out_total = out_count orelse return invalidParameter("null count output", .{});
+    const available_options = repoQueryAvailableLoadOptions(args);
+    const installed_options = repoQueryInstalledLoadOptions(args);
 
     var ctx = NativeContext.init(std.heap.c_allocator);
     defer ctx.deinit();
@@ -486,15 +495,8 @@ pub export fn TDNFRepoMdNativeRepoQuery(
         repo_count,
         root_dir,
         repoQueryNeedsInstalled(args, scope),
-        .{
-            .need_filelists = args.nList != 0 or args.pszFile != null,
-            .need_other = args.nChangeLogs != 0,
-        },
-        .{
-            .need_relations = args.pppszWhatKeys != null or args.depKeySet != 0,
-            .need_files = args.nList != 0 or args.pszFile != null,
-            .need_changelogs = false,
-        },
+        available_options,
+        installed_options,
     ) catch |err| {
         return mapQueryError(err);
     };
@@ -937,6 +939,62 @@ fn clearError() void {
     last_query_error_len = 0;
 }
 
+fn queryCalloc(count: usize, size: usize) ?*anyopaque {
+    if (builtin.is_test and query_alloc_test_enabled) {
+        const call_index = query_alloc_call_count;
+        query_alloc_call_count += 1;
+        if (query_alloc_fail_after) |fail_after| {
+            if (call_index == fail_after) {
+                return null;
+            }
+        }
+    }
+
+    const raw = c.calloc(count, size);
+    if (raw != null and builtin.is_test and query_alloc_test_enabled) {
+        query_alloc_active_count += 1;
+    }
+    return raw;
+}
+
+fn queryFree(ptr: ?*anyopaque) void {
+    if (ptr == null) {
+        return;
+    }
+    if (builtin.is_test and query_alloc_test_enabled) {
+        std.debug.assert(query_alloc_active_count > 0);
+        query_alloc_active_count -= 1;
+    }
+    c.free(ptr);
+}
+
+fn queryAllocTestEnable(fail_after: ?usize) void {
+    if (!builtin.is_test) {
+        return;
+    }
+    query_alloc_test_enabled = true;
+    query_alloc_fail_after = fail_after;
+    query_alloc_call_count = 0;
+    query_alloc_active_count = 0;
+}
+
+fn queryAllocTestDisable() void {
+    if (!builtin.is_test) {
+        return;
+    }
+    query_alloc_test_enabled = false;
+    query_alloc_fail_after = null;
+    query_alloc_call_count = 0;
+    query_alloc_active_count = 0;
+}
+
+fn queryAllocActiveCount() usize {
+    if (!builtin.is_test or !query_alloc_test_enabled) {
+        return 0;
+    }
+    return query_alloc_active_count;
+}
+
 fn setError(comptime fmt: []const u8, args: anytype) void {
     const msg = std.fmt.bufPrint(&last_query_error_buf, fmt, args) catch blk: {
         const fallback = "(native query error truncated)";
@@ -966,6 +1024,14 @@ fn mapQueryError(err: anyerror) u32 {
         error.InvalidParameter => blk: {
             setErrorDefault("invalid parameter", .{});
             break :blk c.ERROR_TDNF_INVALID_PARAMETER;
+        },
+        error.NoMatch => blk: {
+            setErrorDefault("no matching packages", .{});
+            break :blk c.ERROR_TDNF_NO_MATCH;
+        },
+        error.NoData => blk: {
+            setErrorDefault("no advisory data", .{});
+            break :blk c.ERROR_TDNF_NO_DATA;
         },
         error.InvalidRepoMetadata => blk: {
             setErrorDefault("invalid repository metadata", .{});
@@ -1204,6 +1270,21 @@ fn repoQueryNeedsInstalled(args: *const c.TDNF_REPOQUERY_ARGS, scope: c_int) boo
         return true;
     }
     return scopeNeedsInstalled(scope);
+}
+
+fn repoQueryAvailableLoadOptions(args: *const c.TDNF_REPOQUERY_ARGS) AvailableLoadOptions {
+    return .{
+        .need_filelists = args.nList != 0 or args.pszFile != null,
+        .need_other = args.nChangeLogs != 0,
+    };
+}
+
+fn repoQueryInstalledLoadOptions(args: *const c.TDNF_REPOQUERY_ARGS) InstalledLoadOptions {
+    return .{
+        .need_relations = args.pppszWhatKeys != null or args.depKeySet != 0,
+        .need_files = args.nList != 0 or args.pszFile != null,
+        .need_changelogs = args.nChangeLogs != 0,
+    };
 }
 
 fn repoQueryScope(args: *const c.TDNF_REPOQUERY_ARGS) c_int {
@@ -2498,7 +2579,7 @@ fn relationHasVersion(relation: model.Relation) bool {
 }
 
 fn selectInstalledUpdateInfoPackageRefs(ctx: *NativeContext, package_specs: [*c][*c]u8) ![]PackageRef {
-    const installed_index = ctx.installedDatasetIndex() orelse return try std.heap.c_allocator.alloc(PackageRef, 0);
+    const installed_index = ctx.installedDatasetIndex() orelse return error.NoMatch;
     const dataset = &ctx.datasets.items[installed_index];
 
     if (package_specs != null and package_specs[0] != null) {
@@ -2516,13 +2597,21 @@ fn selectInstalledUpdateInfoPackageRefs(ctx: *NativeContext, package_specs: [*c]
             defer std.heap.c_allocator.free(matched);
             try results.appendSlice(matched);
         }
-        return dedupeOwnedPackageRefs(try results.toOwnedSlice());
+        const deduped = try dedupeOwnedPackageRefs(try results.toOwnedSlice());
+        if (deduped.len == 0) {
+            std.heap.c_allocator.free(deduped);
+            return error.NoMatch;
+        }
+        return deduped;
     }
 
     var results = std.array_list.Managed(PackageRef).init(std.heap.c_allocator);
     defer results.deinit();
     for (dataset.repository.packages, 0..) |_, package_index| {
         try results.append(.{ .dataset_index = installed_index, .package_index = package_index });
+    }
+    if (results.items.len == 0) {
+        return error.NoMatch;
     }
     return try results.toOwnedSlice();
 }
@@ -2711,6 +2800,9 @@ fn computeUpdateInfoLines(ctx: *NativeContext, package_specs: [*c][*c]u8, securi
         }
     }
 
+    if (results.items.len == 0) {
+        return error.NoData;
+    }
     std.mem.reverse([]const u8, results.items);
     return try results.toOwnedSlice();
 }
@@ -2766,15 +2858,53 @@ fn buildSearchInfoArray(ctx: *NativeContext, refs: []const SearchRef) !c.PTDNF_P
     return array;
 }
 
+fn freeTrackedCString(text: ?[*:0]u8) void {
+    if (text) |value| {
+        queryFree(@ptrCast(value));
+    }
+}
+
+fn freeTrackedPackageInfoList(head: c.PTDNF_PKG_INFO) void {
+    var node = head;
+    while (node != null) {
+        const next = node[0].pNext;
+        freeTrackedCString(node[0].pszName);
+        freeTrackedCString(node[0].pszRepoName);
+        freeTrackedCString(node[0].pszVersion);
+        freeTrackedCString(node[0].pszRelease);
+        freeTrackedCString(node[0].pszArch);
+        freeTrackedCString(node[0].pszEVR);
+        freeTrackedCString(node[0].pszSummary);
+        queryFree(@ptrCast(node));
+        node = next;
+    }
+}
+
+fn freeTrackedChangeLogEntries(head: c.PTDNF_PKG_CHANGELOG_ENTRY) void {
+    var node = head;
+    while (node != null) {
+        const next = node[0].pNext;
+        freeTrackedCString(node[0].pszAuthor);
+        freeTrackedCString(node[0].pszText);
+        queryFree(@ptrCast(node));
+        node = next;
+    }
+}
+
 fn buildProvidesInfoList(ctx: *NativeContext, refs: []const PackageRef) !c.PTDNF_PKG_INFO {
     var head: c.PTDNF_PKG_INFO = null;
-    errdefer c.TDNFFreePackageInfo(head);
+    errdefer freeTrackedPackageInfoList(head);
 
     for (refs) |ref| {
-        const node = @as(c.PTDNF_PKG_INFO, @ptrCast(@alignCast(c.calloc(1, @sizeOf(c.TDNF_PKG_INFO)) orelse return error.OutOfMemory)));
-        const pkg = ctx.package(ref);
-        try fillBasicPkgIdentity(node, ctx.repoId(ref), pkg, ctx.datasets.items[ref.dataset_index].kind == .available);
-        node[0].pszSummary = try dupOptionalCString(pkgquery.summary(pkg));
+        const node = blk: {
+            const allocated = @as(c.PTDNF_PKG_INFO, @ptrCast(@alignCast(queryCalloc(1, @sizeOf(c.TDNF_PKG_INFO)) orelse return error.OutOfMemory)));
+            errdefer freeTrackedPackageInfoList(allocated);
+
+            const pkg = ctx.package(ref);
+            try fillBasicPkgIdentity(allocated, ctx.repoId(ref), pkg, ctx.datasets.items[ref.dataset_index].kind == .available);
+            allocated[0].pszSummary = try dupOptionalCString(pkgquery.summary(pkg));
+            break :blk allocated;
+        };
         node[0].pNext = head;
         head = node;
     }
@@ -2924,15 +3054,21 @@ fn fillChangelogFields(item: c.PTDNF_PKG_INFO, ctx: *NativeContext, ref: Package
     const entries = pkgquery.changelogEntries(pkg, ctx.changelogs(ref));
     var head: c.PTDNF_PKG_CHANGELOG_ENTRY = null;
     var tail: c.PTDNF_PKG_CHANGELOG_ENTRY = null;
+    errdefer freeTrackedChangeLogEntries(head);
 
     var index: usize = entries.len;
     while (index > 0) {
         index -= 1;
         const entry = entries[index];
-        const node = @as(c.PTDNF_PKG_CHANGELOG_ENTRY, @ptrCast(@alignCast(c.calloc(1, @sizeOf(c.TDNF_PKG_CHANGELOG_ENTRY)) orelse return error.OutOfMemory)));
-        node[0].timeTime = @intCast(entry.timestamp);
-        node[0].pszAuthor = try dupCString(entry.author);
-        node[0].pszText = try dupCString(entry.text);
+        const node = blk: {
+            const allocated = @as(c.PTDNF_PKG_CHANGELOG_ENTRY, @ptrCast(@alignCast(queryCalloc(1, @sizeOf(c.TDNF_PKG_CHANGELOG_ENTRY)) orelse return error.OutOfMemory)));
+            errdefer freeTrackedChangeLogEntries(allocated);
+
+            allocated[0].timeTime = @intCast(entry.timestamp);
+            allocated[0].pszAuthor = try dupCString(entry.author);
+            allocated[0].pszText = try dupCString(entry.text);
+            break :blk allocated;
+        };
         if (head == null) {
             head = node;
         } else {
@@ -2991,7 +3127,7 @@ fn buildOwnedCStringArray(items: []const []const u8) !?[*c][*c]u8 {
 }
 
 fn dupCString(text: []const u8) ![*:0]u8 {
-    const raw = c.calloc(text.len + 1, 1) orelse return error.OutOfMemory;
+    const raw = queryCalloc(text.len + 1, 1) orelse return error.OutOfMemory;
     const out: [*:0]u8 = @ptrCast(raw);
     @memcpy(out[0..text.len], text);
     out[text.len] = 0;
@@ -3127,4 +3263,264 @@ test "native autoremove orphan detection keeps packages required by name file an
 
     try testing.expectEqual(@as(usize, 1), lines.len);
     try testing.expectEqualStrings("@System\x1forphan-1.0-1.noarch", lines[0]);
+}
+
+test "repoquery changelog detail requests installed changelogs and populates entries" {
+    const testing = std.testing;
+
+    var args = std.mem.zeroes(c.TDNF_REPOQUERY_ARGS);
+    args.nChangeLogs = 1;
+
+    const installed_options = repoQueryInstalledLoadOptions(&args);
+    try testing.expect(installed_options.need_changelogs);
+
+    var ctx = NativeContext.init(testing.allocator);
+    defer ctx.deinit();
+    try appendInstalledChangelogTestDataset(&ctx, testing.allocator);
+
+    const refs = [_]PackageRef{.{ .dataset_index = 0, .package_index = 0 }};
+    const infos = try buildPackageInfoArray(&ctx, refs[0..], detail_changelog, false, 0, false);
+    defer c.TDNFFreePackageInfoArray(infos, 1);
+
+    var entry = infos[0].pChangeLogEntries;
+    var count: usize = 0;
+    var saw_alice = false;
+    var saw_bob = false;
+    while (entry != null) {
+        const author = std.mem.span(entry[0].pszAuthor orelse return error.TestExpectedEqual);
+        const text = std.mem.span(entry[0].pszText orelse return error.TestExpectedEqual);
+        if (std.mem.eql(u8, author, "Alice") and std.mem.eql(u8, text, "Initial release")) {
+            saw_alice = true;
+        }
+        if (std.mem.eql(u8, author, "Bob") and std.mem.eql(u8, text, "Fix advisory handling")) {
+            saw_bob = true;
+        }
+        count += 1;
+        entry = entry[0].pNext;
+    }
+
+    try testing.expectEqual(@as(usize, 2), count);
+    try testing.expect(saw_alice);
+    try testing.expect(saw_bob);
+}
+
+test "native updateinfo summary and detail return legacy no-match and no-data errors" {
+    const testing = std.testing;
+
+    var ctx = NativeContext.init(testing.allocator);
+    defer ctx.deinit();
+    try appendUpdateInfoTestDatasets(&ctx, testing.allocator);
+
+    const missing_specs = [_][*c]u8{
+        @ptrCast(@constCast("missing")),
+        null,
+    };
+
+    try testing.expectError(
+        error.NoMatch,
+        computeUpdateInfoSummaryLines(&ctx, @constCast(&missing_specs), false, null),
+    );
+    try testing.expectError(
+        error.NoMatch,
+        computeUpdateInfoLines(&ctx, @constCast(&missing_specs), false, null, false),
+    );
+    try testing.expectEqual(c.ERROR_TDNF_NO_MATCH, mapQueryError(error.NoMatch));
+
+    const summary_lines = try computeUpdateInfoSummaryLines(&ctx, null, false, "9.0");
+    defer freeOwnedSlices(summary_lines);
+    try testing.expectEqual(@as(usize, 4), summary_lines.len);
+    for (summary_lines, 0..) |line, index| {
+        const expected = try std.fmt.allocPrint(testing.allocator, "{d}{c}0", .{ index, sep_field });
+        defer testing.allocator.free(expected);
+        try testing.expectEqualStrings(expected, line);
+    }
+
+    try testing.expectError(
+        error.NoData,
+        computeUpdateInfoLines(&ctx, null, false, "9.0", false),
+    );
+    try testing.expectEqual(c.ERROR_TDNF_NO_DATA, mapQueryError(error.NoData));
+}
+
+test "provides and changelog builders free partial tracked allocations on oom" {
+    const testing = std.testing;
+
+    defer queryAllocTestDisable();
+
+    var provides_ctx = NativeContext.init(testing.allocator);
+    defer provides_ctx.deinit();
+    try appendInstalledProvidesTestDataset(&provides_ctx, testing.allocator);
+
+    const provide_refs = [_]PackageRef{
+        .{ .dataset_index = 0, .package_index = 0 },
+        .{ .dataset_index = 0, .package_index = 1 },
+    };
+
+    var fail_after: usize = 0;
+    while (true) : (fail_after += 1) {
+        queryAllocTestEnable(fail_after);
+        const result = buildProvidesInfoList(&provides_ctx, provide_refs[0..]);
+        if (result) |list| {
+            freeTrackedPackageInfoList(list);
+            try testing.expectEqual(@as(usize, 0), queryAllocActiveCount());
+            queryAllocTestDisable();
+            break;
+        } else |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            try testing.expectEqual(@as(usize, 0), queryAllocActiveCount());
+            queryAllocTestDisable();
+        }
+    }
+
+    var changelog_ctx = NativeContext.init(testing.allocator);
+    defer changelog_ctx.deinit();
+    try appendInstalledChangelogTestDataset(&changelog_ctx, testing.allocator);
+
+    fail_after = 0;
+    while (true) : (fail_after += 1) {
+        var info = std.mem.zeroes(c.TDNF_PKG_INFO);
+
+        queryAllocTestEnable(fail_after);
+        fillChangelogFields(&info, &changelog_ctx, .{ .dataset_index = 0, .package_index = 0 }) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            try testing.expectEqual(@as(usize, 0), queryAllocActiveCount());
+            queryAllocTestDisable();
+            continue;
+        };
+        {
+            freeTrackedChangeLogEntries(info.pChangeLogEntries);
+            info.pChangeLogEntries = null;
+            try testing.expectEqual(@as(usize, 0), queryAllocActiveCount());
+            queryAllocTestDisable();
+            break;
+        }
+    }
+}
+
+fn appendInstalledChangelogTestDataset(ctx: *NativeContext, allocator: std.mem.Allocator) !void {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const packages = try arena.dupe(model.Package, &[_]model.Package{
+        .{
+            .pkg_id = "pkg-demo",
+            .nevra = .{ .name = "demo", .version = "1.0", .release = "1", .arch = "x86_64" },
+            .checksum = .{ .kind = "sha256", .value = "1111" },
+            .location = .{},
+            .changelogs = .{ .start = 0, .len = 2 },
+        },
+    });
+    const changelogs = try arena.dupe(model.ChangelogEntry, &[_]model.ChangelogEntry{
+        .{ .author = "Alice", .timestamp = 100, .text = "Initial release" },
+        .{ .author = "Bob", .timestamp = 200, .text = "Fix advisory handling" },
+    });
+
+    try ctx.datasets.append(.{
+        .kind = .installed,
+        .repo_id = system_repo_name,
+        .arena_state = arena_state,
+        .repository = .{
+            .packages = packages,
+            .changelogs = changelogs,
+        },
+    });
+}
+
+fn appendInstalledProvidesTestDataset(ctx: *NativeContext, allocator: std.mem.Allocator) !void {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const packages = try arena.dupe(model.Package, &[_]model.Package{
+        .{
+            .pkg_id = "pkg-provide-one",
+            .nevra = .{ .name = "provide-one", .version = "1.0", .release = "1", .arch = "x86_64" },
+            .checksum = .{ .kind = "sha256", .value = "aaaa" },
+            .summary = "Provide one",
+            .location = .{},
+        },
+        .{
+            .pkg_id = "pkg-provide-two",
+            .nevra = .{ .name = "provide-two", .version = "2.0", .release = "1", .arch = "noarch" },
+            .checksum = .{ .kind = "sha256", .value = "bbbb" },
+            .summary = "Provide two",
+            .location = .{},
+        },
+    });
+
+    try ctx.datasets.append(.{
+        .kind = .installed,
+        .repo_id = system_repo_name,
+        .arena_state = arena_state,
+        .repository = .{
+            .packages = packages,
+        },
+    });
+}
+
+fn appendUpdateInfoTestDatasets(ctx: *NativeContext, allocator: std.mem.Allocator) !void {
+    var installed_arena_state = std.heap.ArenaAllocator.init(allocator);
+    errdefer installed_arena_state.deinit();
+    const installed_arena = installed_arena_state.allocator();
+
+    const installed_packages = try installed_arena.dupe(model.Package, &[_]model.Package{
+        .{
+            .pkg_id = "pkg-installed-demo",
+            .nevra = .{ .name = "demo", .version = "1.0", .release = "1", .arch = "x86_64" },
+            .checksum = .{ .kind = "sha256", .value = "cccc" },
+            .location = .{},
+        },
+    });
+
+    try ctx.datasets.append(.{
+        .kind = .installed,
+        .repo_id = system_repo_name,
+        .arena_state = installed_arena_state,
+        .repository = .{
+            .packages = installed_packages,
+        },
+    });
+
+    var available_arena_state = std.heap.ArenaAllocator.init(allocator);
+    errdefer available_arena_state.deinit();
+    const available_arena = available_arena_state.allocator();
+
+    const available_packages = try available_arena.dupe(model.Package, &[_]model.Package{
+        .{
+            .pkg_id = "pkg-available-demo",
+            .nevra = .{ .name = "demo", .version = "2.0", .release = "1", .arch = "x86_64" },
+            .checksum = .{ .kind = "sha256", .value = "dddd" },
+            .location = .{},
+        },
+    });
+    const advisories = try available_arena.dupe(model.Advisory, &[_]model.Advisory{
+        .{
+            .id = "ADV-DEMO-2026-0001",
+            .raw_type = "security",
+            .kind = .security,
+            .severity = "5.0",
+            .updated = "2026-07-13 00:00:00",
+            .description = "Security fix",
+            .packages = .{ .start = 0, .len = 1 },
+        },
+    });
+    const advisory_packages = try available_arena.dupe(model.AdvisoryPackage, &[_]model.AdvisoryPackage{
+        .{
+            .nevra = .{ .name = "demo", .version = "2.0", .release = "1", .arch = "x86_64" },
+            .filename = "demo-2.0-1.x86_64.rpm",
+        },
+    });
+
+    try ctx.datasets.append(.{
+        .kind = .available,
+        .repo_id = "testrepo",
+        .arena_state = available_arena_state,
+        .repository = .{
+            .packages = available_packages,
+            .advisories = advisories,
+            .advisory_packages = advisory_packages,
+            .has_updateinfo = true,
+        },
+    });
 }

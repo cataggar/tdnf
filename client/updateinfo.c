@@ -143,6 +143,7 @@ TDNFUpdateInfoSummary(
         ppszPackageNameSpecs,
         dwSecurity,
         pszSeverity,
+        dwError,
         pSummary);
 
     *ppSummary = pSummary;
@@ -160,6 +161,13 @@ cleanup:
     return dwError;
 
 error:
+    TDNFQueryCrosscheckUpdateInfoSummary(
+        pTdnf,
+        ppszPackageNameSpecs,
+        dwSecurity,
+        pszSeverity,
+        dwError,
+        pSummary);
     if(ppSummary)
     {
         *ppSummary = NULL;

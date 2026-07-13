@@ -2038,20 +2038,21 @@ TDNFUpdateInfo(
         pUpdateAdvPkgList = NULL;
     }
 
-    TDNFQueryCrosscheckUpdateInfo(
-        pTdnf,
-        ppszPackageNameSpecs,
-        dwSecurity,
-        pszSeverity,
-        dwRebootRequired,
-        pUpdateInfos);
-
     if(!pUpdateInfos)
     {
         pr_info("\n%d updates.\n", nUpdates);
         dwError = ERROR_TDNF_NO_DATA;
         BAIL_ON_TDNF_ERROR(dwError);
     }
+
+    TDNFQueryCrosscheckUpdateInfo(
+        pTdnf,
+        ppszPackageNameSpecs,
+        dwSecurity,
+        pszSeverity,
+        dwRebootRequired,
+        dwError,
+        pUpdateInfos);
 
     *ppUpdateInfo = pUpdateInfos;
 
@@ -2068,6 +2069,14 @@ cleanup:
     return dwError;
 
 error:
+    TDNFQueryCrosscheckUpdateInfo(
+        pTdnf,
+        ppszPackageNameSpecs,
+        dwSecurity,
+        pszSeverity,
+        dwRebootRequired,
+        dwError,
+        pUpdateInfos);
     if(ppUpdateInfo)
     {
         *ppUpdateInfo = NULL;

@@ -733,6 +733,7 @@ TDNFQueryCrosscheckUpdateInfoSummary(
     char **ppszPackageNameSpecs,
     uint32_t dwSecurity,
     const char *pszSeverity,
+    uint32_t dwLibError,
     PTDNF_UPDATEINFO_SUMMARY pSummary
     )
 {
@@ -745,7 +746,7 @@ TDNFQueryCrosscheckUpdateInfoSummary(
     char **ppszLegacy = NULL;
     char **ppszNative = NULL;
 
-    if(!pTdnf || !pSummary)
+    if(!pTdnf || (!pSummary && !dwLibError))
     {
         goto cleanup;
     }
@@ -757,12 +758,6 @@ TDNFQueryCrosscheckUpdateInfoSummary(
         goto cleanup;
     }
 
-    dwError = QueryCrosscheckSerializeUpdateInfoSummary(
-                  pSummary,
-                  &ppszLegacy,
-                  &dwLegacyCount);
-    BAIL_ON_TDNF_ERROR(dwError);
-
     dwNativeError = TDNFRepoMdNativeUpdateInfoSummaryLines(
                         pRepos,
                         dwRepoCount,
@@ -772,15 +767,27 @@ TDNFQueryCrosscheckUpdateInfoSummary(
                         pszSeverity,
                         &ppszNative,
                         &dwNativeCount);
-    if(dwNativeError)
+    if(dwNativeError != dwLibError)
     {
         QueryCrosscheckLog(
             "updateinfo-summary",
-            "native summary failed (%u): %s\n",
+            "error mismatch legacy=%u native=%u native_last_error=%s\n",
+            dwLibError,
             dwNativeError,
             TDNFRepoMdNativeQueryLastError());
         goto cleanup;
     }
+    if(dwLibError)
+    {
+        QueryCrosscheckLog("updateinfo-summary", "compared error result %u\n", dwLibError);
+        goto cleanup;
+    }
+
+    dwError = QueryCrosscheckSerializeUpdateInfoSummary(
+                  pSummary,
+                  &ppszLegacy,
+                  &dwLegacyCount);
+    BAIL_ON_TDNF_ERROR(dwError);
 
     dwError = QueryCrosscheckCompareLineArrays(
                   "updateinfo-summary",
@@ -807,6 +814,7 @@ TDNFQueryCrosscheckUpdateInfo(
     uint32_t dwSecurity,
     const char *pszSeverity,
     uint32_t dwRebootRequired,
+    uint32_t dwLibError,
     PTDNF_UPDATEINFO pUpdateInfo
     )
 {
@@ -819,7 +827,7 @@ TDNFQueryCrosscheckUpdateInfo(
     char **ppszLegacy = NULL;
     char **ppszNative = NULL;
 
-    if(!pTdnf)
+    if(!pTdnf || (!pUpdateInfo && !dwLibError))
     {
         goto cleanup;
     }
@@ -831,12 +839,6 @@ TDNFQueryCrosscheckUpdateInfo(
         goto cleanup;
     }
 
-    dwError = QueryCrosscheckSerializeUpdateInfo(
-                  pUpdateInfo,
-                  &ppszLegacy,
-                  &dwLegacyCount);
-    BAIL_ON_TDNF_ERROR(dwError);
-
     dwNativeError = TDNFRepoMdNativeUpdateInfoLines(
                         pRepos,
                         dwRepoCount,
@@ -847,15 +849,27 @@ TDNFQueryCrosscheckUpdateInfo(
                         dwRebootRequired,
                         &ppszNative,
                         &dwNativeCount);
-    if(dwNativeError)
+    if(dwNativeError != dwLibError)
     {
         QueryCrosscheckLog(
             "updateinfo-info",
-            "native updateinfo failed (%u): %s\n",
+            "error mismatch legacy=%u native=%u native_last_error=%s\n",
+            dwLibError,
             dwNativeError,
             TDNFRepoMdNativeQueryLastError());
         goto cleanup;
     }
+    if(dwLibError)
+    {
+        QueryCrosscheckLog("updateinfo-info", "compared error result %u\n", dwLibError);
+        goto cleanup;
+    }
+
+    dwError = QueryCrosscheckSerializeUpdateInfo(
+                  pUpdateInfo,
+                  &ppszLegacy,
+                  &dwLegacyCount);
+    BAIL_ON_TDNF_ERROR(dwError);
 
     dwError = QueryCrosscheckCompareLineArrays(
                   "updateinfo-info",
@@ -2993,6 +3007,7 @@ TDNFQueryCrosscheckUpdateInfoSummary(
     char **ppszPackageNameSpecs,
     uint32_t dwSecurity,
     const char *pszSeverity,
+    uint32_t dwLibError,
     PTDNF_UPDATEINFO_SUMMARY pSummary
     )
 {
@@ -3000,6 +3015,7 @@ TDNFQueryCrosscheckUpdateInfoSummary(
     (void)ppszPackageNameSpecs;
     (void)dwSecurity;
     (void)pszSeverity;
+    (void)dwLibError;
     (void)pSummary;
 }
 
@@ -3010,6 +3026,7 @@ TDNFQueryCrosscheckUpdateInfo(
     uint32_t dwSecurity,
     const char *pszSeverity,
     uint32_t dwRebootRequired,
+    uint32_t dwLibError,
     PTDNF_UPDATEINFO pUpdateInfo
     )
 {
@@ -3018,6 +3035,7 @@ TDNFQueryCrosscheckUpdateInfo(
     (void)dwSecurity;
     (void)pszSeverity;
     (void)dwRebootRequired;
+    (void)dwLibError;
     (void)pUpdateInfo;
 }
 
