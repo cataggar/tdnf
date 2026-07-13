@@ -830,6 +830,33 @@ pub fn build(b: *Build) void {
         b.getInstallStep().dependOn(&install.step);
     }
 
+    // tdnf-rpm-trigger: smoke-test exe for the native trigger
+    // executor.
+    {
+        const mod = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .pic = true,
+        });
+        mod.addIncludePath(b.path("rpmzig"));
+        mod.addCSourceFiles(.{
+            .root = b.path("rpmzig"),
+            .files = &.{"trigger_main.c"},
+            .flags = &tdnf_cflags,
+        });
+        mod.linkLibrary(rpmzig_lib);
+        const exe = b.addExecutable(.{
+            .name = "tdnf-rpm-trigger",
+            .root_module = mod,
+        });
+        hardenExe(exe);
+        const install = b.addInstallArtifact(exe, .{
+            .dest_dir = .{ .override = .{ .custom = "libexec/tdnf" } },
+        });
+        b.getInstallStep().dependOn(&install.step);
+    }
+
     // tdnf-rpm-erase: smoke-test exe for the native file-erase
     // engine.
     {

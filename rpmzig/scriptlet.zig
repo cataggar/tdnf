@@ -133,13 +133,6 @@ pub fn runHeaderScript(
     options: Options,
 ) RunError!Result {
     const info = phaseInfo(phase);
-    var config = try txn_config.TxnConfig.init(allocator, options.install_root);
-    defer config.deinit();
-
-    for (options.rpmdefines) |define| {
-        _ = try config.applyRpmDefine(define);
-    }
-
     if ((options.trans_flags & RPMTRANS_FLAG_NOSCRIPTS) != 0 or
         (options.trans_flags & info.skip_flag) != 0)
     {
@@ -165,10 +158,27 @@ pub fn runHeaderScript(
     const arena_alloc = arena.allocator();
 
     const interpreter = try collectInterpreterArgs(arena_alloc, hdr, info.prog_tag);
+    return runPreparedScript(allocator, interpreter, script_body, info.critical, options);
+}
+
+pub fn runPreparedScript(
+    allocator: Allocator,
+    interpreter: []const []const u8,
+    script_body: ?[]const u8,
+    critical: bool,
+    options: Options,
+) RunError!Result {
+    var config = try txn_config.TxnConfig.init(allocator, options.install_root);
+    defer config.deinit();
+
+    for (options.rpmdefines) |define| {
+        _ = try config.applyRpmDefine(define);
+    }
+
     if (interpreter.len == 0) {
         return .{
             .ran = false,
-            .critical = info.critical,
+            .critical = critical,
             .outcome = .not_run,
         };
     }
@@ -176,15 +186,19 @@ pub fn runHeaderScript(
         const body = script_body orelse {
             return .{
                 .ran = false,
-                .critical = info.critical,
+                .critical = critical,
                 .outcome = .not_run,
             };
         };
         if (c.tdnf_rpmzig_lua_supported() == 0) {
             return error.UnsupportedInterpreter;
         }
-        return try runLuaScriptProcess(arena_alloc, &config, body, info, options);
+        return try runLuaScriptProcess(allocator, &config, body, critical, options);
     }
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
 
     var script_file: ?TempScript = null;
     defer {
@@ -239,14 +253,14 @@ pub fn runHeaderScript(
         );
     }
 
-    return waitForChild(pid, info.critical);
+    return waitForChild(pid, critical);
 }
 
 fn runLuaScriptProcess(
     allocator: Allocator,
     config: *const txn_config.TxnConfig,
     body: []const u8,
-    info: PhaseInfo,
+    critical: bool,
     options: Options,
 ) RunError!Result {
     const path_env = try allocator.dupeZ(u8, config.value(.install_script_path));
@@ -269,7 +283,7 @@ fn runLuaScriptProcess(
         );
     }
 
-    return waitForChild(pid, info.critical);
+    return waitForChild(pid, critical);
 }
 
 fn waitForChild(pid: c_int, critical: bool) RunError!Result {
