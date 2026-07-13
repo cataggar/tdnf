@@ -20,7 +20,10 @@ TDNFApplySnapshot(
     uint32_t dwError = 0;
     Pool* pPool = NULL;
     char** ppszSnapshotPackages = NULL;
+    char** ppszMatches = NULL;
     char *pszPkg = NULL;
+    PTDNF_REPOMD_NATIVE_REPO_INPUT pRepoInput = NULL;
+    uint32_t dwMatchCount = 0;
     int i;
     Queue qResult = {0};
 
@@ -36,20 +39,37 @@ TDNFApplySnapshot(
     dwError = TDNFReadFileToStringArray(pRepoData->pszSnapshotFile, &ppszSnapshotPackages);
     BAIL_ON_TDNF_ERROR(dwError);
 
+    dwError = TDNFAllocateMemory(1, sizeof(*pRepoInput), (void **)&pRepoInput);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    dwError = TDNFNativeQueryBuildSingleRepoInput(pTdnf, pRepoData, pRepoInput);
+    BAIL_ON_TDNF_ERROR(dwError);
+
     for(i = 0; ppszSnapshotPackages[i]; i++) {
         pszPkg = ppszSnapshotPackages[i];
         if (pszPkg[0] == '#')
             continue;
 
-        dwError = SolvFindSolvablesByNEqualsEvrFromRepo(pPool, pRepo,
-                                                        pszPkg, &qResult);
+        TDNFFreeStringArray(ppszMatches);
+        ppszMatches = NULL;
+        dwMatchCount = 0;
+
+        dwError = TDNFRepoMdNativeFindNameEvrMatches(
+                      pRepoInput,
+                      1,
+                      pszPkg,
+                      &ppszMatches,
+                      &dwMatchCount);
+        BAIL_ON_TDNF_ERROR(dwError);
+
+        dwError = TDNFNativeQueryResolvePackageRefArrayToQueue(
+                      pSack,
+                      ppszMatches,
+                      dwMatchCount,
+                      0,
+                      &qResult);
         BAIL_ON_TDNF_ERROR(dwError);
     }
-
-    TDNFQueryCrosscheckSnapshot(
-        pTdnf,
-        pRepoData,
-        &qResult);
 
     if (!pPool->considered)
     {
@@ -77,6 +97,8 @@ TDNFApplySnapshot(
 
 error:
     TDNF_SAFE_FREE_STRINGARRAY(ppszSnapshotPackages);
+    TDNFFreeStringArray(ppszMatches);
+    TDNFNativeQueryFreeRepoInputs(pRepoInput, pRepoInput ? 1 : 0);
     queue_free(&qResult);
     return dwError;
 }
