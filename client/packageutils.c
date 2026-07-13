@@ -639,79 +639,59 @@ TDNFPackageGetDowngrade(
     )
 {
     uint32_t dwError = 0;
-    int dwPkgIndex = 0;
-    int dwEvrCompare = 0;
-    Id dwAvailableId = 0;
     Id dwDownGradeId = 0;
-    uint32_t dwCount = 0;
+    PTDNF_REPOMD_NATIVE_REPO_INPUT pRepos = NULL;
+    uint32_t dwRepoCount = 0;
+    char *pszInstalledRef = NULL;
+    char **ppszMatches = NULL;
+    uint32_t dwMatchCount = 0;
 
-    if(!pSack || !pdwDowngradePkgId || !pAvailabePkgList)
+    if(!pTdnf || !pSack || !pdwDowngradePkgId || !pAvailabePkgList)
     {
         dwError = ERROR_TDNF_INVALID_PARAMETER;
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    dwError = SolvGetPackageListSize(pAvailabePkgList, &dwCount);
+    (void)pAvailabePkgList;
+
+    dwError = TDNFNativeQueryBuildRepoInputs(pTdnf, &pRepos, &dwRepoCount);
     BAIL_ON_TDNF_ERROR(dwError);
 
-    for(dwPkgIndex = 0; (uint32_t)dwPkgIndex < dwCount; dwPkgIndex++)
-    {
-        dwError = SolvGetPackageId( pAvailabePkgList,
-                                    dwPkgIndex,
-                                    &dwAvailableId);
-        BAIL_ON_TDNF_ERROR(dwError);
+    dwError = TDNFNativeQuerySerializePackageId(pSack, dwInstalled, &pszInstalledRef);
+    BAIL_ON_TDNF_ERROR(dwError);
 
-        if (pSack->pPool->considered && !MAPTST(pSack->pPool->considered, dwAvailableId))
-            continue;
-
-        dwError = SolvCmpEvr(
-                      pSack,
-                      dwAvailableId,
-                      dwInstalled,
-                      &dwEvrCompare);
-        BAIL_ON_TDNF_ERROR(dwError);
-
-        if(dwEvrCompare < 0)
-        {
-            if(dwDownGradeId == 0)
-            {
-                dwDownGradeId = dwAvailableId;
-            }
-            else
-            {
-                dwError = SolvCmpEvr(
-                              pSack,
-                              dwAvailableId,
-                              dwDownGradeId,
-                              &dwEvrCompare);
-                if(dwError == 0 && dwEvrCompare > 0)
-                {
-                    dwDownGradeId = dwAvailableId;
-                }
-            }
-        }
-    }
-
-    if(dwDownGradeId == 0)
+    dwError = TDNFRepoMdNativeDowngradeCandidateLines(
+                  pRepos,
+                  dwRepoCount,
+                  TDNFNativeQueryInstallRoot(pTdnf),
+                  pTdnf->pConf->ppszMinVersions,
+                  pszInstalledRef,
+                  &ppszMatches,
+                  &dwMatchCount);
+    if(dwError == ERROR_TDNF_NO_DATA)
     {
         dwError = ERROR_TDNF_NO_DOWNGRADE_PATH;
-        TDNFQueryCrosscheckDowngradeCandidate(
-            pTdnf,
-            dwInstalled,
-            dwError,
-            dwDownGradeId);
+    }
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    if(dwMatchCount != 1)
+    {
+        dwError = ERROR_TDNF_NO_DOWNGRADE_PATH;
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    TDNFQueryCrosscheckDowngradeCandidate(
-        pTdnf,
-        dwInstalled,
-        0,
-        dwDownGradeId);
+    dwError = TDNFNativeQueryResolveSinglePackageRef(
+                  pSack,
+                  ppszMatches[0],
+                  0,
+                  &dwDownGradeId);
+    BAIL_ON_TDNF_ERROR(dwError);
 
     *pdwDowngradePkgId = dwDownGradeId;
 cleanup:
-
+    TDNFFreeStringArray(ppszMatches);
+    TDNF_SAFE_FREE_MEMORY(pszInstalledRef);
+    TDNFNativeQueryFreeRepoInputs(pRepos, dwRepoCount);
     return dwError;
 error:
     if(pdwDowngradePkgId)

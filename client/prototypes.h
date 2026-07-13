@@ -20,115 +20,113 @@ TDNFApplyScopeFilter(
     TDNF_SCOPE nScope
     );
 
-void
-TDNFQueryCrosscheckList(
+uint32_t
+TDNFNativeQueryBuildRepoInputs(
     PTDNF pTdnf,
-    TDNF_SCOPE nScope,
-    char **ppszPackageNameSpecs,
-    TDNF_PKG_DETAIL nDetail,
-    uint32_t dwLibError,
-    PTDNF_PKG_INFO pLibPkgInfos,
-    uint32_t dwLibCount
+    PTDNF_REPOMD_NATIVE_REPO_INPUT *ppRepos,
+    uint32_t *pdwRepoCount
     );
 
-void
-TDNFQueryCrosscheckSearch(
-    PTDNF pTdnf,
-    char **ppszSearchStrings,
-    int nStartIndex,
-    int nEndIndex,
-    uint32_t dwLibError,
-    PTDNF_PKG_INFO pLibPkgInfos,
-    uint32_t dwLibCount
-    );
-
-void
-TDNFQueryCrosscheckProvides(
-    PTDNF pTdnf,
-    const char *pszSpec,
-    uint32_t dwLibError,
-    PTDNF_PKG_INFO pLibPkgInfos
-    );
-
-void
-TDNFQueryCrosscheckRepoQuery(
-    PTDNF pTdnf,
-    PTDNF_REPOQUERY_ARGS pRepoqueryArgs,
-    uint32_t dwLibError,
-    PTDNF_PKG_INFO pLibPkgInfos,
-    uint32_t dwLibCount
-    );
-
-void
-TDNFQueryCrosscheckUpdateAdvisories(
-    PTDNF pTdnf,
-    Id dwPkgId,
-    PSolvPackageList pPkgList
-    );
-
-void
-TDNFQueryCrosscheckUpdateInfoSummary(
-    PTDNF pTdnf,
-    char **ppszPackageNameSpecs,
-    uint32_t dwSecurity,
-    const char *pszSeverity,
-    uint32_t dwLibError,
-    PTDNF_UPDATEINFO_SUMMARY pSummary
-    );
-
-void
-TDNFQueryCrosscheckUpdateInfo(
-    PTDNF pTdnf,
-    char **ppszPackageNameSpecs,
-    uint32_t dwSecurity,
-    const char *pszSeverity,
-    uint32_t dwRebootRequired,
-    uint32_t dwLibError,
-    PTDNF_UPDATEINFO pUpdateInfo
-    );
-
-void
-TDNFQueryCrosscheckNevraLookup(
-    PTDNF pTdnf,
-    const char *pszNevra,
-    int nInstalled,
-    Queue *pLibResult
-    );
-
-void
-TDNFQueryCrosscheckSnapshot(
+uint32_t
+TDNFNativeQueryBuildSingleRepoInput(
     PTDNF pTdnf,
     PTDNF_REPO_DATA pRepoData,
-    Queue *pLibResult
+    TDNF_REPOMD_NATIVE_REPO_INPUT *pRepo
     );
 
 void
-TDNFQueryCrosscheckMinVersions(
-    PTDNF pTdnf,
-    Map *pMapMinVersions
+TDNFNativeQueryFreeRepoInputs(
+    PTDNF_REPOMD_NATIVE_REPO_INPUT pRepos,
+    uint32_t dwRepoCount
     );
 
-void
-TDNFQueryCrosscheckDowngradeCandidate(
-    PTDNF pTdnf,
-    Id dwInstalled,
-    uint32_t dwLibError,
-    Id dwLibDowngradeId
+const char*
+TDNFNativeQueryInstallRoot(
+    PTDNF pTdnf
     );
 
-void
-TDNFQueryCrosscheckBuildDependencies(
+uint32_t
+TDNFNativeQueryFilterUserInstalled(
     PTDNF pTdnf,
-    Queue *pGoalPkgs,
+    PTDNF_PKG_INFO pPkgInfos,
+    uint32_t *pdwCount
+    );
+
+uint32_t
+TDNFNativeQueryApplyLocationUrls(
+    PTDNF pTdnf,
+    PTDNF_PKG_INFO pPkgInfos,
+    uint32_t dwCount
+    );
+
+uint32_t
+TDNFNativeQuerySerializePackageId(
+    PSolvSack pSack,
+    Id dwPkgId,
+    char **ppszLine
+    );
+
+uint32_t
+TDNFNativeQuerySerializeQueuePackageRefs(
+    PSolvSack pSack,
+    Queue *pQueue,
+    char ***pppszRefs,
+    uint32_t *pdwCount
+    );
+
+uint32_t
+TDNFNativeQuerySerializePackageListRefs(
+    PSolvSack pSack,
     PSolvPackageList pPkgList,
-    Queue *pLibDeps
+    char ***pppszRefs,
+    uint32_t *pdwCount
     );
 
-void
-TDNFQueryCrosscheckAutoInstalledOrphans(
+uint32_t
+TDNFNativeQuerySerializePackageInfoRefs(
+    PTDNF_PKG_INFO pPkgInfos,
+    uint32_t dwCount,
+    char ***pppszRefs,
+    uint32_t *pdwCount
+    );
+
+uint32_t
+TDNFNativeQuerySerializeAutoInstalledRefs(
     PTDNF pTdnf,
     struct history_ctx *pHistoryCtx,
-    Queue *pLibOrphans
+    char ***pppszRefs,
+    uint32_t *pdwCount
+    );
+
+uint32_t
+TDNFNativeQueryResolvePackageRefArrayToQueue(
+    PSolvSack pSack,
+    char **ppszPackageRefs,
+    uint32_t dwCount,
+    int nInstalledOnly,
+    Queue *pQueue
+    );
+
+uint32_t
+TDNFNativeQueryResolveSinglePackageRef(
+    PSolvSack pSack,
+    const char *pszPackageRef,
+    int nInstalledOnly,
+    Id *pdwPkgId
+    );
+
+uint32_t
+TDNFNativeQueryBuildUpdateInfoSummary(
+    char **ppszLines,
+    uint32_t dwCount,
+    PTDNF_UPDATEINFO_SUMMARY *ppSummary
+    );
+
+uint32_t
+TDNFNativeQueryBuildUpdateInfo(
+    char **ppszLines,
+    uint32_t dwCount,
+    PTDNF_UPDATEINFO *ppInfo
     );
 
 //gpgcheck.c
@@ -911,28 +909,6 @@ TDNFFreeCachedRpmsArray(
     );
 
 //updateinfo.c
-uint32_t
-TDNFGetUpdateInfoPackages(
-    PSolvSack pSack,
-    Id dwPkgId,
-    PTDNF_UPDATEINFO_PKG* ppUpdateInfoPkg
-    );
-
-void
-TDNFFreeUpdateInfoReferences(
-    PTDNF_UPDATEINFO_REF pRef
-    );
-
-uint32_t
-TDNFPopulateUpdateInfoOfOneAdvisory(
-    PSolvSack pSack,
-    Id dwAdvId,
-    uint32_t dwSecurity,
-    const char*  pszSeverity,
-    uint32_t dwRebootRequired,
-    PTDNF_UPDATEINFO* ppInfo
-    );
-
 uint32_t
 TDNFGetSecuritySeverityOption(
     PTDNF pTdnf,

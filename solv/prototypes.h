@@ -330,19 +330,6 @@ SolvGetChangeLogFromId(
     PTDNF_PKG_CHANGELOG_ENTRY *ppEntries
     );
 
-uint32_t
-SolvIdIsOrphaned(
-    PSolvSack pSack,
-    Id p,
-    int *pnIsOrphan
-);
-
-uint32_t
-SolvGetAutoInstalledOrphans(
-    PSolvSack pSack,
-    struct history_ctx *pHistoryCtx,
-    Queue *pQueueAutoInstalled);
-
 // tdnfpool.c
 uint32_t
 SolvCreateSack(
@@ -468,12 +455,6 @@ SolvAddUserInstalledToJobs(
     Pool *pPool,
     struct history_ctx *pHistoryCtx
     );
-
-uint32_t
-SolvGetUpdateAdvisories(
-    PSolvSack pSack,
-    Id dwPkgIdpkg,
-    PSolvPackageList* ppPkgList);
 
 uint32_t
 SolvFindAllUpDownCandidates(
@@ -628,22 +609,6 @@ SolvUseMetaDataCache(
     PSolvSack pSack,
     PSOLV_REPO_INFO_INTERNAL pSolvRepoInfo,
     int       *nUseMetaDataCache
-    );
-
-uint32_t
-SolvFindSolvablesByNevraStr(
-    Pool *pool,
-    const char *nevra,
-    Queue* qresult,
-    int installed
-    );
-
-uint32_t
-SolvFindSolvablesByNEqualsEvrFromRepo(
-    Pool *pool,
-    Repo *repo,
-    const char *nevra,
-    Queue* qresult
     );
 
 uint32_t

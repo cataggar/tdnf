@@ -1163,9 +1163,12 @@ TDNFSolvAddMinVersions(
 {
     uint32_t dwError = 0;
     char **ppszPackages = NULL;
-    char **ppszTokens = NULL;
+    char **ppszExcludeLines = NULL;
+    uint32_t dwExcludeCount = 0;
     Map *pMapMinVersions = NULL;
-    char *pszTmp = NULL;
+    PTDNF_REPOMD_NATIVE_REPO_INPUT pRepos = NULL;
+    uint32_t dwRepoCount = 0;
+    uint32_t i = 0;
 
     if(!pTdnf || !pPool)
     {
@@ -1187,33 +1190,30 @@ TDNFSolvAddMinVersions(
 
     map_init(pMapMinVersions, pPool->nsolvables);
 
-    for (int i = 0; ppszPackages && ppszPackages[i]; i++)
+    dwError = TDNFNativeQueryBuildRepoInputs(pTdnf, &pRepos, &dwRepoCount);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    dwError = TDNFRepoMdNativeMinVersionExcludeLines(
+                  pRepos,
+                  dwRepoCount,
+                  TDNFNativeQueryInstallRoot(pTdnf),
+                  ppszPackages,
+                  &ppszExcludeLines,
+                  &dwExcludeCount);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    for(i = 0; i < dwExcludeCount; i++)
     {
-        const char *pszPkg = ppszPackages[i];
+        Id dwPkgId = 0;
 
-        dwError = TDNFAllocateString(pszPkg, &pszTmp);
+        dwError = TDNFNativeQueryResolveSinglePackageRef(
+                      pTdnf->pSack,
+                      ppszExcludeLines[i],
+                      1,
+                      &dwPkgId);
         BAIL_ON_TDNF_ERROR(dwError);
 
-        dwError = TDNFSplitStringToArray(pszTmp, (char *)"=", &ppszTokens);
-        BAIL_ON_TDNF_ERROR(dwError);
-
-        if (ppszTokens[0] && ppszTokens[1]) {
-            Dataiterator di;
-
-            dwError = dataiterator_init(&di, pPool, 0, 0, SOLVABLE_NAME, ppszTokens[0], SEARCH_STRING);
-            BAIL_ON_TDNF_ERROR(dwError);
-
-            while (dataiterator_step(&di))
-            {
-                Solvable *pSolv = pool_id2solvable(pPool, di.solvid);
-                const char *pszEvr = solvable_lookup_str(pSolv, SOLVABLE_EVR);
-                if (pool_evrcmp_str( pPool, pszEvr, ppszTokens[1], EVRCMP_COMPARE) < 0)
-                {
-                    MAPSET(pMapMinVersions, di.solvid);
-                }
-            }
-            dataiterator_free(&di);
-        }
+        MAPSET(pMapMinVersions, dwPkgId);
     }
 
     if (!pPool->considered)
@@ -1226,20 +1226,16 @@ TDNFSolvAddMinVersions(
         map_setall(pPool->considered);
     }
 
-    TDNFQueryCrosscheckMinVersions(
-        pTdnf,
-        pMapMinVersions);
-
     map_subtract(pPool->considered, pMapMinVersions);
 
 cleanup:
+    TDNFFreeStringArray(ppszExcludeLines);
+    TDNFNativeQueryFreeRepoInputs(pRepos, dwRepoCount);
     if(pMapMinVersions)
     {
         map_free(pMapMinVersions);
         TDNFFreeMemory(pMapMinVersions);
     }
-    TDNF_SAFE_FREE_MEMORY(pszTmp);
-    TDNF_SAFE_FREE_STRINGARRAY(ppszTokens);
     return dwError;
 error:
     goto cleanup;
