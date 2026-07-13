@@ -465,6 +465,69 @@ int tdnf_rpm_header_run_scriptlet(
     tdnf_rpm_scriptlet_result *result_out
 );
 
+/* --- native file erase engine (T4 building block) --- */
+
+/**
+ * Callback used by tdnf_rpm_erase_hnum() to decide whether `path`
+ * must remain on disk for another package at the current transaction
+ * phase.
+ *
+ * The callback should return:
+ *   0  -> erase engine may remove/rename the path
+ *   1  -> keep the path on disk
+ *  <0  -> callback/query failure; abort erase
+ *
+ * `path` is the package-owned absolute path (for example
+ * "/etc/foo.conf"), not rooted under `root`. `data` is the opaque
+ * pointer from tdnf_rpm_erase_options.keep_path_fn_data.
+ *
+ * When no callback is supplied, the default implementation keeps
+ * exact paths still owned by another installed package according to
+ * the native rpmdb Basenames/Dirnames data. Multi-package erase
+ * transactions with shared paths should provide an explicit callback
+ * so later erase phases can keep shared files/directories until the
+ * final owner is processed.
+ */
+typedef int (*tdnf_rpm_erase_keep_path_fn)(void *data, const char *path);
+
+typedef struct tdnf_rpm_erase_options {
+    /**
+     * librpm-style RPMTRANS_FLAG_* bitmask. The native erase engine
+     * currently consults JUSTDB only.
+     */
+    uint32_t trans_flags;
+    /**
+     * Optional keep-path probe. May be NULL for plain single-package
+     * erases that can rely on the default native rpmdb ownership
+     * query.
+     */
+    tdnf_rpm_erase_keep_path_fn keep_path_fn;
+    void *keep_path_fn_data;
+} tdnf_rpm_erase_options;
+
+/**
+ * Erase one installed package's on-disk files, identified by its
+ * sqlite rpmdb `hnum`, under `root`.
+ *
+ * This performs the filesystem half only: it skips %ghost entries,
+ * renames modified %config files to `.rpmsave`, preserves paths that
+ * must stay on disk per keep_path_fn/default ownership checks, and
+ * removes explicit directory entries bottom-up when they are empty.
+ *
+ * It does NOT remove the rpmdb row. Callers should run any surrounding
+ * scriptlet/trigger phases they need and then finish with
+ * tdnf_rpmdb_write_erase_hnum() to match real rpm's ordering.
+ *
+ * `options` may be NULL for defaults.
+ *
+ * Returns 0 on success, -1 on error (use tdnf_rpmdb_last_error()).
+ */
+int tdnf_rpm_erase_hnum(
+    const char *root,
+    uint32_t hnum,
+    const tdnf_rpm_erase_options *options
+);
+
 /* --- files-in-package iterator --- */
 
 typedef struct tdnf_rpm_files_iter tdnf_rpm_files_iter;

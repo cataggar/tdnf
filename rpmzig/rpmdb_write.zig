@@ -278,6 +278,62 @@ pub const Writer = struct {
         }
     }
 
+    pub fn readHeaderBlobCopy(
+        self: *Writer,
+        allocator: std.mem.Allocator,
+        hnum: u32,
+    ) Error![]u8 {
+        var stmt = try Statement.init(self.db, "SELECT blob FROM Packages WHERE hnum=?");
+        defer stmt.deinit();
+        try stmt.bindU32(1, hnum);
+
+        const rc = c.sqlite3_step(stmt.raw);
+        if (rc == c.SQLITE_DONE) return error.NotFound;
+        if (rc != c.SQLITE_ROW) return error.SqliteStepFailed;
+
+        const blob_ptr = c.sqlite3_column_blob(stmt.raw, 0);
+        const blob_len: usize = @intCast(c.sqlite3_column_bytes(stmt.raw, 0));
+        if (blob_ptr == null or blob_len == 0) return error.InvalidHeaderBlob;
+
+        const blob = @as([*]const u8, @ptrCast(blob_ptr))[0..blob_len];
+        return allocator.dupe(u8, blob);
+    }
+
+    pub fn pathOwnedByOtherPackage(self: *Writer, current_hnum: u32, path: []const u8) Error!bool {
+        if (path.len == 0 or path[0] != '/') {
+            return error.InvalidHeaderBlob;
+        }
+        if (std.mem.eql(u8, path, "/")) {
+            return false;
+        }
+
+        const parts = splitAbsolutePath(path);
+        var stmt = try Statement.init(
+            self.db,
+            "SELECT DISTINCT p.blob FROM 'Packages' p " ++ "JOIN 'Basenames' b ON b.hnum = p.hnum " ++ "WHERE b.key=? AND p.hnum<>? " ++ "AND EXISTS (SELECT 1 FROM 'Dirnames' d WHERE d.hnum = p.hnum AND d.key=?)",
+        );
+        defer stmt.deinit();
+        try stmt.bindText(1, parts.basename);
+        try stmt.bindU32(2, current_hnum);
+        try stmt.bindText(3, parts.dirname);
+
+        while (true) {
+            const rc = c.sqlite3_step(stmt.raw);
+            if (rc == c.SQLITE_DONE) return false;
+            if (rc != c.SQLITE_ROW) return error.SqliteStepFailed;
+
+            const blob_ptr = c.sqlite3_column_blob(stmt.raw, 0);
+            const blob_len: usize = @intCast(c.sqlite3_column_bytes(stmt.raw, 0));
+            if (blob_ptr == null or blob_len == 0) continue;
+
+            const blob = @as([*]const u8, @ptrCast(blob_ptr))[0..blob_len];
+            const hdr = header.Header.parse(blob) catch return error.InvalidHeaderBlob;
+            if (headerOwnsExactPath(hdr, path)) {
+                return true;
+            }
+        }
+    }
+
     fn initSchema(self: *Writer) Error!void {
         try self.execSql("CREATE TABLE IF NOT EXISTS 'Packages' (hnum INTEGER PRIMARY KEY AUTOINCREMENT, blob BLOB NOT NULL)");
         inline for (secondary_tables) |table| {
@@ -606,6 +662,42 @@ fn fileCountFromHeader(hdr: header.Header) usize {
     if (hdr.find(.filemodes)) |entry| return entry.count;
     if (hdr.findRaw(RPMTAG_FILESTATES)) |entry| return entry.count;
     return 0;
+}
+
+const SplitPath = struct {
+    dirname: []const u8,
+    basename: []const u8,
+};
+
+fn splitAbsolutePath(path: []const u8) SplitPath {
+    std.debug.assert(path.len > 1 and path[0] == '/');
+    const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse unreachable;
+    std.debug.assert(slash < path.len - 1);
+    return .{
+        .dirname = path[0 .. slash + 1],
+        .basename = path[slash + 1 ..],
+    };
+}
+
+fn headerOwnsExactPath(hdr: header.Header, path: []const u8) bool {
+    const parts = splitAbsolutePath(path);
+    const count = hdr.stringArrayCount(.basenames);
+
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        const basename = hdr.stringArrayItem(.basenames, i) orelse continue;
+        if (!std.mem.eql(u8, basename, parts.basename)) {
+            continue;
+        }
+
+        const dir_index = hdr.u32ArrayItem(.dirindexes, i) orelse continue;
+        const dirname = hdr.stringArrayItem(.dirnames, dir_index) orelse continue;
+        if (std.mem.eql(u8, dirname, parts.dirname)) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 fn appendDripsToHeader(
