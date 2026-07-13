@@ -13,6 +13,10 @@
 
 #include "../llconf/nodes.h"
 
+#ifdef TDNF_RPMZIG_TRANSACTION_EXECUTE
+#include "rpmtrans_native.h"
+#endif
+
 #define INSTALL_INSTALL 0
 #define INSTALL_UPGRADE 1
 #define INSTALL_REINSTALL 2
@@ -1269,6 +1273,22 @@ TDNFRunTransaction(
     BAIL_ON_TDNF_ERROR(dwError);
 #endif
 
+#ifdef TDNF_RPMZIG_TRANSACTION_EXECUTE
+    /*
+     * Native transaction executor: replaces the librpm test-run +
+     * real-run block below with the composed rpmzig
+     * install/rpmdb-write/erase/scriptlet/trigger engines. Gated on
+     * TDNF_RPMZIG_TRANSACTION_EXECUTE (opt-in via
+     * -Drpmzig-transaction-execute=true) which is off by default.
+     */
+    dwError = TDNFRunTransactionNative(pTS, pTdnf);
+    if (dwError)
+    {
+        reportProblems(pTS);
+    }
+    goto cleanup;
+#endif
+
     rpmtsClean(pTS->pTS);
     /* we checked already for the signature during TDNFTransAddInstallPkgs() */
     rpmtsSetVfyLevel(pTS->pTS, rpmtsVfyLevel(pTS->pTS) & ~RPMSIG_VERIFIABLE_TYPE);
@@ -1555,9 +1575,9 @@ TDNFTransAddInstallPkg(
                   rpmHeader,
                   pszFilePath,
                   0,
-                  NULL,
-                  NULL,
-                  NULL);
+                  headerGetString(rpmHeader, RPMTAG_NAME),
+                  headerGetString(rpmHeader, RPMTAG_EVR),
+                  headerGetString(rpmHeader, RPMTAG_ARCH));
     BAIL_ON_TDNF_ERROR(dwError);
 #endif
 

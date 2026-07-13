@@ -175,6 +175,49 @@ int tdnf_rpmdb_find_hnum_by_nevra(
     uint32_t *hnum_out
 );
 
+/**
+ * Look up every installed package hnum whose NAME matches `name`.
+ *
+ * On success writes a heap-allocated array of hnums into
+ * `*hnums_out` (free with tdnf_rpmdb_hnums_free) and the count into
+ * `*count_out`. When there are no matches, `*hnums_out` is NULL and
+ * `*count_out` is 0.
+ *
+ * Returns 0 on success, -1 on error (use tdnf_rpmdb_last_error()).
+ */
+int tdnf_rpmdb_find_hnums_by_name(
+    const char *root,
+    const char *name,
+    uint32_t **hnums_out,
+    size_t *count_out
+);
+
+/**
+ * Free an hnum array returned by tdnf_rpmdb_find_hnums_by_name.
+ * Accepts NULL.
+ */
+void tdnf_rpmdb_hnums_free(uint32_t *hnums);
+
+/**
+ * Read the raw main-header blob for the installed package with
+ * `hnum` under `root`. On success writes a heap-allocated blob
+ * pointer into `*blob_out` (free with tdnf_rpmdb_blob_free) and its
+ * length into `*len_out`.
+ *
+ * Returns 0 on success, -1 on error (use tdnf_rpmdb_last_error()).
+ */
+int tdnf_rpmdb_read_header_blob(
+    const char *root,
+    uint32_t hnum,
+    unsigned char **blob_out,
+    size_t *len_out
+);
+
+/**
+ * Free a blob returned by tdnf_rpmdb_read_header_blob. Accepts NULL.
+ */
+void tdnf_rpmdb_blob_free(unsigned char *blob);
+
 /* --- pubkey iterator (rpmdb-resident gpg-pubkey-* entries) --- */
 
 typedef struct tdnf_rpmdb_pubkeys_iter tdnf_rpmdb_pubkeys_iter;
