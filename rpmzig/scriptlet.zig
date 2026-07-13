@@ -429,8 +429,12 @@ fn runChild(
 
 fn testTmpPath(allocator: Allocator) ![]u8 {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd = c.getcwd(&buf, buf.len) orelse return error.SyscallFailed;
-    return std.fmt.allocPrint(allocator, "{s}/.scriptlet-zig-tests", .{std.mem.span(cwd)});
+    switch (linux.errno(linux.getcwd(buf[0..].ptr, buf.len))) {
+        .SUCCESS => {},
+        else => return error.SyscallFailed,
+    }
+    const cwd_len = std.mem.findScalar(u8, &buf, 0) orelse return error.SyscallFailed;
+    return std.fmt.allocPrint(allocator, "{s}/.scriptlet-zig-tests", .{buf[0..cwd_len]});
 }
 
 fn testTmpDefine(allocator: Allocator, tmp_path: []const u8) ![]u8 {

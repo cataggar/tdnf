@@ -730,6 +730,7 @@ fn dupZ(src: []const u8) ?[*:0]u8 {
 
 const cpio = @import("cpio.zig");
 const install_engine = @import("install.zig");
+const erase_engine = @import("erase.zig");
 
 const CInstallPriorHeader = extern struct {
     blob: ?[*]const u8,
@@ -778,6 +779,38 @@ fn conflictBridge(ctx: ?*anyopaque, path: []const u8) i32 {
     const path_z = std.heap.c_allocator.dupeZ(u8, path) catch return -1;
     defer std.heap.c_allocator.free(path_z);
     return cb(bridge.data, path_z);
+}
+
+const CEraseKeepPathFn = *const fn (?*anyopaque, [*:0]const u8) callconv(.c) c_int;
+
+const CEraseOptions = extern struct {
+    trans_flags: u32,
+    keep_path_fn: ?CEraseKeepPathFn,
+    keep_path_fn_data: ?*anyopaque,
+};
+
+const EraseKeepPathBridge = struct {
+    cb: ?CEraseKeepPathFn,
+    data: ?*anyopaque,
+};
+
+fn eraseKeepPathBridge(ctx: ?*anyopaque, path: []const u8) i32 {
+    const bridge: *const EraseKeepPathBridge = @ptrCast(@alignCast(ctx orelse return -1));
+    const cb = bridge.cb orelse return 0;
+    const path_z = std.heap.c_allocator.dupeZ(u8, path) catch return -1;
+    defer std.heap.c_allocator.free(path_z);
+    return cb(bridge.data, path_z);
+}
+
+const DefaultEraseKeepPathCtx = struct {
+    writer: *rpmdb_write.Writer,
+    hnum: u32,
+};
+
+fn defaultEraseKeepPath(ctx: ?*anyopaque, path: []const u8) i32 {
+    const keep_ctx: *DefaultEraseKeepPathCtx = @ptrCast(@alignCast(ctx orelse return -1));
+    const owned = keep_ctx.writer.pathOwnedByOtherPackage(keep_ctx.hnum, path) catch return -1;
+    return if (owned) 1 else 0;
 }
 
 // PR #5 of plan-pure-zig-pgp.md: pull the pure-Zig PGP verifier into
@@ -1171,6 +1204,80 @@ export fn tdnf_rpm_header_run_scriptlet(
         .outcome = @intFromEnum(result.outcome),
         .exit_status = result.exit_status,
         .signal_number = result.signal_number,
+    };
+    return 0;
+}
+
+/// Erase one installed package's on-disk files, identified by its
+/// rpmdb sqlite `hnum`, without removing the rpmdb row itself.
+export fn tdnf_rpm_erase_hnum(
+    root: ?[*:0]const u8,
+    hnum: u32,
+    options: ?*const CEraseOptions,
+) i32 {
+    clearError();
+    const root_slice: []const u8 = if (root) |p| std.mem.span(p) else "";
+
+    var writer = rpmdb_write.Writer.openRoot(root_slice) catch |err| {
+        setError("Writer.openRoot: {t}", .{err});
+        return -1;
+    };
+    defer writer.close();
+
+    const blob = writer.readHeaderBlobCopy(std.heap.c_allocator, hnum) catch |err| {
+        setError("Writer.readHeaderBlobCopy({d}): {t}", .{ hnum, err });
+        return -1;
+    };
+    defer std.heap.c_allocator.free(blob);
+
+    const hdr = header.Header.parse(blob) catch |err| {
+        setError("header.parse({d}): {t}", .{ hnum, err });
+        return -1;
+    };
+
+    var default_opts = CEraseOptions{
+        .trans_flags = 0,
+        .keep_path_fn = null,
+        .keep_path_fn_data = null,
+    };
+    const opts = options orelse &default_opts;
+
+    var custom_bridge = EraseKeepPathBridge{
+        .cb = opts.keep_path_fn,
+        .data = opts.keep_path_fn_data,
+    };
+    var default_keep_ctx = DefaultEraseKeepPathCtx{
+        .writer = &writer,
+        .hnum = hnum,
+    };
+
+    const keep_path_fn: erase_engine.KeepPathFn = if (opts.keep_path_fn != null)
+        eraseKeepPathBridge
+    else
+        defaultEraseKeepPath;
+    const keep_path_ctx: ?*anyopaque = if (opts.keep_path_fn != null)
+        &custom_bridge
+    else
+        &default_keep_ctx;
+
+    var ctx = erase_engine.Context.init(std.heap.c_allocator, hdr, .{
+        .install_root = root_slice,
+        .trans_flags = opts.trans_flags,
+        .keep_path_fn = keep_path_fn,
+        .keep_path_ctx = keep_path_ctx,
+    }) catch |err| {
+        setError("erase init: {t}", .{err});
+        return -1;
+    };
+    defer ctx.deinit();
+
+    ctx.erase() catch |err| {
+        if (ctx.last_path) |path| {
+            setError("rpm_erase_hnum({s}): {t}", .{ path, err });
+        } else {
+            setError("rpm_erase_hnum: {t}", .{err});
+        }
+        return -1;
     };
     return 0;
 }

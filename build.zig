@@ -104,6 +104,11 @@ pub fn build(b: *Build) void {
         "rpmzig-file-install-crosscheck",
         "Enable native file-install crosscheck pytests",
     ) orelse false;
+    const rpmzig_file_erase_crosscheck = b.option(
+        bool,
+        "rpmzig-file-erase-crosscheck",
+        "Enable native file-erase crosscheck pytests",
+    ) orelse false;
 
     const rpmzig_transaction_check = b.option(
         bool,
@@ -198,6 +203,8 @@ pub fn build(b: *Build) void {
         .{ .key = "PLUGIN_PATH", .value = b.fmt("{s}/{s}", .{ abs_prefix, plugin_dir_rel }) },
         .{ .key = "RPMZIG_FILE_INSTALL_CROSSCHECK", .value = if (rpmzig_file_install_crosscheck) "true" else "false" },
         .{ .key = "NATIVE_FILE_INSTALL_BINARY", .value = b.fmt("{s}/libexec/tdnf/tdnf-rpm-install", .{abs_prefix}) },
+        .{ .key = "RPMZIG_FILE_ERASE_CROSSCHECK", .value = if (rpmzig_file_erase_crosscheck) "true" else "false" },
+        .{ .key = "NATIVE_FILE_ERASE_BINARY", .value = b.fmt("{s}/libexec/tdnf/tdnf-rpm-erase", .{abs_prefix}) },
     });
 
     // ----- generated text files (autoconf_at style: @VAR@ only) ----- //
@@ -800,6 +807,33 @@ pub fn build(b: *Build) void {
         b.getInstallStep().dependOn(&install.step);
     }
 
+    // tdnf-rpm-erase: smoke-test exe for the native file-erase
+    // engine.
+    {
+        const mod = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .pic = true,
+        });
+        mod.addIncludePath(b.path("rpmzig"));
+        mod.addCSourceFiles(.{
+            .root = b.path("rpmzig"),
+            .files = &.{"erase_main.c"},
+            .flags = &tdnf_cflags,
+        });
+        mod.linkLibrary(rpmzig_lib);
+        const exe = b.addExecutable(.{
+            .name = "tdnf-rpm-erase",
+            .root_module = mod,
+        });
+        hardenExe(exe);
+        const install = b.addInstallArtifact(exe, .{
+            .dest_dir = .{ .override = .{ .custom = "libexec/tdnf" } },
+        });
+        b.getInstallStep().dependOn(&install.step);
+    }
+
     // tdnf-rpm-verify: smoke-test exe for the pure-Zig signature
     // verifier. Builds the same in-memory --key / --rpmdb keyring
     // path libtdnf uses.
@@ -848,12 +882,11 @@ pub fn build(b: *Build) void {
     tdnf_so_mod.addCSourceFiles(.{
         .root = b.path("client"),
         .files = &.{
-            "api.c",      "client.c",   "config.c",    "eventdata.c",
-            "goal.c",     "gpgcheck.c", "init.c",      "packageutils.c",
-            "querynative.c",
-            "plugins.c",  "repo.c",     "repoutils.c", "remoterepo.c",
-            "repolist.c", "resolve.c",  "rpmtrans.c",  "updateinfo.c",
-            "utils.c",    "history.c",  "varsdir.c",
+            "api.c",         "client.c",   "config.c",  "eventdata.c",
+            "goal.c",        "gpgcheck.c", "init.c",    "packageutils.c",
+            "querynative.c", "plugins.c",  "repo.c",    "repoutils.c",
+            "remoterepo.c",  "repolist.c", "resolve.c", "rpmtrans.c",
+            "updateinfo.c",  "utils.c",    "history.c", "varsdir.c",
         },
         .flags = &tdnf_cflags,
     });

@@ -455,7 +455,7 @@ const DeferredDir = struct {
     gid: u32,
 };
 
-const HeaderFile = struct {
+pub const HeaderFile = struct {
     path: []u8,
     mode: u32,
     flags: u32,
@@ -467,13 +467,13 @@ const HeaderFile = struct {
     caps: ?[]const u8,
 };
 
-const Manifest = struct {
+pub const Manifest = struct {
     allocator: Allocator,
     files: []HeaderFile,
     processed: []bool,
     index: std.StringHashMap(usize),
 
-    fn init(allocator: Allocator, hdr: header.Header) Error!Manifest {
+    pub fn init(allocator: Allocator, hdr: header.Header) Error!Manifest {
         const count = hdr.stringArrayCount(.basenames);
         const files = try allocator.alloc(HeaderFile, count);
         errdefer allocator.free(files);
@@ -521,7 +521,7 @@ const Manifest = struct {
         };
     }
 
-    fn deinit(self: *Manifest) void {
+    pub fn deinit(self: *Manifest) void {
         for (self.files) |file| {
             self.allocator.free(file.path);
         }
@@ -586,31 +586,31 @@ fn shouldSkipFile(flags: u32, trans_flags: u32) bool {
     return false;
 }
 
-fn isConfig(flags: u32) bool {
+pub fn isConfig(flags: u32) bool {
     return (flags & RPMFILE_CONFIG) != 0;
 }
 
-fn isNoReplace(flags: u32) bool {
+pub fn isNoReplace(flags: u32) bool {
     return (flags & RPMFILE_NOREPLACE) != 0;
 }
 
-fn isGhost(flags: u32) bool {
+pub fn isGhost(flags: u32) bool {
     return (flags & RPMFILE_GHOST) != 0;
 }
 
-fn isExcludedDoc(flags: u32) bool {
+pub fn isExcludedDoc(flags: u32) bool {
     return (flags & (RPMFILE_DOC | RPMFILE_README)) != 0;
 }
 
-fn isRegularMode(mode: u32) bool {
+pub fn isRegularMode(mode: u32) bool {
     return (mode & S_IFMT_U32) == S_IFREG_U32;
 }
 
-fn isDirMode(mode: u32) bool {
+pub fn isDirMode(mode: u32) bool {
     return (mode & S_IFMT_U32) == S_IFDIR_U32;
 }
 
-fn normalizeAbsolutePathOwned(allocator: Allocator, raw: []const u8) Error![]u8 {
+pub fn normalizeAbsolutePathOwned(allocator: Allocator, raw: []const u8) Error![]u8 {
     if (raw.len == 0 or raw[0] != '/') {
         return error.InvalidPackagePath;
     }
@@ -662,7 +662,7 @@ fn isValidPackagePath(path: []const u8) bool {
     return true;
 }
 
-fn joinInstallRootAndPathOwned(
+pub fn joinInstallRootAndPathOwned(
     allocator: Allocator,
     install_root: []const u8,
     path: []const u8,
@@ -708,14 +708,14 @@ fn mkdirExistingOk(path_z: [*:0]const u8) InstallError!void {
     return error.SyscallFailed;
 }
 
-fn pathExists(allocator: Allocator, path: []const u8) bool {
+pub fn pathExists(allocator: Allocator, path: []const u8) bool {
     const path_z = allocator.dupeZ(u8, path) catch return false;
     defer allocator.free(path_z);
     var st: c.struct_stat = undefined;
     return c.lstat(path_z.ptr, &st) == 0;
 }
 
-fn removeExistingPath(allocator: Allocator, path: []const u8) Error!void {
+pub fn removeExistingPath(allocator: Allocator, path: []const u8) Error!void {
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
 
@@ -736,7 +736,7 @@ fn removeExistingPath(allocator: Allocator, path: []const u8) Error!void {
     }
 }
 
-fn renameExistingPath(allocator: Allocator, src: []const u8, dst: []const u8) Error!void {
+pub fn renameExistingPath(allocator: Allocator, src: []const u8, dst: []const u8) Error!void {
     try ensureParentDirs(allocator, dst);
     try removeExistingPath(allocator, dst);
 
@@ -894,7 +894,7 @@ fn normalizeDigestAlgo(algo: u32, digest_hex: []const u8) InstallError!DigestAlg
     };
 }
 
-fn fileDigestMatches(
+pub fn fileDigestMatches(
     allocator: Allocator,
     path: []const u8,
     digest_algo_raw: u32,
