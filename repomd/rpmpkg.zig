@@ -364,6 +364,7 @@ fn appendRelations(
             .version = evr.version,
             .release = evr.release,
             .pre = spec.kind == .requires and (raw_flags & (dep_pre_in | dep_pre_un)) != 0,
+            .sense = raw_flags,
         }) catch return error.OutOfMemory;
     }
 
@@ -924,6 +925,7 @@ test "builds package from rpm header tags" {
     try testing.expectEqualStrings("1.0", requires[0].version.?);
     try testing.expectEqualStrings("2", requires[0].release.?);
     try testing.expect(requires[0].pre);
+    try testing.expectEqual(dep_greater | dep_equal | dep_pre_in, requires[0].sense);
     try testing.expectEqualStrings("dep-two", requires[1].name);
     try testing.expectEqualStrings("LT", requires[1].flags.?);
     try testing.expectEqual(model.CompareOp.lt, requires[1].comparison);
@@ -931,6 +933,7 @@ test "builds package from rpm header tags" {
     try testing.expectEqualStrings("3.1", requires[1].version.?);
     try testing.expect(requires[1].release == null);
     try testing.expect(!requires[1].pre);
+    try testing.expectEqual(dep_less, requires[1].sense);
 
     try testing.expectEqual(@as(usize, 1), built.package.relationsFor(.recommends, built.relations).len);
     try testing.expectEqualStrings("strong-addon", built.package.relationsFor(.recommends, built.relations)[0].name);

@@ -1033,6 +1033,19 @@ fn expectAdvisoryIds(expected: []const []const u8, actual: []const []const u8) !
     }
 }
 
+test "rpm version comparison matches key rpmvercmp edge cases" {
+    const testing = std.testing;
+
+    try testing.expectEqual(@as(i32, 0), compareEvr(0, "1", "1", null, "1", "1"));
+    try testing.expectEqual(@as(i32, 0), compareEvr(null, "10.0001", null, null, "10.1", null));
+    try testing.expect(compareEvr(null, "2.0.1a", null, null, "2.0.1", null) > 0);
+    try testing.expect(compareEvr(null, "6.0.rc1", null, null, "6.0", null) > 0);
+    try testing.expect(compareEvr(null, "1.0~rc1", null, null, "1.0", null) < 0);
+    try testing.expect(compareEvr(null, "1.0^git1", null, null, "1.0", null) > 0);
+    try testing.expect(compareEvr(null, "1.0^git1", null, null, "1.01", null) < 0);
+    try testing.expect(compareEvr(null, "1.0~rc1^git1", null, null, "1.0~rc1", null) > 0);
+}
+
 const fixture_relations = [_]model.Relation{
     .{ .name = "alpha", .comparison = .eq, .epoch = 0, .version = "1.0", .release = "1" },
     .{ .name = "libalpha", .comparison = .eq, .epoch = 2, .version = "3.1", .release = "4" },
