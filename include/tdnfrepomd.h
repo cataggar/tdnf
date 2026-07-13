@@ -379,6 +379,19 @@ TDNFRepoMdNativeRequiresForPackageRefs(
     uint32_t *pdwCount
     );
 
+/*
+ * Return serialized `repo<US>nevra` lines for the subset of
+ * `ppszAutoInstalledRefs` that are still orphaned when evaluated against the
+ * installed RPM metadata rooted at `pszInstallRoot`.
+ */
+uint32_t
+TDNFRepoMdNativeAutoInstalledOrphanLines(
+    const char *pszInstallRoot,
+    char **ppszAutoInstalledRefs,
+    char ***pppszLines,
+    uint32_t *pdwCount
+    );
+
 #ifdef __cplusplus
 }
 #endif

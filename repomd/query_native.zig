@@ -888,6 +888,51 @@ pub export fn TDNFRepoMdNativeRequiresForPackageRefs(
     return 0;
 }
 
+pub export fn TDNFRepoMdNativeAutoInstalledOrphanLines(
+    root_dir: ?[*:0]const u8,
+    raw_auto_installed_refs: [*c][*c]u8,
+    out_lines: ?*[*c][*c]u8,
+    out_count: ?*u32,
+) u32 {
+    clearError();
+    if (out_lines) |out| out.* = null;
+    if (out_count) |out| out.* = 0;
+
+    const lines_out = out_lines orelse return invalidParameter("null orphan output", .{});
+    const count_out = out_count orelse return invalidParameter("null orphan count output", .{});
+    if (raw_auto_installed_refs == null) {
+        return invalidParameter("null auto-installed refs", .{});
+    }
+
+    var ctx = NativeContext.init(std.heap.c_allocator);
+    defer ctx.deinit();
+
+    ctx.load(
+        null,
+        0,
+        root_dir,
+        true,
+        .{},
+        .{
+            .need_relations = true,
+            .need_files = true,
+        },
+    ) catch |err| {
+        return mapQueryError(err);
+    };
+
+    const lines = computeAutoInstalledOrphanLines(&ctx, raw_auto_installed_refs) catch |err| {
+        return mapQueryError(err);
+    };
+    defer freeOwnedSlices(lines);
+
+    lines_out.* = (tryBuildCStringArray(lines) catch |err| {
+        return mapQueryError(err);
+    }) orelse null;
+    count_out.* = @intCast(lines.len);
+    return 0;
+}
+
 fn clearError() void {
     last_query_error_len = 0;
 }
@@ -2336,6 +2381,122 @@ fn computeRequiresLines(ctx: *NativeContext, raw_package_refs: [*c][*c]u8) ![][]
     return try results.toOwnedSlice();
 }
 
+const orphan_dep_kinds = [_]model.DependencyKind{
+    .requires,
+    .recommends,
+    .suggests,
+    .supplements,
+    .enhances,
+};
+
+fn computeAutoInstalledOrphanLines(ctx: *NativeContext, raw_auto_installed_refs: [*c][*c]u8) ![][]const u8 {
+    const refs = try collectAutoInstalledOrphans(ctx, raw_auto_installed_refs);
+    defer std.heap.c_allocator.free(refs);
+    return serializePackageRefs(ctx, refs);
+}
+
+fn collectAutoInstalledOrphans(ctx: *NativeContext, raw_auto_installed_refs: [*c][*c]u8) ![]PackageRef {
+    var results = std.array_list.Managed(PackageRef).init(std.heap.c_allocator);
+    defer results.deinit();
+
+    var index_ref: usize = 0;
+    while (raw_auto_installed_refs[index_ref] != null) : (index_ref += 1) {
+        const spec = try parsePackageRefSpec(std.mem.span(raw_auto_installed_refs[index_ref]));
+        const ref = resolvePackageRef(ctx, spec) orelse continue;
+        if (ctx.datasets.items[ref.dataset_index].kind != .installed) {
+            continue;
+        }
+        if (packageIsOrphaned(&ctx.datasets.items[ref.dataset_index], ref.package_index)) {
+            try results.append(ref);
+        }
+    }
+
+    return try results.toOwnedSlice();
+}
+
+fn packageIsOrphaned(dataset: *const LoadedDataset, package_index: usize) bool {
+    const repository = dataset.repository;
+    const candidate = repository.packages[package_index];
+    const candidate_files = candidate.fileEntries(repository.files);
+    const candidate_provides = candidate.relationsFor(.provides, repository.relations);
+
+    for (repository.packages, 0..) |pkg, other_index| {
+        if (other_index == package_index) {
+            continue;
+        }
+        if (packageRequiresCandidate(pkg, repository.relations, candidate.nevra.name, candidate_files, candidate_provides)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+fn packageRequiresCandidate(
+    pkg: model.Package,
+    relations: []const model.Relation,
+    candidate_name: []const u8,
+    candidate_files: []const model.FileEntry,
+    candidate_provides: []const model.Relation,
+) bool {
+    for (orphan_dep_kinds) |kind| {
+        for (pkg.relationsFor(kind, relations)) |relation| {
+            if (relationMatchesCandidateName(relation, candidate_name) or
+                relationMatchesCandidateFiles(relation, candidate_files) or
+                relationMatchesCandidateProvides(relation, candidate_provides))
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+fn relationMatchesCandidateName(relation: model.Relation, candidate_name: []const u8) bool {
+    return std.mem.eql(u8, relation.name, candidate_name) and
+        relation.comparison == .none and
+        !relationHasVersion(relation);
+}
+
+fn relationMatchesCandidateFiles(relation: model.Relation, candidate_files: []const model.FileEntry) bool {
+    for (candidate_files) |entry| {
+        if (std.mem.eql(u8, relation.name, entry.path)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+fn relationMatchesCandidateProvides(relation: model.Relation, candidate_provides: []const model.Relation) bool {
+    const query = dependencyQueryFromRelation(relation);
+
+    for (candidate_provides) |provide| {
+        if (query_index.relationMatchesQuery(provide, query)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+fn dependencyQueryFromRelation(relation: model.Relation) query_index.DependencyQuery {
+    return .{
+        .name = relation.name,
+        .comparison = relation.comparison,
+        .epoch = relation.epoch,
+        .version = relation.version,
+        .release = relation.release,
+    };
+}
+
+fn relationHasVersion(relation: model.Relation) bool {
+    return relation.epoch != null or
+        (relation.version != null and relation.version.?.len != 0) or
+        (relation.release != null and relation.release.?.len != 0);
+}
+
 fn selectInstalledUpdateInfoPackageRefs(ctx: *NativeContext, package_specs: [*c][*c]u8) ![]PackageRef {
     const installed_index = ctx.installedDatasetIndex() orelse return try std.heap.c_allocator.alloc(PackageRef, 0);
     const dataset = &ctx.datasets.items[installed_index];
@@ -2855,4 +3016,115 @@ fn spanRequired(raw: ?[*:0]const u8, comptime label: []const u8) ?[]const u8 {
         return null;
     }
     return text;
+}
+
+test "native autoremove orphan detection keeps packages required by name file and provides" {
+    const testing = std.testing;
+
+    var ctx = NativeContext.init(testing.allocator);
+    defer ctx.deinit();
+
+    const arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+
+    try ctx.datasets.append(.{
+        .kind = .installed,
+        .repo_id = system_repo_name,
+        .arena_state = arena_state,
+        .repository = .{
+            .packages = @constCast((&[_]model.Package{
+                .{
+                    .pkg_id = "pkg-user-app",
+                    .nevra = .{ .name = "user-app", .version = "1.0", .release = "1", .arch = "x86_64" },
+                    .checksum = .{ .kind = "sha256", .value = "11" },
+                    .location = .{},
+                    .requires = .{ .start = 0, .len = 1 },
+                },
+                .{
+                    .pkg_id = "pkg-dep",
+                    .nevra = .{ .name = "dep", .version = "2.0", .release = "1", .arch = "x86_64" },
+                    .checksum = .{ .kind = "sha256", .value = "22" },
+                    .location = .{},
+                    .provides = .{ .start = 1, .len = 1 },
+                },
+                .{
+                    .pkg_id = "pkg-orphan",
+                    .nevra = .{ .name = "orphan", .version = "1.0", .release = "1", .arch = "noarch" },
+                    .checksum = .{ .kind = "sha256", .value = "33" },
+                    .location = .{},
+                    .provides = .{ .start = 2, .len = 1 },
+                },
+                .{
+                    .pkg_id = "pkg-virtual-consumer",
+                    .nevra = .{ .name = "virtual-consumer", .version = "1.0", .release = "1", .arch = "noarch" },
+                    .checksum = .{ .kind = "sha256", .value = "44" },
+                    .location = .{},
+                    .requires = .{ .start = 3, .len = 1 },
+                },
+                .{
+                    .pkg_id = "pkg-shared-a",
+                    .nevra = .{ .name = "shared-a", .version = "1.0", .release = "1", .arch = "x86_64" },
+                    .checksum = .{ .kind = "sha256", .value = "55" },
+                    .location = .{},
+                    .provides = .{ .start = 4, .len = 1 },
+                },
+                .{
+                    .pkg_id = "pkg-shared-b",
+                    .nevra = .{ .name = "shared-b", .version = "1.0", .release = "1", .arch = "x86_64" },
+                    .checksum = .{ .kind = "sha256", .value = "66" },
+                    .location = .{},
+                    .provides = .{ .start = 5, .len = 1 },
+                },
+                .{
+                    .pkg_id = "pkg-file-consumer",
+                    .nevra = .{ .name = "file-consumer", .version = "1.0", .release = "1", .arch = "noarch" },
+                    .checksum = .{ .kind = "sha256", .value = "77" },
+                    .location = .{},
+                    .requires = .{ .start = 6, .len = 1 },
+                },
+                .{
+                    .pkg_id = "pkg-file-provider",
+                    .nevra = .{ .name = "file-provider", .version = "1.0", .release = "1", .arch = "x86_64" },
+                    .checksum = .{ .kind = "sha256", .value = "88" },
+                    .location = .{},
+                    .provides = .{ .start = 7, .len = 1 },
+                    .files = .{ .start = 0, .len = 1 },
+                },
+            })[0..]),
+            .relations = @constCast((&[_]model.Relation{
+                .{ .name = "dep", .comparison = .ge, .version = "2.0", .release = "1" },
+                .{ .name = "dep", .comparison = .eq, .version = "2.0", .release = "1" },
+                .{ .name = "orphan", .comparison = .eq, .version = "1.0", .release = "1" },
+                .{ .name = "virtual-feature" },
+                .{ .name = "virtual-feature", .comparison = .eq, .version = "1" },
+                .{ .name = "virtual-feature", .comparison = .eq, .version = "1" },
+                .{ .name = "/usr/bin/demo-tool" },
+                .{ .name = "file-provider", .comparison = .eq, .version = "1.0", .release = "1" },
+            })[0..]),
+            .files = @constCast((&[_]model.FileEntry{
+                .{ .path = "/usr/bin/demo-tool" },
+            })[0..]),
+        },
+    });
+
+    const raw_refs = [_][*:0]const u8{
+        "@System\x1fdep-2.0-1.x86_64",
+        "@System\x1forphan-1.0-1.noarch",
+        "@System\x1fshared-a-1.0-1.x86_64",
+        "@System\x1fshared-b-1.0-1.x86_64",
+        "@System\x1ffile-provider-1.0-1.x86_64",
+    };
+    const auto_refs = [_][*c]u8{
+        @ptrCast(@constCast(raw_refs[0])),
+        @ptrCast(@constCast(raw_refs[1])),
+        @ptrCast(@constCast(raw_refs[2])),
+        @ptrCast(@constCast(raw_refs[3])),
+        @ptrCast(@constCast(raw_refs[4])),
+        null,
+    };
+
+    const lines = try computeAutoInstalledOrphanLines(&ctx, @constCast(&auto_refs));
+    defer freeOwnedSlices(lines);
+
+    try testing.expectEqual(@as(usize, 1), lines.len);
+    try testing.expectEqualStrings("@System\x1forphan-1.0-1.noarch", lines[0]);
 }
