@@ -72,6 +72,7 @@ TDNFQueryCrosscheckUpdateInfoSummary(
     char **ppszPackageNameSpecs,
     uint32_t dwSecurity,
     const char *pszSeverity,
+    uint32_t dwLibError,
     PTDNF_UPDATEINFO_SUMMARY pSummary
     );
 
@@ -82,6 +83,7 @@ TDNFQueryCrosscheckUpdateInfo(
     uint32_t dwSecurity,
     const char *pszSeverity,
     uint32_t dwRebootRequired,
+    uint32_t dwLibError,
     PTDNF_UPDATEINFO pUpdateInfo
     );
 
