@@ -658,6 +658,35 @@ int tdnf_rpm_erase_hnum(
     const tdnf_rpm_erase_options *options
 );
 
+/**
+ * Erase on-disk files described by a raw stored header blob, under
+ * `root`, without touching any rpmdb rows.
+ *
+ * Unlike tdnf_rpm_erase_hnum(), the header is supplied directly by
+ * the caller. This is used on the UPGRADE path: after
+ * tdnf_rpmdb_write_replace() has atomically overwritten the OLD
+ * package's row with the NEW blob, the OLD hnum no longer resolves
+ * to the OLD header, but the caller already captured that blob before
+ * write_replace. Passing it back here removes any files unique to the
+ * OLD version (files the NEW version does not ship).
+ *
+ * When no keep_path callback is supplied, the default probe queries
+ * the live native rpmdb for any installed package that owns each
+ * path. Because upgrade calls this AFTER write_replace, the rpmdb
+ * reflects the NEW package's manifest at the replaced hnum, so paths
+ * shared with the NEW version are naturally preserved.
+ *
+ * `options` may be NULL for defaults.
+ *
+ * Returns 0 on success, -1 on error (use tdnf_rpmdb_last_error()).
+ */
+int tdnf_rpm_erase_header_blob(
+    const char *root,
+    const unsigned char *blob,
+    size_t blob_len,
+    const tdnf_rpm_erase_options *options
+);
+
 /* --- files-in-package iterator --- */
 
 typedef struct tdnf_rpm_files_iter tdnf_rpm_files_iter;

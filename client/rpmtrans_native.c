@@ -451,23 +451,27 @@ EraseOldAfterReplace(
 
     /*
      * File-erase for the old header. The default keep-path probe
-     * queries the native rpmdb for any OTHER installed package
-     * (i.e. the new row we just wrote) that owns each path, and
-     * keeps those paths in place. Files/directories unique to the
-     * old header are removed. The old row itself has already been
-     * atomically replaced by write_replace() so tdnf_rpm_erase_hnum
-     * is NOT invoked here — only the header-driven filesystem
-     * cleanup step is needed. We call an internal helper: because
-     * the C-ABI only offers erase-by-hnum (which reads the blob),
-     * and the old row is gone, we can't reuse it. Instead we skip
-     * the on-disk cleanup for now and rely on the fresh install
-     * having overwritten shared paths. Files unique to the old
-     * version will remain as orphans.
-     *
-     * TODO: expose tdnf_rpm_erase_header_blob(...) that takes a raw
-     * blob so we can properly clean up removed files on upgrade.
+     * queries the native rpmdb for any package that owns each path.
+     * By this point write_replace() has atomically overwritten the
+     * OLD row at its hnum with the NEW header blob, so the rpmdb's
+     * Basenames/Dirnames tables reflect the NEW package's file list
+     * there. As a result the default probe keeps:
+     *   - paths still owned by the NEW package (shared/renamed-to-
+     *     same-name files never get deleted),
+     *   - paths owned by any completely different installed package
+     *     (shared-ownership across unrelated packages),
+     * and only removes paths unique to the OLD version. %ghost and
+     * modified-%config handling (rename to .rpmsave) reuse the same
+     * logic as tdnf_rpm_erase_hnum since it's the same engine.
      */
-    (void)erase_options;
+    if (tdnf_rpm_erase_header_blob(pszInstallRoot,
+                                   pbOldBlob, nOldLen,
+                                   &erase_options) != 0)
+    {
+        LogRpmzigError("rpm_erase_header_blob");
+        dwError = ERROR_TDNF_TRANSACTION_FAILED;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
 
     /* %postun on old (arg1=1) */
     dwError = RunScriptlet(pbOldBlob, nOldLen,
@@ -680,10 +684,12 @@ ProcessInstallItem(
         BAIL_ON_TDNF_ERROR(dwError);
 
         /*
-         * For upgrade/reinstall: now run the old-package cleanup
-         * scriptlets (arg1=1). The rpmdb row is already atomically
-         * replaced. Filesystem cleanup of files unique to the old
-         * package is not yet done in this PR (see EraseOldAfterReplace).
+         * For upgrade/reinstall: run the old-package cleanup
+         * (%preun, file-erase for files unique to the old version,
+         * %postun — all with arg1=1 because the new instance
+         * survives). The rpmdb row itself was atomically replaced
+         * by write_replace() above; EraseOldAfterReplace only does
+         * the filesystem + scriptlet halves.
          */
         {
             size_t i = 0;

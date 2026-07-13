@@ -1502,6 +1502,102 @@ export fn tdnf_rpm_erase_hnum(
     return 0;
 }
 
+/// Erase on-disk files listed in a raw stored header blob, under
+/// `root`, without touching the rpmdb rows themselves.
+///
+/// Unlike `tdnf_rpm_erase_hnum` (which looks up an existing rpmdb row
+/// by hnum), this variant takes the header blob directly. It is used
+/// on the UPGRADE path: after `tdnf_rpmdb_write_replace` has
+/// atomically overwritten the OLD package's rpmdb row with the NEW
+/// blob, we still need to clean up any files unique to the OLD
+/// version (files that the NEW version does not ship). We call this
+/// with the OLD header blob captured *before* write_replace.
+///
+/// The default keep-path probe queries the live rpmdb for ANY
+/// installed package that owns each path (no hnum is excluded). By
+/// the time this is called on upgrade, the rpmdb reflects the NEW
+/// package's file list at the replaced hnum, so paths shared with
+/// (or renamed-into) the NEW version are naturally preserved, and
+/// paths owned by unrelated packages are preserved too.
+export fn tdnf_rpm_erase_header_blob(
+    root: ?[*:0]const u8,
+    blob: ?[*]const u8,
+    blob_len: usize,
+    options: ?*const CEraseOptions,
+) i32 {
+    clearError();
+    const root_slice: []const u8 = if (root) |p| std.mem.span(p) else "";
+    const blob_ptr = blob orelse {
+        setError("null header blob", .{});
+        return -1;
+    };
+    if (blob_len == 0) {
+        setError("empty header blob", .{});
+        return -1;
+    }
+    const blob_slice = blob_ptr[0..blob_len];
+
+    var writer = rpmdb_write.Writer.openRoot(root_slice) catch |err| {
+        setError("Writer.openRoot: {t}", .{err});
+        return -1;
+    };
+    defer writer.close();
+
+    const hdr = header.Header.parse(blob_slice) catch |err| {
+        setError("header.parse(blob): {t}", .{err});
+        return -1;
+    };
+
+    var default_opts = CEraseOptions{
+        .trans_flags = 0,
+        .keep_path_fn = null,
+        .keep_path_fn_data = null,
+    };
+    const opts = options orelse &default_opts;
+
+    var custom_bridge = EraseKeepPathBridge{
+        .cb = opts.keep_path_fn,
+        .data = opts.keep_path_fn_data,
+    };
+    // hnum == 0 is not a valid rpmdb hnum (AUTOINCREMENT starts at 1),
+    // so the default probe excludes nothing and the freshly-written
+    // NEW row will be seen as an "other package" owning shared paths.
+    var default_keep_ctx = DefaultEraseKeepPathCtx{
+        .writer = &writer,
+        .hnum = 0,
+    };
+
+    const keep_path_fn: erase_engine.KeepPathFn = if (opts.keep_path_fn != null)
+        eraseKeepPathBridge
+    else
+        defaultEraseKeepPath;
+    const keep_path_ctx: ?*anyopaque = if (opts.keep_path_fn != null)
+        &custom_bridge
+    else
+        &default_keep_ctx;
+
+    var ctx = erase_engine.Context.init(std.heap.c_allocator, hdr, .{
+        .install_root = root_slice,
+        .trans_flags = opts.trans_flags,
+        .keep_path_fn = keep_path_fn,
+        .keep_path_ctx = keep_path_ctx,
+    }) catch |err| {
+        setError("erase init: {t}", .{err});
+        return -1;
+    };
+    defer ctx.deinit();
+
+    ctx.erase() catch |err| {
+        if (ctx.last_path) |path| {
+            setError("rpm_erase_header_blob({s}): {t}", .{ path, err });
+        } else {
+            setError("rpm_erase_header_blob: {t}", .{err});
+        }
+        return -1;
+    };
+    return 0;
+}
+
 /// Files-in-package iterator state. Each call to
 /// `tdnf_rpm_file_next_filename` returns the next file path or 0 at
 /// end-of-archive.

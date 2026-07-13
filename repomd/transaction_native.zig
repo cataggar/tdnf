@@ -109,6 +109,7 @@ const TransactionOperation = enum(u32) {
     install = c.TDNF_REPOMD_NATIVE_TRANSACTION_OP_INSTALL,
     reinstall = c.TDNF_REPOMD_NATIVE_TRANSACTION_OP_REINSTALL,
     erase = c.TDNF_REPOMD_NATIVE_TRANSACTION_OP_ERASE,
+    upgrade = c.TDNF_REPOMD_NATIVE_TRANSACTION_OP_UPGRADE,
 };
 
 const TransactionPackage = struct {
@@ -471,10 +472,11 @@ fn parseTransaction(
             c.TDNF_REPOMD_NATIVE_TRANSACTION_OP_INSTALL => TransactionOperation.install,
             c.TDNF_REPOMD_NATIVE_TRANSACTION_OP_REINSTALL => TransactionOperation.reinstall,
             c.TDNF_REPOMD_NATIVE_TRANSACTION_OP_ERASE => TransactionOperation.erase,
+            c.TDNF_REPOMD_NATIVE_TRANSACTION_OP_UPGRADE => TransactionOperation.upgrade,
             else => return error.InvalidParameter,
         };
         switch (op) {
-            .install, .reinstall => {
+            .install, .reinstall, .upgrade => {
                 const path = item.pszPath orelse {
                     setError("transaction item {d} missing rpm path", .{input_index});
                     return error.InvalidParameter;
@@ -532,12 +534,37 @@ fn parseTransaction(
         }
     }
 
+    // Two-pass replacement detection:
+    //   pass 1: exact NEVRA match (reinstall or install-of-already-installed)
+    //   pass 2: name+arch match against an `upgrade` op — the solver has
+    //           already decided this addition supersedes the installed
+    //           instance, so mark the installed row as replaced so it
+    //           drops out of the "final" repository view. This is what
+    //           lets the file-conflict check ignore paths that the OLD
+    //           version legitimately shares with (or hands off to) the
+    //           NEW version. Plain `install` op is NOT enough — the
+    //           tdnf-multi multi-install case shares name+arch but must
+    //           coexist, and the solver emits `install` for it.
     for (installed_repo.packages, 0..) |pkg, installed_index| {
         if (tx.erase_mask[installed_index]) {
             continue;
         }
         for (tx.added.items) |added| {
             if (sameNevra(pkg, added.view.pkg)) {
+                tx.replace_mask[installed_index] = true;
+                break;
+            }
+        }
+    }
+    for (installed_repo.packages, 0..) |pkg, installed_index| {
+        if (tx.erase_mask[installed_index] or tx.replace_mask[installed_index]) {
+            continue;
+        }
+        for (tx.added.items) |added| {
+            if (added.op != .upgrade) {
+                continue;
+            }
+            if (sameNameArch(pkg, added.view.pkg)) {
                 tx.replace_mask[installed_index] = true;
                 break;
             }
@@ -1255,6 +1282,11 @@ fn sameNevra(left: model.Package, right: model.Package) bool {
     return std.mem.eql(u8, left.nevra.name, right.nevra.name) and
         std.mem.eql(u8, left.nevra.arch, right.nevra.arch) and
         query_index.comparePackageVersions(left, right) == 0;
+}
+
+fn sameNameArch(left: model.Package, right: model.Package) bool {
+    return std.mem.eql(u8, left.nevra.name, right.nevra.name) and
+        std.mem.eql(u8, left.nevra.arch, right.nevra.arch);
 }
 
 fn containsIndex(items: []const usize, wanted: usize) bool {
