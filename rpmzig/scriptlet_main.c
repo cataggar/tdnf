@@ -1,5 +1,5 @@
 /*
- * tdnf-rpm-scriptlet — smoke-test exe for the native rpmzig shell
+ * tdnf-rpm-scriptlet — smoke-test exe for the native rpmzig
  * scriptlet executor.
  *
  * Usage:

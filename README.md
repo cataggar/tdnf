@@ -26,6 +26,18 @@ Debug build:
 zig build -Doptimize=Debug install --prefix ./out
 ```
 
+Optional native Lua scriptlet support (for `<lua>` RPM scriptlets) is
+available with:
+
+```sh
+zig build -Drpmzig-lua=true install --prefix ./out
+```
+
+That optional path requires a Lua 5.4 development package. The default
+link name is `lua`; on distros that package the library under another
+name (for example Debian/Ubuntu's `liblua5.4-dev`), pass
+`-Drpmzig-lua-lib=lua5.4`.
+
 ## Configuration
 
 Create `tdnf.conf` under `/etc/tdnf/`:

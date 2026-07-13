@@ -7,6 +7,7 @@ const linux = std.os.linux;
 
 const c = @cImport({
     @cInclude("errno.h");
+    @cInclude("lua_scriptlet.h");
     @cInclude("signal.h");
     @cInclude("stdlib.h");
     @cInclude("string.h");
@@ -172,7 +173,17 @@ pub fn runHeaderScript(
         };
     }
     if (std.mem.eql(u8, interpreter[0], "<lua>")) {
-        return error.UnsupportedInterpreter;
+        const body = script_body orelse {
+            return .{
+                .ran = false,
+                .critical = info.critical,
+                .outcome = .not_run,
+            };
+        };
+        if (c.tdnf_rpmzig_lua_supported() == 0) {
+            return error.UnsupportedInterpreter;
+        }
+        return try runLuaScriptProcess(arena_alloc, &config, body, info, options);
     }
 
     var script_file: ?TempScript = null;
@@ -219,7 +230,7 @@ pub fn runHeaderScript(
         return error.SyscallFailed;
     }
     if (pid == 0) {
-        runChild(
+        runExecChild(
             argv.items.ptr,
             path_env.ptr,
             install_root_z.ptr,
@@ -228,6 +239,40 @@ pub fn runHeaderScript(
         );
     }
 
+    return waitForChild(pid, info.critical);
+}
+
+fn runLuaScriptProcess(
+    allocator: Allocator,
+    config: *const txn_config.TxnConfig,
+    body: []const u8,
+    info: PhaseInfo,
+    options: Options,
+) RunError!Result {
+    const path_env = try allocator.dupeZ(u8, config.value(.install_script_path));
+    const install_root_z = try allocator.dupeZ(u8, config.installRoot());
+
+    const pid = c.fork();
+    if (pid < 0) {
+        return error.SyscallFailed;
+    }
+    if (pid == 0) {
+        runLuaChild(
+            body.ptr,
+            body.len,
+            path_env.ptr,
+            install_root_z.ptr,
+            options.arg1 orelse -1,
+            options.arg2 orelse -1,
+            options.script_fd orelse -1,
+            options.redirect_stdout_to_stderr,
+        );
+    }
+
+    return waitForChild(pid, info.critical);
+}
+
+fn waitForChild(pid: c_int, critical: bool) RunError!Result {
     var status: c_int = 0;
     while (true) {
         switch (std.posix.errno(std.posix.system.waitpid(pid, &status, 0))) {
@@ -241,7 +286,7 @@ pub fn runHeaderScript(
         const exit_status: i32 = std.posix.W.EXITSTATUS(@bitCast(status));
         return .{
             .ran = true,
-            .critical = info.critical,
+            .critical = critical,
             .outcome = if (exit_status == 0) .ok else .exited,
             .exit_status = exit_status,
         };
@@ -249,7 +294,7 @@ pub fn runHeaderScript(
     if (std.posix.W.IFSIGNALED(@bitCast(status))) {
         return .{
             .ran = true,
-            .critical = info.critical,
+            .critical = critical,
             .outcome = .signaled,
             .signal_number = @as(i32, @intCast(@intFromEnum(std.posix.W.TERMSIG(@bitCast(status))))),
         };
@@ -257,7 +302,7 @@ pub fn runHeaderScript(
 
     return .{
         .ran = true,
-        .critical = info.critical,
+        .critical = critical,
         .outcome = .signaled,
         .signal_number = 0,
     };
@@ -383,13 +428,12 @@ fn ensureDirPathAbsolute(allocator: Allocator, dir_path: []const u8) RunError!vo
     }
 }
 
-fn runChild(
-    argv: [*]const ?[*:0]const u8,
+fn prepareChildProcess(
     path_env: [*:0]u8,
     install_root: [*:0]u8,
     script_fd: c_int,
     redirect_stdout_to_stderr: bool,
-) noreturn {
+) bool {
     const null_rc = linux.openat(
         std.posix.AT.FDCWD,
         "/dev/null",
@@ -411,20 +455,52 @@ fn runChild(
     }
 
     if (c.setenv("PATH", path_env, 1) != 0) {
-        c._exit(127);
+        return false;
     }
 
     if (!std.mem.eql(u8, std.mem.span(install_root), "/")) {
         if (std.posix.errno(linux.chroot(install_root)) != .SUCCESS) {
-            c._exit(127);
+            return false;
         }
     }
     if (std.posix.errno(linux.chdir("/")) != .SUCCESS) {
+        return false;
+    }
+
+    return true;
+}
+
+fn runExecChild(
+    argv: [*]const ?[*:0]const u8,
+    path_env: [*:0]u8,
+    install_root: [*:0]u8,
+    script_fd: c_int,
+    redirect_stdout_to_stderr: bool,
+) noreturn {
+    if (!prepareChildProcess(path_env, install_root, script_fd, redirect_stdout_to_stderr)) {
         c._exit(127);
     }
 
     _ = c.execv(argv[0].?, @ptrCast(argv));
     c._exit(127);
+}
+
+fn runLuaChild(
+    script_ptr: [*]const u8,
+    script_len: usize,
+    path_env: [*:0]u8,
+    install_root: [*:0]u8,
+    arg1: c_int,
+    arg2: c_int,
+    script_fd: c_int,
+    redirect_stdout_to_stderr: bool,
+) noreturn {
+    if (!prepareChildProcess(path_env, install_root, script_fd, redirect_stdout_to_stderr)) {
+        c._exit(127);
+    }
+
+    const rc = c.tdnf_rpmzig_lua_run(script_ptr, script_len, arg1, arg2);
+    c._exit(if (rc == 0) 0 else 1);
 }
 
 fn testTmpPath(allocator: Allocator) ![]u8 {
@@ -492,6 +568,73 @@ fn writeBeU32(buf: []u8, value: u32) void {
     buf[1] = @intCast((value >> 16) & 0xff);
     buf[2] = @intCast((value >> 8) & 0xff);
     buf[3] = @intCast(value & 0xff);
+}
+
+fn writeAbsoluteFile(allocator: Allocator, path: []const u8, bytes: []const u8) !void {
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+
+    const open_rc = linux.openat(
+        std.posix.AT.FDCWD,
+        path_z.ptr,
+        .{
+            .ACCMODE = .WRONLY,
+            .CREAT = true,
+            .TRUNC = true,
+            .CLOEXEC = true,
+        },
+        0o644,
+    );
+    switch (std.posix.errno(open_rc)) {
+        .SUCCESS => {},
+        else => return error.SyscallFailed,
+    }
+    const fd: c_int = @intCast(open_rc);
+
+    if (writeAll(fd, bytes) != 0) {
+        _ = linux.close(fd);
+        return error.SyscallFailed;
+    }
+    if (std.posix.errno(linux.close(fd)) != .SUCCESS) {
+        return error.SyscallFailed;
+    }
+}
+
+fn readAbsoluteFile(allocator: Allocator, path: []const u8) ![]u8 {
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+
+    const open_rc = linux.openat(
+        std.posix.AT.FDCWD,
+        path_z.ptr,
+        .{ .ACCMODE = .RDONLY, .CLOEXEC = true },
+        0,
+    );
+    switch (std.posix.errno(open_rc)) {
+        .SUCCESS => {},
+        else => return error.SyscallFailed,
+    }
+    const fd: c_int = @intCast(open_rc);
+    defer _ = linux.close(fd);
+
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(allocator);
+
+    var buf: [256]u8 = undefined;
+    while (true) {
+        const read_rc = linux.read(fd, buf[0..].ptr, buf.len);
+        switch (std.posix.errno(read_rc)) {
+            .SUCCESS => {
+                const count: usize = @intCast(read_rc);
+                if (count == 0) break;
+                try bytes.appendSlice(allocator, buf[0..count]);
+            },
+            .INTR => continue,
+            else => return error.SyscallFailed,
+        }
+    }
+
+    return bytes.toOwnedSlice(allocator);
 }
 
 test "runHeaderScript succeeds with default shell" {
@@ -567,4 +710,150 @@ test "runHeaderScript passes arg1" {
     });
     try std.testing.expect(result.ran);
     try std.testing.expectEqual(Outcome.ok, result.outcome);
+}
+
+test "runHeaderScript handles Lua bash-style postun" {
+    const allocator = std.testing.allocator;
+    const tmp_path = try testTmpPath(allocator);
+    defer allocator.free(tmp_path);
+    try ensureDirPathAbsolute(allocator, tmp_path);
+
+    const shells_path = try std.fmt.allocPrint(allocator, "{s}/lua-shells", .{tmp_path});
+    defer allocator.free(shells_path);
+    try writeAbsoluteFile(allocator, shells_path, "/bin/bash\n/usr/bin/fish\n/bin/sh\n");
+
+    const script = try std.fmt.allocPrint(
+        allocator,
+        \\local shells_path = "{s}"
+        \\if arg[2] == 0 then
+        \\  t = {{}}
+        \\  for line in io.lines(shells_path) do
+        \\    if line ~= "/bin/bash" and line ~= "/bin/sh" then
+        \\      table.insert(t, line)
+        \\    end
+        \\  end
+        \\  f = io.open(shells_path, "w+")
+        \\  for _, line in pairs(t) do
+        \\    f:write(line .. "\n")
+        \\  end
+        \\  f:close()
+        \\end
+        \\
+    ,
+        .{shells_path},
+    );
+    defer allocator.free(script);
+    const script_data = try std.fmt.allocPrint(allocator, "{s}\x00", .{script});
+    defer allocator.free(script_data);
+
+    const blob = try buildTestHeaderBlob(allocator, &.{
+        .{ .tag = @intFromEnum(header.TagId.postun), .typ = 6, .count = 1, .data = script_data },
+        .{ .tag = @intFromEnum(header.TagId.postunprog), .typ = 6, .count = 1, .data = "<lua>\x00" },
+    });
+    defer allocator.free(blob);
+
+    const hdr = try header.Header.parse(blob);
+    if (c.tdnf_rpmzig_lua_supported() == 0) {
+        try std.testing.expectError(error.UnsupportedInterpreter, runHeaderScript(allocator, hdr, .postun, .{
+            .install_root = "/",
+            .arg1 = 0,
+        }));
+        return;
+    }
+
+    const result = try runHeaderScript(allocator, hdr, .postun, .{
+        .install_root = "/",
+        .arg1 = 0,
+    });
+    try std.testing.expect(result.ran);
+    try std.testing.expectEqual(Outcome.ok, result.outcome);
+
+    const contents = try readAbsoluteFile(allocator, shells_path);
+    defer allocator.free(contents);
+    try std.testing.expectEqualStrings("/usr/bin/fish\n", contents);
+}
+
+test "runHeaderScript exposes Lua rpm and posix helpers" {
+    const allocator = std.testing.allocator;
+    const tmp_path = try testTmpPath(allocator);
+    defer allocator.free(tmp_path);
+    try ensureDirPathAbsolute(allocator, tmp_path);
+
+    const unique: u64 = (@as(u64, @intCast(c.time(null))) << 32) ^
+        @as(u64, @intCast(c.getpid()));
+    const root_path = try std.fmt.allocPrint(allocator, "{s}/lua-helper-{d}", .{ tmp_path, unique });
+    defer allocator.free(root_path);
+    const marker_path = try std.fmt.allocPrint(allocator, "{s}/marker", .{root_path});
+    defer allocator.free(marker_path);
+    const spawned_path = try std.fmt.allocPrint(allocator, "{s}/spawned", .{root_path});
+    defer allocator.free(spawned_path);
+    const execed_path = try std.fmt.allocPrint(allocator, "{s}/execed", .{root_path});
+    defer allocator.free(execed_path);
+
+    const script = try std.fmt.allocPrint(
+        allocator,
+        \\local root = "{s}"
+        \\local marker = "{s}"
+        \\local spawned = "{s}"
+        \\local execed = "{s}"
+        \\assert(rpm.vercmp("6.0.rc1", "6.0") > 0)
+        \\assert(posix.uname("%r") ~= nil)
+        \\assert(posix.mkdir(root) == 0)
+        \\assert(posix.mkdir(root .. "/dir") == 0)
+        \\local f = io.open(marker, "w+")
+        \\f:write("marker")
+        \\f:close()
+        \\assert(posix.utime(marker) == 0)
+        \\assert(posix.chmod(marker, 0555) == 0)
+        \\assert(posix.symlink("dir", root .. "/link") == 0)
+        \\local st = posix.stat(root .. "/link")
+        \\assert(st and st.type == "link")
+        \\assert(posix.readlink(root .. "/link") == "dir")
+        \\assert(posix.access(root .. "/dir", "x") == 0)
+        \\local seen_dir = false
+        \\for entry in posix.files(root) do
+        \\  if entry == "dir" then
+        \\    seen_dir = true
+        \\  end
+        \\end
+        \\assert(seen_dir)
+        \\local matches = rpm.glob(root .. "/d*")
+        \\assert(matches[1] == root .. "/dir")
+        \\assert(rpm.spawn({{"/bin/sh", "-c", "printf spawned"}}, {{stdout = spawned}}) == 0)
+        \\assert(rpm.execute("/bin/sh", "-c", "printf execed > " .. execed) == 0)
+        \\
+    ,
+        .{ root_path, marker_path, spawned_path, execed_path },
+    );
+    defer allocator.free(script);
+    const script_data = try std.fmt.allocPrint(allocator, "{s}\x00", .{script});
+    defer allocator.free(script_data);
+
+    const blob = try buildTestHeaderBlob(allocator, &.{
+        .{ .tag = @intFromEnum(header.TagId.pretrans), .typ = 6, .count = 1, .data = script_data },
+        .{ .tag = @intFromEnum(header.TagId.pretransprog), .typ = 6, .count = 1, .data = "<lua>\x00" },
+    });
+    defer allocator.free(blob);
+
+    const hdr = try header.Header.parse(blob);
+    if (c.tdnf_rpmzig_lua_supported() == 0) {
+        try std.testing.expectError(error.UnsupportedInterpreter, runHeaderScript(allocator, hdr, .pretrans, .{
+            .install_root = "/",
+        }));
+        return;
+    }
+
+    const result = try runHeaderScript(allocator, hdr, .pretrans, .{
+        .install_root = "/",
+    });
+    try std.testing.expect(result.ran);
+    try std.testing.expectEqual(Outcome.ok, result.outcome);
+
+    const spawned = try readAbsoluteFile(allocator, spawned_path);
+    defer allocator.free(spawned);
+    try std.testing.expectEqualStrings("spawned", spawned);
+
+    const execed = try readAbsoluteFile(allocator, execed_path);
+    defer allocator.free(execed);
+    try std.testing.expectEqualStrings("execed", execed);
 }

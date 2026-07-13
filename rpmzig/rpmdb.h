@@ -376,7 +376,7 @@ int tdnf_rpm_file_install(
     const tdnf_rpm_install_options *options
 );
 
-/* --- native shell-scriptlet execution primitive (T4 building block) --- */
+/* --- native scriptlet execution primitive (T4 building block) --- */
 
 typedef enum tdnf_rpm_scriptlet_phase {
     TDNF_RPM_SCRIPTLET_PHASE_PRE = 0,
@@ -441,13 +441,14 @@ typedef struct tdnf_rpm_scriptlet_result {
 } tdnf_rpm_scriptlet_result;
 
 /**
- * Execute one package/transaction shell scriptlet extracted from a
+ * Execute one package/transaction scriptlet extracted from a
  * raw RPM main-header blob.
  *
  * The header blob must match the format returned by
  * tdnf_rpm_file_main_header_blob() or stored in the sqlite rpmdb
- * Packages.blob column. Lua (`<lua>`) interpreters are intentionally
- * unsupported here and return -1.
+ * Packages.blob column. Shell scriptlets are supported by default.
+ * Lua (`<lua>`) scriptlets are supported only when built with
+ * `zig build -Drpmzig-lua=true ...`; otherwise they return -1.
  *
  * On success, `*result_out` is always populated. A non-zero script
  * exit is reported in `result_out->outcome` plus `exit_status`; it is

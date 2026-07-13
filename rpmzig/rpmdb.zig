@@ -1123,7 +1123,7 @@ export fn tdnf_rpm_file_install(
     return 0;
 }
 
-/// Run one package/transaction shell scriptlet extracted from a raw
+/// Run one package/transaction scriptlet extracted from a raw
 /// RPM main-header blob.
 export fn tdnf_rpm_header_run_scriptlet(
     header_blob: ?[*]const u8,
