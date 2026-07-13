@@ -281,6 +281,8 @@ TDNFGetAutoInstalledOrphans(
     dwError = SolvGetAutoInstalledOrphans(pSack, pHistoryCtx, pQueueGoal);
     BAIL_ON_TDNF_ERROR(dwError);
 
+    TDNFQueryCrosscheckAutoInstalledOrphans(pTdnf, pHistoryCtx, pQueueGoal);
+
 cleanup:
     if(pHistoryCtx)
     {

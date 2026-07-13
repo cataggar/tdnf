@@ -122,6 +122,13 @@ TDNFQueryCrosscheckBuildDependencies(
     Queue *pLibDeps
     );
 
+void
+TDNFQueryCrosscheckAutoInstalledOrphans(
+    PTDNF pTdnf,
+    struct history_ctx *pHistoryCtx,
+    Queue *pLibOrphans
+    );
+
 //gpgcheck.c
 uint32_t
 ReadGPGKeyFile(

@@ -90,6 +90,14 @@ QueryCrosscheckSerializeQueueMatches(
     );
 
 static uint32_t
+QueryCrosscheckSerializeAutoInstalledRefs(
+    PTDNF pTdnf,
+    struct history_ctx *pHistoryCtx,
+    char ***pppszRefs,
+    uint32_t *pdwCount
+    );
+
+static uint32_t
 QueryCrosscheckSerializePkgInfoMatches(
     PTDNF_PKG_INFO pPkgInfos,
     uint32_t dwCount,
@@ -1327,6 +1335,78 @@ error:
     goto cleanup;
 }
 
+void
+TDNFQueryCrosscheckAutoInstalledOrphans(
+    PTDNF pTdnf,
+    struct history_ctx *pHistoryCtx,
+    Queue *pLibOrphans
+    )
+{
+    uint32_t dwError = 0;
+    uint32_t dwNativeError = 0;
+    uint32_t dwLegacyCount = 0;
+    uint32_t dwNativeCount = 0;
+    uint32_t dwAutoRefCount = 0;
+    char **ppszLegacy = NULL;
+    char **ppszNative = NULL;
+    char **ppszAutoRefs = NULL;
+
+    if(!pTdnf || !pTdnf->pSack || !pHistoryCtx || !pLibOrphans)
+    {
+        goto cleanup;
+    }
+
+    dwError = QueryCrosscheckSerializeQueueMatches(
+                  pTdnf->pSack->pPool,
+                  pLibOrphans,
+                  &ppszLegacy,
+                  &dwLegacyCount);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    dwError = QueryCrosscheckSerializeAutoInstalledRefs(
+                  pTdnf,
+                  pHistoryCtx,
+                  &ppszAutoRefs,
+                  &dwAutoRefCount);
+    BAIL_ON_TDNF_ERROR(dwError);
+    (void)dwAutoRefCount;
+
+    dwNativeError = TDNFRepoMdNativeAutoInstalledOrphanLines(
+                        QueryCrosscheckInstallRoot(pTdnf),
+                        ppszAutoRefs,
+                        &ppszNative,
+                        &dwNativeCount);
+    if(dwNativeError)
+    {
+        QueryCrosscheckLog(
+            "autoremove",
+            "native orphan detection failed (%u): %s\n",
+            dwNativeError,
+            TDNFRepoMdNativeQueryLastError());
+        goto cleanup;
+    }
+
+    QueryCrosscheckSortStringArray(ppszLegacy, dwLegacyCount);
+    QueryCrosscheckSortStringArray(ppszNative, dwNativeCount);
+
+    dwError = QueryCrosscheckCompareLineArrays(
+                  "autoremove",
+                  ppszLegacy,
+                  dwLegacyCount,
+                  ppszNative,
+                  dwNativeCount);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+cleanup:
+    TDNFFreeStringArray(ppszLegacy);
+    TDNFFreeStringArray(ppszNative);
+    TDNFFreeStringArray(ppszAutoRefs);
+    return;
+error:
+    QueryCrosscheckLog("autoremove", "serialization failure (%u)\n", dwError);
+    goto cleanup;
+}
+
 static uint32_t
 QueryCrosscheckBuildRepoInputs(
     PTDNF pTdnf,
@@ -2298,6 +2378,89 @@ error:
 }
 
 static uint32_t
+QueryCrosscheckSerializeAutoInstalledRefs(
+    PTDNF pTdnf,
+    struct history_ctx *pHistoryCtx,
+    char ***pppszRefs,
+    uint32_t *pdwCount
+    )
+{
+    uint32_t dwError = 0;
+    uint32_t dwCount = 0;
+    uint32_t dwIndex = 0;
+    char **ppszRefs = NULL;
+    Pool *pPool = NULL;
+    Id p = 0;
+    Solvable *s = NULL;
+
+    if(!pTdnf || !pTdnf->pSack || !pHistoryCtx || !pppszRefs || !pdwCount)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    pPool = pTdnf->pSack->pPool;
+
+    FOR_REPO_SOLVABLES(pPool->installed, p, s)
+    {
+        const char *pszName = pool_id2str(pPool, s->name);
+        int nIsAuto = 0;
+        int rc = history_get_auto_flag(pHistoryCtx, pszName, &nIsAuto);
+
+        if(rc != 0)
+        {
+            dwError = ERROR_TDNF_HISTORY_ERROR;
+            BAIL_ON_TDNF_ERROR(dwError);
+        }
+        if(nIsAuto)
+        {
+            dwCount++;
+        }
+    }
+
+    dwError = TDNFAllocateMemory(
+                  dwCount + 1,
+                  sizeof(char *),
+                  (void **)&ppszRefs);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    FOR_REPO_SOLVABLES(pPool->installed, p, s)
+    {
+        const char *pszName = pool_id2str(pPool, s->name);
+        int nIsAuto = 0;
+        int rc = history_get_auto_flag(pHistoryCtx, pszName, &nIsAuto);
+
+        if(rc != 0)
+        {
+            dwError = ERROR_TDNF_HISTORY_ERROR;
+            BAIL_ON_TDNF_ERROR(dwError);
+        }
+        if(!nIsAuto)
+        {
+            continue;
+        }
+
+        dwError = QueryCrosscheckSerializePackageIdLine(
+                      pPool,
+                      p,
+                      &ppszRefs[dwIndex++]);
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    *pppszRefs = ppszRefs;
+    *pdwCount = dwCount;
+
+cleanup:
+    return dwError;
+error:
+    if(ppszRefs)
+    {
+        TDNFFreeStringArray(ppszRefs);
+    }
+    goto cleanup;
+}
+
+static uint32_t
 QueryCrosscheckSerializeMinVersionMap(
     Pool *pPool,
     Map *pMap,
@@ -2920,6 +3083,18 @@ TDNFQueryCrosscheckBuildDependencies(
     (void)pGoalPkgs;
     (void)pPkgList;
     (void)pLibDeps;
+}
+
+void
+TDNFQueryCrosscheckAutoInstalledOrphans(
+    PTDNF pTdnf,
+    struct history_ctx *pHistoryCtx,
+    Queue *pLibOrphans
+    )
+{
+    (void)pTdnf;
+    (void)pHistoryCtx;
+    (void)pLibOrphans;
 }
 
 #endif
