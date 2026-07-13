@@ -104,6 +104,77 @@ int tdnf_rpmdb_iter_next_header_blob(
  */
 void tdnf_rpmdb_string_free(char *s);
 
+/* --- native sqlite rpmdb write path --- */
+
+/**
+ * Insert one package into the sqlite rpmdb under `root`.
+ *
+ * The package header comes from `rpm_path`. The writer augments it the
+ * same way real rpm does for an installed package: translated
+ * signature-header tags, INSTALLTIME / INSTALLTID / INSTALLCOLOR, and
+ * FILESTATES.
+ *
+ * `file_states` may be NULL when the caller wants the default
+ * all-zero FILESTATES vector; otherwise it must point to exactly one
+ * byte per file in the package payload.
+ *
+ * On success writes the newly allocated rpmdb `hnum` into `*hnum_out`
+ * when non-NULL.
+ *
+ * Returns 0 on success, -1 on error (use tdnf_rpmdb_last_error()).
+ */
+int tdnf_rpmdb_write_install(
+    const char *root,
+    const char *rpm_path,
+    uint32_t install_tid,
+    uint32_t install_time,
+    uint32_t install_color,
+    const unsigned char *file_states,
+    size_t file_state_count,
+    uint32_t *hnum_out
+);
+
+/**
+ * Replace an existing rpmdb row identified by `old_hnum` with the
+ * package at `rpm_path`, allocating a fresh replacement `hnum` like
+ * real rpm does for upgrade/reinstall writes.
+ *
+ * Returns 0 on success, -1 on error.
+ */
+int tdnf_rpmdb_write_replace(
+    const char *root,
+    uint32_t old_hnum,
+    const char *rpm_path,
+    uint32_t install_tid,
+    uint32_t install_time,
+    uint32_t install_color,
+    const unsigned char *file_states,
+    size_t file_state_count,
+    uint32_t *new_hnum_out
+);
+
+/**
+ * Erase one installed package row, identified by its sqlite `hnum`,
+ * from the rpmdb under `root`.
+ *
+ * Returns 0 on success, -1 on error.
+ */
+int tdnf_rpmdb_write_erase_hnum(const char *root, uint32_t hnum);
+
+/**
+ * Find the sqlite `hnum` for `nevra` under `root`.
+ *
+ * Returns:
+ *    1 when found (`*hnum_out` populated)
+ *    0 when no installed package matches
+ *   -1 on error
+ */
+int tdnf_rpmdb_find_hnum_by_nevra(
+    const char *root,
+    const char *nevra,
+    uint32_t *hnum_out
+);
+
 /* --- pubkey iterator (rpmdb-resident gpg-pubkey-* entries) --- */
 
 typedef struct tdnf_rpmdb_pubkeys_iter tdnf_rpmdb_pubkeys_iter;

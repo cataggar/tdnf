@@ -19,6 +19,7 @@ const std = @import("std");
 const sqlite = @import("sqlite");
 const header = @import("rpm_header");
 const pkgfile = @import("rpm_pkgfile");
+const rpmdb_write = @import("rpmdb_write.zig");
 pub const txn_config = @import("txn_config.zig");
 const c = sqlite.c;
 const libc = @cImport({
@@ -34,6 +35,9 @@ pub const DEFAULT_DBPATH = txn_config.DEFAULT_DBPATH;
 pub const DEFAULT_TMPPATH = txn_config.DEFAULT_TMPPATH;
 pub const DEFAULT_INSTALL_SCRIPT_PATH = txn_config.DEFAULT_INSTALL_SCRIPT_PATH;
 pub const DEFAULT_SCRIPT_INTERPRETER = txn_config.DEFAULT_SCRIPT_INTERPRETER;
+pub const RpmDbWriter = rpmdb_write.Writer;
+pub const RpmDbInstallOptions = rpmdb_write.InstallOptions;
+pub const DEFAULT_INSTALL_COLOR = rpmdb_write.DEFAULT_INSTALL_COLOR;
 
 const PKG_TABLE = "Packages";
 
@@ -392,6 +396,169 @@ export fn tdnf_rpmdb_iter_next_header_blob(
 /// don't have to think about which allocator we used.)
 export fn tdnf_rpmdb_string_free(s: ?[*:0]u8) void {
     if (s) |p| libc.free(@ptrCast(p));
+}
+
+// -------------------------------------------------------------------
+// Native sqlite write path
+// -------------------------------------------------------------------
+
+export fn tdnf_rpmdb_write_install(
+    root: ?[*:0]const u8,
+    rpm_path: ?[*:0]const u8,
+    install_tid: u32,
+    install_time: u32,
+    install_color: u32,
+    file_states: ?[*]const u8,
+    file_state_count: usize,
+    hnum_out: ?*u32,
+) i32 {
+    clearError();
+    const path_ptr = rpm_path orelse {
+        setError("null rpm_path", .{});
+        return -1;
+    };
+    const path_slice = std.mem.span(path_ptr);
+    const path_z = std.heap.c_allocator.dupeZ(u8, path_slice) catch {
+        setError("out of memory", .{});
+        return -1;
+    };
+    defer std.heap.c_allocator.free(path_z);
+
+    const root_slice: []const u8 = if (root) |p| std.mem.span(p) else "";
+    var writer = rpmdb_write.Writer.openRoot(root_slice) catch |err| {
+        setError("Writer.openRoot: {t}", .{err});
+        return -1;
+    };
+    defer writer.close();
+
+    const states_slice: ?[]const u8 = if (file_state_count == 0)
+        null
+    else if (file_states) |ptr|
+        ptr[0..file_state_count]
+    else {
+        setError("null file_states with non-zero count", .{});
+        return -1;
+    };
+
+    const hnum = writer.installRpmPath(path_z, .{
+        .install_tid = install_tid,
+        .install_time = if (install_time == 0) null else install_time,
+        .install_color = install_color,
+        .file_states = states_slice,
+    }) catch |err| {
+        setError("Writer.installRpmPath({s}): {t}", .{ path_slice, err });
+        return -1;
+    };
+    if (hnum_out) |out| out.* = hnum;
+    return 0;
+}
+
+export fn tdnf_rpmdb_write_replace(
+    root: ?[*:0]const u8,
+    old_hnum: u32,
+    rpm_path: ?[*:0]const u8,
+    install_tid: u32,
+    install_time: u32,
+    install_color: u32,
+    file_states: ?[*]const u8,
+    file_state_count: usize,
+    new_hnum_out: ?*u32,
+) i32 {
+    clearError();
+    const path_ptr = rpm_path orelse {
+        setError("null rpm_path", .{});
+        return -1;
+    };
+    const path_slice = std.mem.span(path_ptr);
+    const path_z = std.heap.c_allocator.dupeZ(u8, path_slice) catch {
+        setError("out of memory", .{});
+        return -1;
+    };
+    defer std.heap.c_allocator.free(path_z);
+
+    const root_slice: []const u8 = if (root) |p| std.mem.span(p) else "";
+    var writer = rpmdb_write.Writer.openRoot(root_slice) catch |err| {
+        setError("Writer.openRoot: {t}", .{err});
+        return -1;
+    };
+    defer writer.close();
+
+    const states_slice: ?[]const u8 = if (file_state_count == 0)
+        null
+    else if (file_states) |ptr|
+        ptr[0..file_state_count]
+    else {
+        setError("null file_states with non-zero count", .{});
+        return -1;
+    };
+
+    var rpm = pkgfile.RpmFile.open(std.heap.c_allocator, path_z) catch |err| {
+        setError("RpmFile.open({s}): {t}", .{ path_slice, err });
+        return -1;
+    };
+    defer rpm.close(std.heap.c_allocator);
+
+    const new_hnum = writer.replaceRpm(old_hnum, &rpm, .{
+        .install_tid = install_tid,
+        .install_time = if (install_time == 0) null else install_time,
+        .install_color = install_color,
+        .file_states = states_slice,
+    }) catch |err| {
+        setError("Writer.replaceRpm({s}): {t}", .{ path_slice, err });
+        return -1;
+    };
+    if (new_hnum_out) |out| out.* = new_hnum;
+    return 0;
+}
+
+export fn tdnf_rpmdb_write_erase_hnum(root: ?[*:0]const u8, hnum: u32) i32 {
+    clearError();
+    const root_slice: []const u8 = if (root) |p| std.mem.span(p) else "";
+    var writer = rpmdb_write.Writer.openRoot(root_slice) catch |err| {
+        setError("Writer.openRoot: {t}", .{err});
+        return -1;
+    };
+    defer writer.close();
+
+    writer.eraseHnum(hnum) catch |err| {
+        setError("Writer.eraseHnum({d}): {t}", .{ hnum, err });
+        return -1;
+    };
+    return 0;
+}
+
+export fn tdnf_rpmdb_find_hnum_by_nevra(
+    root: ?[*:0]const u8,
+    nevra: ?[*:0]const u8,
+    hnum_out: ?*u32,
+) i32 {
+    clearError();
+    const nevra_ptr = nevra orelse {
+        setError("null nevra", .{});
+        return -1;
+    };
+    const out = hnum_out orelse {
+        setError("null hnum_out", .{});
+        return -1;
+    };
+
+    const root_slice: []const u8 = if (root) |p| std.mem.span(p) else "";
+    var writer = rpmdb_write.Writer.openRoot(root_slice) catch |err| {
+        setError("Writer.openRoot: {t}", .{err});
+        return -1;
+    };
+    defer writer.close();
+
+    const found = writer.findHnumByNevra(std.heap.c_allocator, std.mem.span(nevra_ptr)) catch |err| {
+        setError("Writer.findHnumByNevra: {t}", .{err});
+        return -1;
+    };
+    if (found) |hnum| {
+        out.* = hnum;
+        return 1;
+    }
+    out.* = 0;
+    return 0;
 }
 
 // -------------------------------------------------------------------
@@ -880,6 +1047,7 @@ test {
     // pull in header.zig + pkgfile.zig + cpio.zig tests
     _ = header;
     _ = pkgfile;
+    _ = rpmdb_write;
     _ = cpio;
     _ = txn_config;
     // PGP submodules (PR #1 of plan-pure-zig-pgp.md). Imported here
