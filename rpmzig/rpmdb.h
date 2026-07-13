@@ -241,6 +241,23 @@ void tdnf_rpm_file_close(tdnf_rpm_file *fh);
 char *tdnf_rpm_file_nevra(tdnf_rpm_file *fh);
 
 /**
+ * Returns the raw main-header blob for this rpm file.
+ *
+ * The returned bytes alias the file handle's owned buffer and remain
+ * valid until tdnf_rpm_file_close(). The blob omits the 8-byte
+ * standalone-header magic prefix and matches the rpmdb sqlite
+ * Packages.blob format; callers can pass it back to
+ * tdnf_rpm_file_install() as prior package metadata.
+ *
+ * Returns 0 on success, -1 on NULL arguments.
+ */
+int tdnf_rpm_file_main_header_blob(
+    tdnf_rpm_file *fh,
+    const unsigned char **out,
+    size_t *out_len
+);
+
+/**
  * Returns the payload compressor name as a static C string
  * ("none", "gzip", "bzip2", "xz", "lzma", "zstd", "lz4", or
  * "unknown"). Lifetime: static; do not free.
@@ -281,6 +298,82 @@ int tdnf_rpm_file_decompress_payload(
     tdnf_rpm_file *fh,
     unsigned char **out,
     size_t *out_size
+);
+
+/* --- native file installation engine (T4 building block) --- */
+
+typedef enum tdnf_rpm_install_kind {
+    TDNF_RPM_INSTALL_KIND_INSTALL = 0,
+    TDNF_RPM_INSTALL_KIND_UPGRADE = 1,
+    TDNF_RPM_INSTALL_KIND_REINSTALL = 2,
+} tdnf_rpm_install_kind;
+
+typedef struct tdnf_rpm_install_prior_header {
+    const unsigned char *blob;
+    size_t len;
+} tdnf_rpm_install_prior_header;
+
+/**
+ * Callback used by tdnf_rpm_file_install() to ask whether `path`
+ * conflicts with a file owned by another installed package that is
+ * not being replaced in the current transaction.
+ *
+ * The callback should return:
+ *   0  -> no conflict
+ *   1  -> conflict; abort installation with ERROR_TDNF_TRANSACTION_FAILED
+ *  <0  -> callback/query failure; abort installation
+ *
+ * `path` is the package-owned absolute path (for example
+ * "/etc/foo.conf"), not rooted under install_root. `data` is the
+ * opaque pointer from tdnf_rpm_install_options.conflict_fn_data.
+ */
+typedef int (*tdnf_rpm_install_conflict_fn)(void *data, const char *path);
+
+typedef struct tdnf_rpm_install_options {
+    /**
+     * Install-root prefix. Pass NULL or "" for "/".
+     */
+    const char *install_root;
+    /**
+     * librpm-style RPMTRANS_FLAG_* bitmask. The native engine
+     * currently consults JUSTDB, NODOCS, NOCAPS, and NOCONFIGS.
+     */
+    uint32_t trans_flags;
+    /**
+     * Controls config-file upgrade/reinstall semantics.
+     */
+    tdnf_rpm_install_kind install_kind;
+    /**
+     * Prior package headers being replaced or reinstalled. Each blob
+     * is a raw header-v3 payload matching rpmdb sqlite Packages.blob
+     * rows or tdnf_rpm_file_main_header_blob().
+     */
+    const tdnf_rpm_install_prior_header *prior_headers;
+    size_t prior_header_count;
+    /**
+     * Optional ownership-conflict probe for #110 integration. May be
+     * NULL when the caller does not yet have native file-ownership
+     * data; in that case the engine only enforces config-file
+     * replacement rules against prior_headers.
+     */
+    tdnf_rpm_install_conflict_fn conflict_fn;
+    void *conflict_fn_data;
+} tdnf_rpm_install_options;
+
+/**
+ * Install this rpm file's payload into install_root using the native
+ * rpmzig file-installation engine.
+ *
+ * The engine applies file contents plus mode, ownership, and mtime,
+ * preserves hardlinks, honours config(noreplace)/config overwrite
+ * semantics using prior_headers, skips %ghost entries, and honours
+ * NODOCS/NOCONFIGS/justdb/nocaps transaction flags.
+ *
+ * Returns 0 on success, -1 on error (use tdnf_rpmdb_last_error()).
+ */
+int tdnf_rpm_file_install(
+    tdnf_rpm_file *fh,
+    const tdnf_rpm_install_options *options
 );
 
 /* --- files-in-package iterator --- */

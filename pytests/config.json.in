@@ -8,6 +8,8 @@
     "small_cache_path": "@CMAKE_CURRENT_BINARY_DIR@/small_cache/",
     "bin_dir": "@CMAKE_BINARY_DIR@/bin",
     "plugin_path": "@PLUGIN_PATH@",
+    "native_file_install_crosscheck_enabled": @RPMZIG_FILE_INSTALL_CROSSCHECK@,
+    "native_file_install_binary": "@NATIVE_FILE_INSTALL_BINARY@",
     "automatic_script": "@CMAKE_SOURCE_DIR@/bin/tdnf-automatic",
     "automatic_conf": "@CMAKE_SOURCE_DIR@/etc/tdnf/automatic.conf",
     "sglversion_pkgname": "tdnf-test-one",

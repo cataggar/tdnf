@@ -45,12 +45,18 @@ pub const Entry = struct {
     /// input slice. For rpm payloads, names are prefixed with "./"
     /// (rpm convention).
     name: []const u8,
+    data: []const u8,
+    ino: u32,
     mode: u32,
     size: u32,
     uid: u32,
     gid: u32,
     mtime: u32,
     nlink: u32,
+    devmajor: u32,
+    devminor: u32,
+    rdevmajor: u32,
+    rdevminor: u32,
 };
 
 pub const Walker = struct {
@@ -68,12 +74,17 @@ pub const Walker = struct {
         const h = self.buf[self.pos..][0..HEADER_SIZE];
         if (!std.mem.eql(u8, h[0..6], MAGIC)) return error.BadMagic;
 
+        const ino = try parseHex(h[6..14]);
         const mode = try parseHex(h[14..22]);
         const uid = try parseHex(h[22..30]);
         const gid = try parseHex(h[30..38]);
         const nlink = try parseHex(h[38..46]);
         const mtime = try parseHex(h[46..54]);
         const filesize = try parseHex(h[54..62]);
+        const devmajor = try parseHex(h[62..70]);
+        const devminor = try parseHex(h[70..78]);
+        const rdevmajor = try parseHex(h[78..86]);
+        const rdevminor = try parseHex(h[86..94]);
         const namesize = try parseHex(h[94..102]);
 
         const name_start = self.pos + HEADER_SIZE;
@@ -87,6 +98,7 @@ pub const Walker = struct {
         // Then past data + pad-to-4.
         const data_end = after_name + filesize;
         if (data_end > self.buf.len) return error.Truncated;
+        const data_slice = self.buf[after_name..data_end];
         const after_data = roundUp4(data_end - self.pos) + self.pos;
         self.pos = after_data;
 
@@ -94,12 +106,18 @@ pub const Walker = struct {
 
         return .{
             .name = name_slice,
+            .data = data_slice,
+            .ino = ino,
             .mode = mode,
             .size = filesize,
             .uid = uid,
             .gid = gid,
             .mtime = mtime,
             .nlink = nlink,
+            .devmajor = devmajor,
+            .devminor = devminor,
+            .rdevmajor = rdevmajor,
+            .rdevminor = rdevminor,
         };
     }
 };

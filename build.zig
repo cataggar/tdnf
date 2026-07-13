@@ -99,6 +99,11 @@ pub fn build(b: *Build) void {
         "plugin-dir",
         "Plugin install directory (relative to prefix, default: lib/tdnf-plugins)",
     ) orelse "lib/tdnf-plugins";
+    const rpmzig_file_install_crosscheck = b.option(
+        bool,
+        "rpmzig-file-install-crosscheck",
+        "Enable native file-install crosscheck pytests",
+    ) orelse false;
 
     const prefix = b.install_prefix;
     const libdir = "lib";
@@ -186,6 +191,8 @@ pub fn build(b: *Build) void {
         .{ .key = "CMAKE_CURRENT_BINARY_DIR", .value = abs_prefix },
         .{ .key = "CMAKE_BINARY_DIR", .value = abs_prefix },
         .{ .key = "PLUGIN_PATH", .value = b.fmt("{s}/{s}", .{ abs_prefix, plugin_dir_rel }) },
+        .{ .key = "RPMZIG_FILE_INSTALL_CROSSCHECK", .value = if (rpmzig_file_install_crosscheck) "true" else "false" },
+        .{ .key = "NATIVE_FILE_INSTALL_BINARY", .value = b.fmt("{s}/libexec/tdnf/tdnf-rpm-install", .{abs_prefix}) },
     });
 
     // ----- generated text files (autoconf_at style: @VAR@ only) ----- //
@@ -725,6 +732,33 @@ pub fn build(b: *Build) void {
         mod.linkLibrary(rpmzig_lib);
         const exe = b.addExecutable(.{
             .name = "tdnf-rpm-files",
+            .root_module = mod,
+        });
+        hardenExe(exe);
+        const install = b.addInstallArtifact(exe, .{
+            .dest_dir = .{ .override = .{ .custom = "libexec/tdnf" } },
+        });
+        b.getInstallStep().dependOn(&install.step);
+    }
+
+    // tdnf-rpm-install: smoke-test exe for the native file-install
+    // engine.
+    {
+        const mod = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .pic = true,
+        });
+        mod.addIncludePath(b.path("rpmzig"));
+        mod.addCSourceFiles(.{
+            .root = b.path("rpmzig"),
+            .files = &.{"install_main.c"},
+            .flags = &tdnf_cflags,
+        });
+        mod.linkLibrary(rpmzig_lib);
+        const exe = b.addExecutable(.{
+            .name = "tdnf-rpm-install",
             .root_module = mod,
         });
         hardenExe(exe);
