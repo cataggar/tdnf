@@ -36,7 +36,7 @@ const DecompressError = error{
     DecompressFailed,
 };
 
-const LoadError = error{
+pub const LoadError = error{
     InvalidRepoMetadata,
     OutOfMemory,
     FileNotFound,
@@ -354,7 +354,7 @@ fn mapNativeRpmPackageError(err: rpmpkg.Error) u32 {
     };
 }
 
-fn loadRepositoryModel(
+pub fn loadRepositoryModel(
     allocator: std.mem.Allocator,
     repomd_path: []const u8,
     primary_path: []const u8,
@@ -402,11 +402,20 @@ fn loadRepositoryModel(
 }
 
 fn readMetadataFile(allocator: std.mem.Allocator, path: []const u8) LoadError![]u8 {
-    const raw = readFileAlloc(allocator, path) catch |err| return mapReadError(err);
+    const raw = readFileAlloc(allocator, path) catch |err| {
+        setError("failed to read metadata file {s}: {t}", .{ path, err });
+        return mapReadError(err);
+    };
     return decompressMetadata(allocator, path, raw) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
-        error.UnsupportedCompressor => error.UnsupportedCompressor,
-        error.DecompressFailed => error.DecompressFailed,
+        error.UnsupportedCompressor => blk: {
+            setError("unsupported metadata compression for {s}", .{path});
+            break :blk error.UnsupportedCompressor;
+        },
+        error.DecompressFailed => blk: {
+            setError("failed to decompress metadata file {s}", .{path});
+            break :blk error.DecompressFailed;
+        },
     };
 }
 

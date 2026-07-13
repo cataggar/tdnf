@@ -18,6 +18,7 @@ pub const package_query = @import("pkgquery.zig");
 pub const query_index = @import("index.zig");
 pub const rpm_package = @import("rpmpkg.zig");
 pub const solv_bridge = @import("solvbridge.zig");
+pub const query_native = @import("query_native.zig");
 
 const c_header = if (builtin.is_test) @cImport({
     @cInclude("tdnfrepomd.h");
@@ -233,6 +234,9 @@ comptime {
     _ = @import("rpmpkg.zig");
     _ = @import("solvbridge.zig");
     _ = @import("updateinfo.zig");
+    if (!builtin.is_test) {
+        _ = @import("query_native.zig");
+    }
 }
 
 test "repomd header ABI matches Zig structs" {

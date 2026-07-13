@@ -28,6 +28,9 @@ pub const BuildOptions = struct {
     location: model.PackageLocation = .{},
     package_size: ?u64 = null,
     header_range: ?model.HeaderRange = null,
+    include_relations: bool = true,
+    include_files: bool = true,
+    include_changelogs: bool = true,
 };
 
 pub const BuiltPackage = struct {
@@ -174,13 +177,21 @@ pub fn buildFromHeader(
     var changelogs = std.array_list.Managed(model.ChangelogEntry).init(allocator);
     errdefer changelogs.deinit();
 
-    var ranges: [dependency_specs.len]model.RelationRange = undefined;
-    inline for (dependency_specs, 0..) |spec, index| {
-        ranges[index] = try appendRelations(allocator, hdr, spec, &relations);
+    var ranges: [dependency_specs.len]model.RelationRange = std.mem.zeroes([dependency_specs.len]model.RelationRange);
+    if (options.include_relations) {
+        inline for (dependency_specs, 0..) |spec, index| {
+            ranges[index] = try appendRelations(allocator, hdr, spec, &relations);
+        }
     }
 
-    const file_range = try appendFiles(allocator, hdr, &files);
-    const changelog_range = try appendChangelogs(allocator, hdr, &changelogs);
+    const file_range = if (options.include_files)
+        try appendFiles(allocator, hdr, &files)
+    else
+        model.FileRange{};
+    const changelog_range = if (options.include_changelogs)
+        try appendChangelogs(allocator, hdr, &changelogs)
+    else
+        model.ChangelogRange{};
     const checksum = try buildChecksum(allocator, hdr);
 
     const package = model.Package{

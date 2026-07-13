@@ -92,6 +92,11 @@ TDNFUpdateInfoSummary(
         }
         BAIL_ON_TDNF_ERROR(dwError);
 
+        TDNFQueryCrosscheckUpdateAdvisories(
+            pTdnf,
+            dwPkgId,
+            pUpdateAdvPkgList);
+
         dwError = SolvGetPackageListSize(pUpdateAdvPkgList, &nCount);
         BAIL_ON_TDNF_ERROR(dwError);
 

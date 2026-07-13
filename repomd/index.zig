@@ -402,6 +402,58 @@ pub const RepositoryIndex = struct {
     }
 };
 
+pub fn compareEvr(
+    left_epoch: ?u32,
+    left_version: ?[]const u8,
+    left_release: ?[]const u8,
+    right_epoch: ?u32,
+    right_version: ?[]const u8,
+    right_release: ?[]const u8,
+) i32 {
+    return compareEvrParts(
+        .{
+            .epoch = left_epoch,
+            .version = left_version orelse "",
+            .release = left_release,
+        },
+        .{
+            .epoch = right_epoch,
+            .version = right_version orelse "",
+            .release = right_release,
+        },
+    );
+}
+
+pub fn comparePackageVersions(left: model.Package, right: model.Package) i32 {
+    return compareEvr(
+        left.nevra.epoch,
+        left.nevra.version,
+        if (left.nevra.release.len == 0) null else left.nevra.release,
+        right.nevra.epoch,
+        right.nevra.version,
+        if (right.nevra.release.len == 0) null else right.nevra.release,
+    );
+}
+
+pub fn comparePackageWithQuery(pkg: model.Package, query: DependencyQuery) i32 {
+    return compareEvr(
+        pkg.nevra.epoch,
+        pkg.nevra.version,
+        if (pkg.nevra.release.len == 0) null else pkg.nevra.release,
+        query.epoch,
+        query.version,
+        query.release,
+    );
+}
+
+pub fn relationMatchesQuery(relation: model.Relation, query: DependencyQuery) bool {
+    return provideMatchesQuery(relation, query);
+}
+
+pub fn packageMatchesAdvisoryEntry(pkg: model.Package, advisory_pkg: model.AdvisoryPackage) bool {
+    return packageMatchesAdvisory(pkg, advisory_pkg);
+}
+
 fn appendPackageIndex(
     map: *std.StringHashMap(std.array_list.Managed(PackageIndex)),
     allocator: std.mem.Allocator,

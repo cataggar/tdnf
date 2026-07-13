@@ -546,6 +546,15 @@ TDNFListInternal(
     }
     BAIL_ON_TDNF_ERROR(dwError);
 
+    TDNFQueryCrosscheckList(
+        pTdnf,
+        nScope,
+        ppszPackageNameSpecs,
+        nDetail,
+        dwError,
+        pPkgInfo,
+        dwCount);
+
     *ppPkgInfo = pPkgInfo;
     *pdwCount = dwCount;
 
@@ -560,6 +569,14 @@ cleanup:
     }
     return dwError;
 error:
+    TDNFQueryCrosscheckList(
+        pTdnf,
+        nScope,
+        ppszPackageNameSpecs,
+        nDetail,
+        dwError,
+        pPkgInfo,
+        dwCount);
     if(ppPkgInfo)
     {
         *ppPkgInfo = NULL;
@@ -880,6 +897,12 @@ TDNFProvides(
     dwError = TDNFPopulatePkgInfos(pTdnf->pSack, pPkgList, &pPkgInfo);
     BAIL_ON_TDNF_ERROR(dwError);
 
+    TDNFQueryCrosscheckProvides(
+        pTdnf,
+        pszSpec,
+        dwError,
+        pPkgInfo);
+
     *ppPkgInfo = pPkgInfo;
 cleanup:
     if(pQuery)
@@ -892,15 +915,20 @@ cleanup:
     }
     return dwError;
 error:
+    if(dwError == ERROR_TDNF_NO_MATCH)
+    {
+        dwError = ERROR_TDNF_NO_DATA;
+    }
+    TDNFQueryCrosscheckProvides(
+        pTdnf,
+        pszSpec,
+        dwError,
+        pPkgInfo);
     if(ppPkgInfo)
     {
       *ppPkgInfo = NULL;
     }
     TDNFFreePackageInfo(pPkgInfo);
-    if(dwError == ERROR_TDNF_NO_MATCH)
-    {
-        dwError = ERROR_TDNF_NO_DATA;
-    }
     goto cleanup;
 }
 
@@ -1580,6 +1608,13 @@ TDNFRepoQuery(
         }
     }
 
+    TDNFQueryCrosscheckRepoQuery(
+        pTdnf,
+        pRepoqueryArgs,
+        dwError,
+        pPkgInfo,
+        dwCount);
+
     *ppPkgInfo = pPkgInfo;
     *pdwCount = dwCount;
 
@@ -1598,11 +1633,17 @@ cleanup:
     }
     return dwError;
 error:
-    TDNFFreePackageInfo(pPkgInfo);
     if(dwError == ERROR_TDNF_NO_MATCH)
     {
         dwError = ERROR_TDNF_NO_DATA;
     }
+    TDNFQueryCrosscheckRepoQuery(
+        pTdnf,
+        pRepoqueryArgs,
+        dwError,
+        pPkgInfo,
+        dwCount);
+    TDNFFreePackageInfo(pPkgInfo);
     goto cleanup;
 }
 
@@ -1834,6 +1875,15 @@ TDNFSearchCommand(
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
+    TDNFQueryCrosscheckSearch(
+        pTdnf,
+        pCmdArgs->ppszCmds,
+        nStartArgIndex,
+        pCmdArgs->nCmdCount,
+        dwError,
+        pPkgInfo,
+        unCount);
+
     *ppPkgInfo = pPkgInfo;
     *punCount = unCount;
 
@@ -1848,6 +1898,18 @@ cleanup:
     }
     return dwError;
 error:
+    if(dwError == ERROR_TDNF_NO_MATCH)
+    {
+        dwError = ERROR_TDNF_NO_SEARCH_RESULTS;
+    }
+    TDNFQueryCrosscheckSearch(
+        pTdnf,
+        pCmdArgs->ppszCmds,
+        nStartArgIndex,
+        pCmdArgs->nCmdCount,
+        dwError,
+        pPkgInfo,
+        unCount);
     if(ppPkgInfo)
     {
         *ppPkgInfo = NULL;
@@ -1857,11 +1919,6 @@ error:
         *punCount = 0;
     }
     TDNFFreePackageInfoArray(pPkgInfo, unCount);
-
-    if(dwError == ERROR_TDNF_NO_MATCH)
-    {
-        dwError = ERROR_TDNF_NO_SEARCH_RESULTS;
-    }
 
     goto cleanup;
 }
@@ -1946,6 +2003,11 @@ TDNFUpdateInfo(
             continue;
         }
         BAIL_ON_TDNF_ERROR(dwError);
+
+        TDNFQueryCrosscheckUpdateAdvisories(
+            pTdnf,
+            dwPkgId,
+            pUpdateAdvPkgList);
 
         dwError = SolvGetPackageListSize(pUpdateAdvPkgList, &nCount);
         BAIL_ON_TDNF_ERROR(dwError);
