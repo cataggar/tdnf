@@ -22,6 +22,7 @@ const pkgfile = @import("rpm_pkgfile");
 const rpmdb_write = @import("rpmdb_write.zig");
 pub const txn_config = @import("txn_config.zig");
 const scriptlet_engine = @import("scriptlet.zig");
+const trigger_engine = @import("trigger.zig");
 const c = sqlite.c;
 const libc = @cImport({
     @cInclude("stdlib.h");
@@ -41,6 +42,7 @@ pub const RpmDbInstallOptions = rpmdb_write.InstallOptions;
 pub const DEFAULT_INSTALL_COLOR = rpmdb_write.DEFAULT_INSTALL_COLOR;
 pub const ScriptletPhase = scriptlet_engine.Phase;
 pub const ScriptletOutcome = scriptlet_engine.Outcome;
+pub const TriggerPhase = trigger_engine.Phase;
 
 const PKG_TABLE = "Packages";
 
@@ -768,6 +770,24 @@ const CScriptletResult = extern struct {
     signal_number: c_int,
 };
 
+const CTriggerOptions = extern struct {
+    db_root: ?[*:0]const u8,
+    install_root: ?[*:0]const u8,
+    trans_flags: u32,
+    rpmdefines: ?[*]const ?[*:0]const u8,
+    rpmdefine_count: usize,
+    script_fd: c_int,
+    redirect_stdout_to_stderr: c_int,
+};
+
+const CTriggerResult = extern struct {
+    ran: c_int,
+    critical: c_int,
+    outcome: u32,
+    exit_status: c_int,
+    signal_number: c_int,
+};
+
 const ConflictBridge = struct {
     cb: ?CInstallConflictFn,
     data: ?*anyopaque,
@@ -1195,6 +1215,88 @@ export fn tdnf_rpm_header_run_scriptlet(
         .redirect_stdout_to_stderr = opts.redirect_stdout_to_stderr != 0,
     }) catch |err| {
         setError("header_run_scriptlet: {t}", .{err});
+        return -1;
+    };
+
+    out.* = .{
+        .ran = if (result.ran) 1 else 0,
+        .critical = if (result.critical) 1 else 0,
+        .outcome = @intFromEnum(result.outcome),
+        .exit_status = result.exit_status,
+        .signal_number = result.signal_number,
+    };
+    return 0;
+}
+
+/// Run every installed-package trigger matching the given package
+/// header and trigger phase.
+export fn tdnf_rpm_header_run_triggers(
+    header_blob: ?[*]const u8,
+    header_len: usize,
+    phase: c_int,
+    options: ?*const CTriggerOptions,
+    result_out: ?*CTriggerResult,
+) i32 {
+    clearError();
+    const blob_ptr = header_blob orelse {
+        setError("null header_blob", .{});
+        return -1;
+    };
+    const opts = options orelse {
+        setError("null trigger options", .{});
+        return -1;
+    };
+    const out = result_out orelse {
+        setError("null trigger result", .{});
+        return -1;
+    };
+
+    const trigger_phase: trigger_engine.Phase = switch (phase) {
+        0 => .triggerin,
+        1 => .triggerun,
+        2 => .triggerpostun,
+        else => {
+            setError("unsupported trigger phase: {d}", .{phase});
+            return -1;
+        },
+    };
+
+    var rpmdefines = std.ArrayList([]const u8).empty;
+    defer rpmdefines.deinit(std.heap.c_allocator);
+
+    if (opts.rpmdefine_count > 0 and opts.rpmdefines == null) {
+        setError("null rpmdefines with non-zero rpmdefine_count", .{});
+        return -1;
+    }
+    if (opts.rpmdefines) |raw_defines| {
+        for (0..opts.rpmdefine_count) |index| {
+            const define_ptr = raw_defines[index] orelse {
+                setError("trigger rpmdefine {d} is null", .{index});
+                return -1;
+            };
+            rpmdefines.append(std.heap.c_allocator, std.mem.span(define_ptr)) catch {
+                setError("out of memory", .{});
+                return -1;
+            };
+        }
+    }
+
+    const hdr = header.Header.parse(blob_ptr[0..header_len]) catch |err| {
+        setError("header.parse: {t}", .{err});
+        return -1;
+    };
+
+    const db_root = if (opts.db_root) |p| std.mem.span(p) else "";
+    const install_root = if (opts.install_root) |p| std.mem.span(p) else "";
+    const result = trigger_engine.runHeaderTriggers(std.heap.c_allocator, hdr, trigger_phase, .{
+        .db_root = db_root,
+        .install_root = install_root,
+        .trans_flags = opts.trans_flags,
+        .rpmdefines = rpmdefines.items,
+        .script_fd = if (opts.script_fd >= 0) opts.script_fd else null,
+        .redirect_stdout_to_stderr = opts.redirect_stdout_to_stderr != 0,
+    }) catch |err| {
+        setError("header_run_triggers: {t}", .{err});
         return -1;
     };
 

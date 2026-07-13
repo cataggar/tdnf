@@ -466,6 +466,92 @@ int tdnf_rpm_header_run_scriptlet(
     tdnf_rpm_scriptlet_result *result_out
 );
 
+/* --- native trigger execution engine (T4 building block) --- */
+
+typedef enum tdnf_rpm_trigger_phase {
+    TDNF_RPM_TRIGGER_PHASE_TRIGGERIN = 0,
+    TDNF_RPM_TRIGGER_PHASE_TRIGGERUN = 1,
+    TDNF_RPM_TRIGGER_PHASE_TRIGGERPOSTUN = 2,
+} tdnf_rpm_trigger_phase;
+
+typedef struct tdnf_rpm_trigger_options {
+    /**
+     * Install-root prefix used to locate the sqlite rpmdb that
+     * contains the trigger-owning packages. Pass NULL or "" to fall
+     * back to install_root.
+     */
+    const char *db_root;
+    /**
+     * Install-root prefix for chrooted trigger-script execution.
+     * Pass NULL or "" for "/".
+     */
+    const char *install_root;
+    /**
+     * librpm-style RPMTRANS_FLAG_* bitmask. The trigger engine
+     * honours NOSCRIPTS, NOTRIGGERS, and the phase-specific
+     * NOTRIGGERIN/NOTRIGGERUN/NOTRIGGERPOSTUN flags.
+     */
+    uint32_t trans_flags;
+    /**
+     * Optional rpmdefine overrides applied to the native transaction
+     * config store before execution.
+     */
+    const char *const *rpmdefines;
+    size_t rpmdefine_count;
+    /**
+     * If non-negative, duplicate this file descriptor onto stderr in
+     * the child before exec.
+     */
+    int script_fd;
+    /**
+     * When non-zero, duplicate stderr (or script_fd when supplied)
+     * onto stdout before exec.
+     */
+    int redirect_stdout_to_stderr;
+} tdnf_rpm_trigger_options;
+
+typedef struct tdnf_rpm_trigger_result {
+    int ran;
+    int critical;
+    tdnf_rpm_scriptlet_outcome outcome;
+    int exit_status;
+    int signal_number;
+} tdnf_rpm_trigger_result;
+
+/**
+ * Execute every installed-package shell trigger matching the given
+ * triggering package header and trigger phase.
+ *
+ * The trigger-owning packages are discovered from the sqlite rpmdb
+ * under `options->db_root` (or `options->install_root` when db_root
+ * is NULL/empty). The shell executor reuses the native scriptlet
+ * path and intentionally rejects Lua (`<lua>`) trigger interpreters
+ * with -1 until native Lua support exists.
+ *
+ * Caller phase-ordering contract:
+ *   - %triggerin: call after the triggering package's new rpmdb row
+ *     is visible, so `$2` sees the post-install instance count.
+ *   - %triggerun / %triggerpostun: call before erasing the old rpmdb
+ *     row, so the engine can subtract the just-removed instance and
+ *     match real rpm's `$2` semantics.
+ *
+ * `$1` is the installed count of the trigger-owning package name;
+ * `$2` is the installed count of the triggering package name after
+ * the current install/remove step, matching real rpm's trigger arg
+ * convention.
+ *
+ * Trigger phases are warning-only in real rpm. Accordingly, a
+ * non-zero trigger exit populates result_out->outcome and returns 0;
+ * API/setup/parse failures return -1 (use tdnf_rpmdb_last_error()).
+ */
+int tdnf_rpm_header_run_triggers(
+    const unsigned char *header_blob,
+    size_t header_len,
+    tdnf_rpm_trigger_phase phase,
+    const tdnf_rpm_trigger_options *options,
+    tdnf_rpm_trigger_result *result_out
+);
+
 /* --- native file erase engine (T4 building block) --- */
 
 /**
