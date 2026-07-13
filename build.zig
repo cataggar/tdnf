@@ -470,9 +470,10 @@ pub fn build(b: *Build) void {
         zig_test_step.dependOn(&run_tests.step);
     }
 
-    // `zig build test` runs the rpmzig Zig unit tests (currently just
-    // path-building; the FFI surface is smoke-tested via
-    // tdnf-rpmdb-count against a live rpmdb).
+    // `zig build test` runs the rpmzig Zig unit tests (path-building,
+    // txn-config resolution, plus the pure-Zig parser/verifier
+    // submodules). The C ABI surface is smoke-tested via
+    // tdnf-rpmdb-count against a live rpmdb.
     {
         const test_mod = b.createModule(.{
             .root_source_file = b.path("rpmzig/rpmdb.zig"),
