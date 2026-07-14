@@ -66,7 +66,6 @@ typedef struct _TDNF_RPM_TS_
     int                     nQuiet;
     rpmts                   pTS;
     rpmtransFlags           nTransFlags;
-    rpmprobFilterFlags      nProbFilterFlags;
     FD_t                    pFD;
     PTDNF_CACHED_RPM_LIST   pCachedRpmsArray;
     uint32_t                dwTransactionItemCount;

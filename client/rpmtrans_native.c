@@ -12,8 +12,6 @@
 
 #include "includes.h"
 
-#ifdef TDNF_RPMZIG_TRANSACTION_EXECUTE
-
 #include <time.h>
 
 #include "../rpmzig/rpmdb.h"
@@ -1018,9 +1016,8 @@ TDNFRunTransactionNative(
     {
         if (pItem->pHeader && headerIsSource(pItem->pHeader))
         {
-            pr_err("rpmzig-transaction-execute: source RPMs are not yet "
-                   "supported; disable -Drpmzig-transaction-execute to fall "
-                   "back to librpm for source-RPM transactions\n");
+            pr_err("rpmzig-transaction-execute: source RPMs are not "
+                   "supported by the native transaction executor\n");
             dwError = ERROR_TDNF_TRANSACTION_FAILED;
             BAIL_ON_TDNF_ERROR(dwError);
         }
@@ -1097,5 +1094,3 @@ TDNFRefRpmzigNative(void)
 {
     TDNFTouchNativeCallbacks();
 }
-
-#endif /* TDNF_RPMZIG_TRANSACTION_EXECUTE */
