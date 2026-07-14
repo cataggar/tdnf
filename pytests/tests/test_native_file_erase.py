@@ -15,8 +15,9 @@ with open(CONFIG_PATH) as config_file:
     CONFIG = json.load(config_file)
 
 pytestmark = pytest.mark.skipif(
-    not CONFIG.get('native_file_erase_crosscheck_enabled', False),
-    reason='native file-erase crosscheck build flag is disabled',
+    not os.path.exists(CONFIG.get('native_file_erase_binary', '')) or
+    not os.path.exists(CONFIG.get('native_file_install_binary', '')),
+    reason='native file-erase or file-install crosscheck binary missing',
 )
 
 CASE_ROOT = os.path.join(CONFIG['build_dir'], 'native-file-erase-crosscheck')
