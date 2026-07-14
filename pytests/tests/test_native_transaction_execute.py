@@ -8,13 +8,10 @@
 """
 Targeted crosscheck for the composed rpmzig transaction executor.
 
-Runs only when tdnf was built with -Drpmzig-transaction-execute=true.
-When enabled, tdnf install/erase/upgrade dispatch through the composed
-native executor in client/rpmtrans_native.c instead of librpm's
-rpmtsRun.
-
-Everything skips when the flag is off, so the flag-off pytest baseline
-is unaffected by this file.
+tdnf install/erase/upgrade always dispatch through the composed native
+executor in client/rpmtrans_native.c (there is no librpm rpmtsRun
+fallback anymore — the `-Drpmzig-transaction-execute` build flag was
+removed after issue #117), so these tests always run.
 """
 
 import json
@@ -41,12 +38,6 @@ PKG_TWO = 'tdnf-test-two'
 PKG_MULTI = 'tdnf-test-multiversion'
 PKG_ORPHANS = 'tdnf-test-upgrade-orphans'
 ORPHANS_ROOT_DIR = '/opt/tdnf-test-upgrade-orphans'
-
-
-pytestmark = pytest.mark.skipif(
-    not CONFIG.get('rpmzig_transaction_execute', False),
-    reason='requires -Drpmzig-transaction-execute=true',
-)
 
 
 @pytest.fixture(scope='module', autouse=True)

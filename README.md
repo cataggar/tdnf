@@ -41,9 +41,9 @@ name (for example Debian/Ubuntu's `liblua5.4-dev`), pass
 `-Drpmzig-lua-lib=lua5.4`.
 
 The composed native transaction executor (rpmzig install, rpmdb-write,
-file-erase, scriptlet, trigger engines) is default-on via
-`-Drpmzig-transaction-execute=true`. Disable it to fall back to
-librpm's `rpmtsRun` with `-Drpmzig-transaction-execute=false`.
+file-erase, scriptlet, trigger engines) is the sole transaction-
+execution path — every `tdnf install`/`erase`/`upgrade` dispatches
+through it. There is no build-time opt-out to librpm's `rpmtsRun`.
 
 ## Configuration
 

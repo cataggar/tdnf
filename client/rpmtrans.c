@@ -7,15 +7,12 @@
  */
 
 #include "includes.h"
-#include <sys/resource.h>
 
 #include "rpm/rpmcli.h"
 
 #include "../llconf/nodes.h"
 
-#ifdef TDNF_RPMZIG_TRANSACTION_EXECUTE
 #include "rpmtrans_native.h"
-#endif
 
 #define INSTALL_INSTALL 0
 #define INSTALL_UPGRADE 1
@@ -41,34 +38,6 @@ TDNFRecordTransactionItem(
     const char *pszName,
     const char *pszEVR,
     const char *pszArch
-    );
-
-static uint32_t
-TDNFCreateRebuiltTS(
-    PTDNF pTdnf,
-    PTDNFRPMTS pTS,
-    rpmts *ppNewTS
-    );
-
-static uint32_t
-TDNFRpmAddRecordedItem(
-    rpmts pTS,
-    PTDNF_RPM_TS_ITEM pItem
-    );
-
-static uint32_t
-TDNFParseTransactionOrderLine(
-    const char *pszLine,
-    uint32_t dwLimit,
-    uint32_t *pdwIndex
-    );
-
-static uint32_t
-TDNFRebuildTransactionInNativeOrder(
-    PTDNFRPMTS pTS,
-    PTDNF pTdnf,
-    char **ppszOrderLines,
-    uint32_t dwOrderCount
     );
 
 static uint32_t
@@ -143,15 +112,6 @@ TDNFRpmCreateTS(
     BAIL_ON_TDNF_ERROR(dwError);
 
     rpmSetVerbosity(TDNFConfGetRpmVerbosity(pTdnf));
-
-    //Allow downgrades
-    pTS->nProbFilterFlags = RPMPROB_FILTER_OLDPACKAGE;
-    if (pTdnf->pArgs->pszArch)
-        pTS->nProbFilterFlags |= RPMPROB_FILTER_IGNOREARCH;
-    if(pSolvedInfo->pPkgsToReinstall)
-    {
-        pTS->nProbFilterFlags = pTS->nProbFilterFlags | RPMPROB_FILTER_REPLACEPKG;
-    }
 
     pTS->pTS = rpmtsCreate();
     if(!pTS->pTS)
@@ -626,252 +586,6 @@ error:
 }
 
 static uint32_t
-TDNFCreateRebuiltTS(
-    PTDNF pTdnf,
-    PTDNFRPMTS pTS,
-    rpmts *ppNewTS
-    )
-{
-    uint32_t dwError = 0;
-    rpmts pNewTS = NULL;
-
-    if(!pTdnf || !pTdnf->pArgs || !pTS || !pTS->pTS || !ppNewTS)
-    {
-        dwError = ERROR_TDNF_INVALID_PARAMETER;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    pNewTS = rpmtsCreate();
-    if(!pNewTS)
-    {
-        dwError = ERROR_TDNF_RPMTS_CREATE_FAILED;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    if(rpmtsSetRootDir(pNewTS, pTdnf->pArgs->pszInstallRoot))
-    {
-        dwError = ERROR_TDNF_RPMTS_BAD_ROOT_DIR;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    if(rpmtsSetNotifyCallback(pNewTS, TDNFRpmCB, (void*)pTS))
-    {
-        dwError = ERROR_TDNF_RPMTS_SET_CB_FAILED;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    rpmtsSetNotifyStyle(pNewTS, rpmtsGetNotifyStyle(pTS->pTS));
-    rpmtsSetColor(pNewTS, rpmtsColor(pTS->pTS));
-    rpmtsSetPrefColor(pNewTS, rpmtsPrefColor(pTS->pTS));
-    rpmtsSetFlags(pNewTS, rpmtsFlags(pTS->pTS));
-    rpmtsSetVSFlags(pNewTS, rpmtsVSFlags(pTS->pTS));
-    rpmtsSetVfyFlags(pNewTS, rpmtsVfyFlags(pTS->pTS));
-    rpmtsSetVfyLevel(pNewTS, rpmtsVfyLevel(pTS->pTS));
-
-    *ppNewTS = pNewTS;
-
-cleanup:
-    return dwError;
-
-error:
-    if(pNewTS)
-    {
-        rpmtsCloseDB(pNewTS);
-        rpmtsFree(pNewTS);
-    }
-    if(ppNewTS)
-    {
-        *ppNewTS = NULL;
-    }
-    goto cleanup;
-}
-
-static uint32_t
-TDNFRpmAddRecordedItem(
-    rpmts pTS,
-    PTDNF_RPM_TS_ITEM pItem
-    )
-{
-    uint32_t dwError = 0;
-
-    if(!pTS || !pItem || !pItem->pHeader)
-    {
-        dwError = ERROR_TDNF_INVALID_PARAMETER;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    switch(pItem->nType)
-    {
-        case TDNF_RPM_TS_ITEM_INSTALL:
-        case TDNF_RPM_TS_ITEM_UPGRADE:
-            dwError = rpmtsAddInstallElement(
-                          pTS,
-                          pItem->pHeader,
-                          (fnpyKey)pItem->pszPath,
-                          pItem->nType == TDNF_RPM_TS_ITEM_UPGRADE,
-                          NULL);
-            BAIL_ON_TDNF_RPM_ERROR(dwError);
-            break;
-
-        case TDNF_RPM_TS_ITEM_REINSTALL:
-            dwError = rpmtsAddReinstallElement(
-                          pTS,
-                          pItem->pHeader,
-                          (fnpyKey)pItem->pszPath);
-            BAIL_ON_TDNF_RPM_ERROR(dwError);
-            break;
-
-        case TDNF_RPM_TS_ITEM_ERASE:
-            dwError = rpmtsAddEraseElement(
-                          pTS,
-                          pItem->pHeader,
-                          pItem->dwDbOffset);
-            BAIL_ON_TDNF_RPM_ERROR(dwError);
-            break;
-
-        default:
-            dwError = ERROR_TDNF_INVALID_PARAMETER;
-            BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-cleanup:
-    return dwError;
-
-error:
-    goto cleanup;
-}
-
-static uint32_t
-TDNFParseTransactionOrderLine(
-    const char *pszLine,
-    uint32_t dwLimit,
-    uint32_t *pdwIndex
-    )
-{
-    uint32_t dwError = 0;
-    char *pszEnd = NULL;
-    unsigned long ulValue = 0;
-
-    if(IsNullOrEmptyString(pszLine) || !pdwIndex)
-    {
-        dwError = ERROR_TDNF_INVALID_PARAMETER;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    errno = 0;
-    ulValue = strtoul(pszLine, &pszEnd, 10);
-    if(errno != 0 || !pszEnd || *pszEnd != '\0' || ulValue >= dwLimit)
-    {
-        dwError = ERROR_TDNF_INVALID_PARAMETER;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    *pdwIndex = (uint32_t)ulValue;
-
-cleanup:
-    return dwError;
-
-error:
-    if(pdwIndex)
-    {
-        *pdwIndex = 0;
-    }
-    goto cleanup;
-}
-
-static uint32_t
-TDNFRebuildTransactionInNativeOrder(
-    PTDNFRPMTS pTS,
-    PTDNF pTdnf,
-    char **ppszOrderLines,
-    uint32_t dwOrderCount
-    )
-{
-    uint32_t dwError = 0;
-    rpmts pNewTS = NULL;
-    PTDNF_RPM_TS_ITEM *ppItems = NULL;
-    uint8_t *pbSeen = NULL;
-    PTDNF_RPM_TS_ITEM pItem = NULL;
-    uint32_t dwIndex = 0;
-    uint32_t dwCount = 0;
-
-    if(!pTS || !pTdnf || !ppszOrderLines ||
-       dwOrderCount != pTS->dwTransactionItemCount)
-    {
-        dwError = ERROR_TDNF_INVALID_PARAMETER;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    dwCount = pTS->dwTransactionItemCount;
-
-    dwError = TDNFAllocateMemory(
-                  dwCount,
-                  sizeof(PTDNF_RPM_TS_ITEM),
-                  (void **)&ppItems);
-    BAIL_ON_TDNF_ERROR(dwError);
-
-    dwError = TDNFAllocateMemory(
-                  dwCount,
-                  sizeof(uint8_t),
-                  (void **)&pbSeen);
-    BAIL_ON_TDNF_ERROR(dwError);
-
-    pItem = pTS->pTransactionItems;
-    for(dwIndex = 0; dwIndex < dwCount && pItem; dwIndex++)
-    {
-        ppItems[dwIndex] = pItem;
-        pItem = pItem->pNext;
-    }
-    if(dwIndex != dwCount || pItem)
-    {
-        dwError = ERROR_TDNF_INVALID_PARAMETER;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    dwError = TDNFCreateRebuiltTS(pTdnf, pTS, &pNewTS);
-    BAIL_ON_TDNF_ERROR(dwError);
-
-    for(dwIndex = 0; dwIndex < dwCount; dwIndex++)
-    {
-        uint32_t dwOrderIndex = 0;
-
-        dwError = TDNFParseTransactionOrderLine(
-                      ppszOrderLines[dwIndex],
-                      dwCount,
-                      &dwOrderIndex);
-        BAIL_ON_TDNF_ERROR(dwError);
-
-        if(pbSeen[dwOrderIndex])
-        {
-            dwError = ERROR_TDNF_INVALID_PARAMETER;
-            BAIL_ON_TDNF_ERROR(dwError);
-        }
-
-        pbSeen[dwOrderIndex] = 1;
-        dwError = TDNFRpmAddRecordedItem(pNewTS, ppItems[dwOrderIndex]);
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    rpmtsCloseDB(pTS->pTS);
-    rpmtsFree(pTS->pTS);
-    pTS->pTS = pNewTS;
-    pNewTS = NULL;
-
-cleanup:
-    TDNF_SAFE_FREE_MEMORY(pbSeen);
-    TDNF_SAFE_FREE_MEMORY(ppItems);
-    if(pNewTS)
-    {
-        rpmtsCloseDB(pNewTS);
-        rpmtsFree(pNewTS);
-    }
-    return dwError;
-
-error:
-    goto cleanup;
-}
-
-static uint32_t
 TDNFNativeOrderAndCheck(
     PTDNFRPMTS pTS,
     PTDNF pTdnf
@@ -984,12 +698,14 @@ TDNFNativeOrderAndCheck(
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    dwError = TDNFRebuildTransactionInNativeOrder(
-                  pTS,
-                  pTdnf,
-                  ppszOrderLines,
-                  dwOrderCount);
-    BAIL_ON_TDNF_ERROR(dwError);
+    /*
+     * `ppszOrderLines` used to feed the librpm rpmts rebuild step
+     * consumed by the retired `rpmtsRun` fallback. The native
+     * executor (client/rpmtrans_native.c) walks
+     * `pTS->pTransactionItems` directly and does its own ordering,
+     * so the order lines returned by TDNFRepoMdNativeTransactionSolve
+     * are dropped here.
+     */
 
 cleanup:
     TDNF_SAFE_FREE_MEMORY(pInputs);
@@ -1176,53 +892,13 @@ error:
  * fd, which may take a long time if the limit is very high.
  * See also https://github.com/rpm-software-management/rpm/issues/2081.
  * This can be disabled by setting "openmax=0" in the configuration.
+ *
+ * The native transaction executor (client/rpmtrans_native.c) does not
+ * exhibit this librpm-specific behaviour, so TDNFSetOpenMax is no
+ * longer wired into the transaction path. The `openmax` config key
+ * remains parsed and stored on TDNF_CONF for public-API stability but
+ * is a no-op.
  */
-
-static uint32_t
-TDNFSetOpenMax(PTDNF pTdnf)
-{
-    uint32_t dwError = 0;
-    char *pszProcPath = NULL;
-    int nIsDir = 0;
-
-    if(!pTdnf || !pTdnf->pConf || !pTdnf->pArgs)
-    {
-        dwError = ERROR_TDNF_INVALID_PARAMETER;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    /* First, check if /proc is available - if rpm can
-       open it there is no issue. */
-    dwError = TDNFJoinPath(&pszProcPath,
-                           pTdnf->pArgs->pszInstallRoot ?
-                               pTdnf->pArgs->pszInstallRoot : "",
-                           "/proc/self/fd",
-                           NULL);
-    BAIL_ON_TDNF_ERROR(dwError);
-
-    dwError = TDNFIsDir(pszProcPath, &nIsDir);
-    if (dwError == ERROR_TDNF_SYSTEM_BASE + ENOENT) {
-        nIsDir = 0;
-        dwError = 0;
-    }
-    BAIL_ON_TDNF_ERROR(dwError);
-
-    if (!nIsDir) {
-        int nOpenMax = pTdnf->pConf->nOpenMax;
-        struct rlimit rl = {nOpenMax, nOpenMax};
-        if (setrlimit(RLIMIT_NOFILE, &rl) != 0) {
-            /* shouldn't be fatal */
-            pr_err("warning: could not set rlimit: %s (%d)."
-		   "This may cause degraded performance.\n",
-	           strerror(errno), errno);
-        }
-    }
-cleanup:
-    TDNF_SAFE_FREE_MEMORY(pszProcPath);
-    return dwError;
-error:
-    goto cleanup;
-}
 
 uint32_t
 TDNFRunTransaction(
@@ -1231,8 +907,6 @@ TDNFRunTransaction(
     )
 {
     uint32_t dwError = 0;
-    int rc;
-    FD_t fdScript = NULL;
 
     if(!pTS || !pTdnf || !pTdnf->pConf || !pTdnf->pArgs)
     {
@@ -1243,77 +917,20 @@ TDNFRunTransaction(
     dwError = TDNFNativeOrderAndCheck(pTS, pTdnf);
     BAIL_ON_TDNF_ERROR(dwError);
 
-#ifdef TDNF_RPMZIG_TRANSACTION_EXECUTE
     /*
-     * Native transaction executor: replaces the librpm test-run +
-     * real-run block below with the composed rpmzig
-     * install/rpmdb-write/erase/scriptlet/trigger engines. Gated on
-     * TDNF_RPMZIG_TRANSACTION_EXECUTE (opt-out via
-     * -Drpmzig-transaction-execute=false) which is on by default.
-     * The librpm rpmtsRun path below is retained as a fallback for
-     * builds that opt out.
+     * Composed rpmzig native install/rpmdb-write/erase/scriptlet/
+     * trigger executor: replaces librpm's rpmtsRun path entirely.
+     * There is no build-time opt-out — the librpm rpmtsRun fallback
+     * that was retained by PR #132 as a rollback safety net has been
+     * removed (issue #117 follow-up).
      */
     dwError = TDNFRunTransactionNative(pTS, pTdnf);
     if (dwError)
     {
         reportProblems(pTS);
     }
-    goto cleanup;
-#endif
-
-    rpmtsClean(pTS->pTS);
-    /* we checked already for the signature during TDNFTransAddInstallPkgs() */
-    rpmtsSetVfyLevel(pTS->pTS, rpmtsVfyLevel(pTS->pTS) & ~RPMSIG_VERIFIABLE_TYPE);
-
-    /* When json output is enabled redirect stdout from scripts to stderr
-       to not mess with the json syntax ("json decode failed at ...") */
-    if (pTdnf->pArgs->nJsonOutput) {
-        fdScript = fdDup(STDERR_FILENO);
-        if (fdScript == NULL) {
-            pr_err("failed to create script output handle");
-            dwError = ERROR_TDNF_RPMTS_FDDUP_FAILED;
-            BAIL_ON_TDNF_ERROR(dwError);
-        }
-        rpmtsSetScriptFd(pTS->pTS, fdScript);
-    }
-
-    //TODO do callbacks for output
-    pr_info("Testing transaction\n");
-
-    rpmtsSetFlags(pTS->pTS, RPMTRANS_FLAG_TEST);
-    rc = rpmtsRun(pTS->pTS, NULL, pTS->nProbFilterFlags);
-    if (rc != 0)
-    {
-        dwError = ERROR_TDNF_TRANSACTION_FAILED;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    if (!pTdnf->pArgs->nTestOnly)
-    {
-        if (pTdnf->pConf->nOpenMax > 0) {
-            dwError = TDNFSetOpenMax(pTdnf);
-            BAIL_ON_TDNF_ERROR(dwError);
-        }
-        pr_info("Running transaction\n");
-
-        rpmtsSetFlags(pTS->pTS, pTS->nTransFlags);
-        rc = rpmtsRun(pTS->pTS, NULL, pTS->nProbFilterFlags);
-        if (rc != 0)
-        {
-            dwError = ERROR_TDNF_TRANSACTION_FAILED;
-            BAIL_ON_TDNF_ERROR(dwError);
-        }
-    }
 
 cleanup:
-    if(pTS) {
-        rpmtsSetScriptFd(pTS->pTS, NULL);
-    }
-    if(fdScript)
-    {
-        Fclose(fdScript);
-        fdScript = NULL;
-    }
     return dwError;
 
 error:

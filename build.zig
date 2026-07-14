@@ -99,11 +99,6 @@ pub fn build(b: *Build) void {
         "plugin-dir",
         "Plugin install directory (relative to prefix, default: lib/tdnf-plugins)",
     ) orelse "lib/tdnf-plugins";
-    const rpmzig_transaction_execute = b.option(
-        bool,
-        "rpmzig-transaction-execute",
-        "Compose the rpmzig native install/rpmdb-write/erase/scriptlet/trigger engines into TDNFRunTransaction, replacing librpm's rpmtsRun path (default true; pass -Drpmzig-transaction-execute=false to fall back to librpm's rpmtsRun path, retained as a fallback while the last librpm reader / GPG import call sites are ported).",
-    ) orelse true;
     const rpmzig_lua = b.option(
         bool,
         "rpmzig-lua",
@@ -202,7 +197,6 @@ pub fn build(b: *Build) void {
         .{ .key = "PLUGIN_PATH", .value = b.fmt("{s}/{s}", .{ abs_prefix, plugin_dir_rel }) },
         .{ .key = "NATIVE_FILE_INSTALL_BINARY", .value = b.fmt("{s}/libexec/tdnf/tdnf-rpm-install", .{abs_prefix}) },
         .{ .key = "NATIVE_FILE_ERASE_BINARY", .value = b.fmt("{s}/libexec/tdnf/tdnf-rpm-erase", .{abs_prefix}) },
-        .{ .key = "RPMZIG_TRANSACTION_EXECUTE", .value = if (rpmzig_transaction_execute) "true" else "false" },
     });
 
     // ----- generated text files (autoconf_at style: @VAR@ only) ----- //
@@ -917,16 +911,14 @@ pub fn build(b: *Build) void {
     tdnf_so_mod.addSystemIncludePath(libsolvext_include);
     if (build_with_rpm_6x) tdnf_so_mod.addCMacro("BUILD_WITH_RPM_6X", "1");
     tdnf_so_mod.addIncludePath(b.path("rpmzig"));
-    // Native transaction ordering / dep+conflict check is now
-    // unconditional (was gated on the removed `-Drpmzig-transaction-check`
-    // flag). The composed native executor is gated on the still-
-    // available `-Drpmzig-transaction-execute` flag (default true);
-    // when off, we fall back to librpm's rpmtsRun path for the
-    // final execution step only.
+    // Native transaction ordering / dep+conflict check and the
+    // composed native transaction executor are now both unconditional
+    // (the crosscheck-only `-Drpmzig-transaction-check` and rollback-
+    // safety `-Drpmzig-transaction-execute` flags have both been
+    // removed). Every install/erase/upgrade dispatches through the
+    // native executor in client/rpmtrans_native.c; there is no
+    // librpm `rpmtsRun` fallback.
     tdnf_so_mod.addCMacro("TDNF_RPMZIG_TRANSACTION_CHECK", "1");
-    if (rpmzig_transaction_execute) {
-        tdnf_so_mod.addCMacro("TDNF_RPMZIG_TRANSACTION_EXECUTE", "1");
-    }
     tdnf_so_mod.addCSourceFiles(.{
         .root = b.path("client"),
         .files = &.{

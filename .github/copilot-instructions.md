@@ -142,14 +142,18 @@ Build flags:
 
 | Flag                                        | Default | Meaning                                                    |
 |---------------------------------------------|---------|------------------------------------------------------------|
-| `-Drpmzig-transaction-execute=<bool>`       | `true`  | Composed native transaction executor. Set to `false` to fall back to librpm's `rpmtsRun`. |
 | `-Drpmzig-lua=<bool>`                       | `true`  | Native Lua scriptlet dispatch (`<lua>`-tagged `%pre`/`%post`/etc.). Needed for real base packages (Fedora `bash`/`filesystem`/`glibc`/`setup`, Azure Linux `filesystem`). |
 | `-Drpmzig-lua-lib=lua5.4`/`lua`             | detected | pkg-config module name for the Lua runtime. |
 
 The crosscheck-only scaffolding flags used during T4 development
 (`-Drpmzig-file-install-crosscheck`, `-Drpmzig-file-erase-crosscheck`,
-`-Drpmzig-transaction-check`) have been removed — their behaviours
-are now unconditional.
+`-Drpmzig-transaction-check`) and the rollback-safety
+`-Drpmzig-transaction-execute` flag (which briefly gated the composed
+native executor after PR #132 flipped it on by default) have been
+removed — their behaviours are now unconditional. Every
+`tdnf install`/`erase`/`upgrade` dispatches through the native
+executor in `client/rpmtrans_native.c`; there is no librpm `rpmtsRun`
+fallback.
 
 Smoke-test consumers under `libexec/tdnf/`:
 `tdnf-rpmdb-count`, `tdnf-rpmdb-list`, `tdnf-rpmdb-pubkeys`,

@@ -10,7 +10,6 @@
     "plugin_path": "@PLUGIN_PATH@",
     "native_file_install_binary": "@NATIVE_FILE_INSTALL_BINARY@",
     "native_file_erase_binary": "@NATIVE_FILE_ERASE_BINARY@",
-    "rpmzig_transaction_execute": @RPMZIG_TRANSACTION_EXECUTE@,
     "automatic_script": "@CMAKE_SOURCE_DIR@/bin/tdnf-automatic",
     "automatic_conf": "@CMAKE_SOURCE_DIR@/etc/tdnf/automatic.conf",
     "sglversion_pkgname": "tdnf-test-one",
