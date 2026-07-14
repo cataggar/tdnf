@@ -264,7 +264,9 @@ fn runLuaScriptProcess(
     options: Options,
 ) RunError!Result {
     const path_env = try allocator.dupeZ(u8, config.value(.install_script_path));
+    defer allocator.free(path_env);
     const install_root_z = try allocator.dupeZ(u8, config.installRoot());
+    defer allocator.free(install_root_z);
 
     const pid = c.fork();
     if (pid < 0) {
