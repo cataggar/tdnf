@@ -27,16 +27,23 @@ zig build -Doptimize=Debug install --prefix ./out
 ```
 
 Optional native Lua scriptlet support (for `<lua>` RPM scriptlets) is
-available with:
+enabled by default. Disable it with:
 
 ```sh
-zig build -Drpmzig-lua=true install --prefix ./out
+zig build -Drpmzig-lua=false install --prefix ./out
 ```
 
-That optional path requires a Lua 5.4 development package. The default
-link name is `lua`; on distros that package the library under another
+Real base packages in supported distros (Fedora `bash`/`glibc`/
+`filesystem`/`setup`, Azure Linux `filesystem`) use `<lua>`-tagged
+scriptlets, so leaving this on is recommended. The default link
+name is `lua`; on distros that package the library under another
 name (for example Debian/Ubuntu's `liblua5.4-dev`), pass
 `-Drpmzig-lua-lib=lua5.4`.
+
+The composed native transaction executor (rpmzig install, rpmdb-write,
+file-erase, scriptlet, trigger engines) is default-on via
+`-Drpmzig-transaction-execute=true`. Disable it to fall back to
+librpm's `rpmtsRun` with `-Drpmzig-transaction-execute=false`.
 
 ## Configuration
 

@@ -99,35 +99,16 @@ pub fn build(b: *Build) void {
         "plugin-dir",
         "Plugin install directory (relative to prefix, default: lib/tdnf-plugins)",
     ) orelse "lib/tdnf-plugins";
-    const rpmzig_file_install_crosscheck = b.option(
-        bool,
-        "rpmzig-file-install-crosscheck",
-        "Enable native file-install crosscheck pytests",
-    ) orelse false;
-    const rpmzig_file_erase_crosscheck = b.option(
-        bool,
-        "rpmzig-file-erase-crosscheck",
-        "Enable native file-erase crosscheck pytests",
-    ) orelse false;
-
-    const rpmzig_transaction_check = b.option(
-        bool,
-        "rpmzig-transaction-check",
-        "Use rpmzig's native transaction ordering and final dependency/conflict check (default true; pass -Drpmzig-transaction-check=false to fall back to the legacy librpm ordering/check path)",
-    ) orelse true;
     const rpmzig_transaction_execute = b.option(
         bool,
         "rpmzig-transaction-execute",
-        "Compose the rpmzig native install/rpmdb-write/erase/scriptlet/trigger engines into TDNFRunTransaction, replacing librpm's rpmtsRun path (default false; requires -Drpmzig-transaction-check=true).",
-    ) orelse false;
-    if (rpmzig_transaction_execute and !rpmzig_transaction_check) {
-        @panic("-Drpmzig-transaction-execute=true requires -Drpmzig-transaction-check=true");
-    }
+        "Compose the rpmzig native install/rpmdb-write/erase/scriptlet/trigger engines into TDNFRunTransaction, replacing librpm's rpmtsRun path (default true; pass -Drpmzig-transaction-execute=false to fall back to librpm's rpmtsRun path, retained as a fallback while the last librpm reader / GPG import call sites are ported).",
+    ) orelse true;
     const rpmzig_lua = b.option(
         bool,
         "rpmzig-lua",
-        "Enable native Lua scriptlet execution with system liblua 5.4 (default false)",
-    ) orelse false;
+        "Enable native Lua scriptlet execution via the vendored liblua 5.4 runtime. Default true to match librpm's default handling of <lua>-tagged scriptlets used by real base packages (Fedora bash/glibc/filesystem/setup, Azure Linux filesystem). Pass -Drpmzig-lua=false to build without Lua support at the cost of failing loudly on any <lua> scriptlet at execution time.",
+    ) orelse true;
     const rpmzig_lua_lib = b.option(
         []const u8,
         "rpmzig-lua-lib",
@@ -219,9 +200,7 @@ pub fn build(b: *Build) void {
         .{ .key = "CMAKE_CURRENT_BINARY_DIR", .value = abs_prefix },
         .{ .key = "CMAKE_BINARY_DIR", .value = abs_prefix },
         .{ .key = "PLUGIN_PATH", .value = b.fmt("{s}/{s}", .{ abs_prefix, plugin_dir_rel }) },
-        .{ .key = "RPMZIG_FILE_INSTALL_CROSSCHECK", .value = if (rpmzig_file_install_crosscheck) "true" else "false" },
         .{ .key = "NATIVE_FILE_INSTALL_BINARY", .value = b.fmt("{s}/libexec/tdnf/tdnf-rpm-install", .{abs_prefix}) },
-        .{ .key = "RPMZIG_FILE_ERASE_CROSSCHECK", .value = if (rpmzig_file_erase_crosscheck) "true" else "false" },
         .{ .key = "NATIVE_FILE_ERASE_BINARY", .value = b.fmt("{s}/libexec/tdnf/tdnf-rpm-erase", .{abs_prefix}) },
         .{ .key = "RPMZIG_TRANSACTION_EXECUTE", .value = if (rpmzig_transaction_execute) "true" else "false" },
     });
@@ -855,6 +834,7 @@ pub fn build(b: *Build) void {
             .flags = &tdnf_cflags,
         });
         mod.linkLibrary(rpmzig_lib);
+        linkLuaScriptletDeps(mod, rpmzig_lua, rpmzig_lua_lib);
         const exe = b.addExecutable(.{
             .name = "tdnf-rpm-trigger",
             .root_module = mod,
@@ -937,9 +917,13 @@ pub fn build(b: *Build) void {
     tdnf_so_mod.addSystemIncludePath(libsolvext_include);
     if (build_with_rpm_6x) tdnf_so_mod.addCMacro("BUILD_WITH_RPM_6X", "1");
     tdnf_so_mod.addIncludePath(b.path("rpmzig"));
-    if (rpmzig_transaction_check) {
-        tdnf_so_mod.addCMacro("TDNF_RPMZIG_TRANSACTION_CHECK", "1");
-    }
+    // Native transaction ordering / dep+conflict check is now
+    // unconditional (was gated on the removed `-Drpmzig-transaction-check`
+    // flag). The composed native executor is gated on the still-
+    // available `-Drpmzig-transaction-execute` flag (default true);
+    // when off, we fall back to librpm's rpmtsRun path for the
+    // final execution step only.
+    tdnf_so_mod.addCMacro("TDNF_RPMZIG_TRANSACTION_CHECK", "1");
     if (rpmzig_transaction_execute) {
         tdnf_so_mod.addCMacro("TDNF_RPMZIG_TRANSACTION_EXECUTE", "1");
     }

@@ -31,7 +31,6 @@ TDNFFreeTransactionItems(
     PTDNFRPMTS pTS
     );
 
-#ifdef TDNF_RPMZIG_TRANSACTION_CHECK
 static uint32_t
 TDNFRecordTransactionItem(
     PTDNFRPMTS pTS,
@@ -77,7 +76,6 @@ TDNFNativeOrderAndCheck(
     PTDNFRPMTS pTS,
     PTDNF pTdnf
     );
-#endif
 
 static uint32_t
 TDNFRpmCleanupTS(PTDNF pTdnf,
@@ -543,7 +541,6 @@ TDNFFreeTransactionItems(
     pTS->dwTransactionItemCount = 0;
 }
 
-#ifdef TDNF_RPMZIG_TRANSACTION_CHECK
 static uint32_t
 TDNFRecordTransactionItem(
     PTDNFRPMTS pTS,
@@ -1006,7 +1003,6 @@ cleanup:
 error:
     goto cleanup;
 }
-#endif
 
 static uint32_t
 TDNFDetectPreTransFailure(
@@ -1097,28 +1093,6 @@ error:
     goto cleanup;
 }
 
-#ifndef TDNF_RPMZIG_TRANSACTION_CHECK
-static int
-doCheck(PTDNFRPMTS pTS)
-{
-    int nResult = 0;
-    rpmps ps;
-
-    nResult = rpmtsCheck(pTS->pTS);
-
-    ps = rpmtsProblems(pTS->pTS);
-    if(ps)
-    {
-        int nProbs = rpmpsNumProblems(ps);
-        if(nProbs > 0)
-        {
-            nResult = ERROR_TDNF_RPM_CHECK;
-        }
-        rpmpsFree(ps);
-    }
-    return nResult;
-}
-#endif
 
 static void
 reportProblems(PTDNFRPMTS pTS)
@@ -1266,24 +1240,18 @@ TDNFRunTransaction(
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-#ifdef TDNF_RPMZIG_TRANSACTION_CHECK
     dwError = TDNFNativeOrderAndCheck(pTS, pTdnf);
     BAIL_ON_TDNF_ERROR(dwError);
-#else
-    dwError = rpmtsOrder(pTS->pTS);
-    BAIL_ON_TDNF_ERROR(dwError);
-
-    dwError = doCheck(pTS);
-    BAIL_ON_TDNF_ERROR(dwError);
-#endif
 
 #ifdef TDNF_RPMZIG_TRANSACTION_EXECUTE
     /*
      * Native transaction executor: replaces the librpm test-run +
      * real-run block below with the composed rpmzig
      * install/rpmdb-write/erase/scriptlet/trigger engines. Gated on
-     * TDNF_RPMZIG_TRANSACTION_EXECUTE (opt-in via
-     * -Drpmzig-transaction-execute=true) which is off by default.
+     * TDNF_RPMZIG_TRANSACTION_EXECUTE (opt-out via
+     * -Drpmzig-transaction-execute=false) which is on by default.
+     * The librpm rpmtsRun path below is retained as a fallback for
+     * builds that opt out.
      */
     dwError = TDNFRunTransactionNative(pTS, pTdnf);
     if (dwError)
@@ -1568,7 +1536,6 @@ TDNFTransAddInstallPkg(
         BAIL_ON_TDNF_RPM_ERROR(dwError);
     }
 
-#ifdef TDNF_RPMZIG_TRANSACTION_CHECK
     dwError = TDNFRecordTransactionItem(
                   pTS,
                   nInstallFlag == INSTALL_REINSTALL ?
@@ -1583,7 +1550,6 @@ TDNFTransAddInstallPkg(
                   headerGetString(rpmHeader, RPMTAG_EVR),
                   headerGetString(rpmHeader, RPMTAG_ARCH));
     BAIL_ON_TDNF_ERROR(dwError);
-#endif
 
     /* add to cached array only when file is actually in cache dir */
     if(pTS->pCachedRpmsArray &&
@@ -1661,9 +1627,7 @@ TDNFTransAddErasePkg(
     char *pszFullName = NULL;
     const char *pszPkgName = NULL;
     const char *pszPkgEvr = NULL;
-#ifdef TDNF_RPMZIG_TRANSACTION_CHECK
     const char *pszPkgArch = NULL;
-#endif
 
     if(!pTS || !pInfo || IsNullOrEmptyString(pInfo->pszName) ||
        IsNullOrEmptyString(pInfo->pszEVR))
@@ -1674,9 +1638,7 @@ TDNFTransAddErasePkg(
 
     pszPkgName = pInfo->pszName;
     pszPkgEvr = pInfo->pszEVR;
-#ifdef TDNF_RPMZIG_TRANSACTION_CHECK
     pszPkgArch = pInfo->pszArch;
-#endif
 
     dwError = TDNFAllocateStringPrintf(&pszFullName, "%s-%s", pszPkgName, pszPkgEvr);
     BAIL_ON_TDNF_ERROR(dwError);
@@ -1690,7 +1652,6 @@ TDNFTransAddErasePkg(
             dwError = rpmtsAddEraseElement(pTS->pTS, pRpmHeader, nOffset);
             BAIL_ON_TDNF_ERROR(dwError);
 
-#ifdef TDNF_RPMZIG_TRANSACTION_CHECK
             dwError = TDNFRecordTransactionItem(
                           pTS,
                           TDNF_RPM_TS_ITEM_ERASE,
@@ -1701,7 +1662,6 @@ TDNFTransAddErasePkg(
                           pszPkgEvr,
                           pszPkgArch);
             BAIL_ON_TDNF_ERROR(dwError);
-#endif
         }
     }
 

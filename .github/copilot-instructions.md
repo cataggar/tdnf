@@ -98,12 +98,13 @@ Pkg-config files and the `tdnf-automatic` script are produced via
 `b.addConfigHeader(.autoconf_at, ...)` into the build cache, then
 installed.
 
-## librpm replacement (T1+T2+T3 complete)
+## librpm replacement (T1+T2+T3+T4 complete)
 
 `rpmzig/` is a Zig static library that has taken over librpm's
-read-side responsibilities. See `plan-replace-librpm.md` in the
-session-state archive for the full plan. Today it exposes (via
-the C ABI in `rpmzig/rpmdb.h` and `rpmzig/verify.h`):
+read-side responsibilities and the composed transaction executor.
+Today it exposes (via the C ABI in `rpmzig/rpmdb.h`,
+`rpmzig/verify.h`, and the install/erase/scriptlet/trigger
+engines used from `client/rpmtrans_native.c`):
 
 - **rpmdb reader** (T1): `tdnf_rpmdb_count_packages`,
   `tdnf_rpmdb_iter_*`, `tdnf_rpmdb_cookie`,
@@ -118,6 +119,17 @@ the C ABI in `rpmzig/rpmdb.h` and `rpmzig/verify.h`):
   `client/gpgcheck_zig.c`. Backed entirely by the pure-Zig
   OpenPGP verifier in `rpmzig/pgp/*.zig` (see
   plan-pure-zig-pgp.md, issue #14).
+- **Composed native transaction executor** (T4, issue #117):
+  `client/rpmtrans_native.c` composes the rpmzig install,
+  rpmdb-write, file-erase, scriptlet, trigger, and (optional)
+  Lua engines into a full replacement for `rpmtsRun`. It runs
+  `%pretrans` once, then per-item in native order
+  `%pre`→file-install→rpmdb-write→`%post`→`%triggerin`; for
+  upgrades the old blob is torn down via
+  `%triggerun`→`%preun`→file-erase-of-old→`%postun`→`%triggerpostun`
+  (arg2 correctly = 1 while the new instance survives), and
+  finally `%posttrans` once. Multi-instance upgrades
+  (`nPriors >= 2`) are refused loudly with a clear error.
 
 libtdnf now uses the pure-Zig OpenPGP verifier
 unconditionally on the package-install path, with
@@ -126,16 +138,34 @@ for the initial header read. The build no longer has a
 verifier-selection switch, and libtdnf does **not** link
 `libgpgme.so.11`, `libgpg-error.so.0`, or `libassuan.so.0`.
 
+Build flags:
+
+| Flag                                        | Default | Meaning                                                    |
+|---------------------------------------------|---------|------------------------------------------------------------|
+| `-Drpmzig-transaction-execute=<bool>`       | `true`  | Composed native transaction executor. Set to `false` to fall back to librpm's `rpmtsRun`. |
+| `-Drpmzig-lua=<bool>`                       | `true`  | Native Lua scriptlet dispatch (`<lua>`-tagged `%pre`/`%post`/etc.). Needed for real base packages (Fedora `bash`/`filesystem`/`glibc`/`setup`, Azure Linux `filesystem`). |
+| `-Drpmzig-lua-lib=lua5.4`/`lua`             | detected | pkg-config module name for the Lua runtime. |
+
+The crosscheck-only scaffolding flags used during T4 development
+(`-Drpmzig-file-install-crosscheck`, `-Drpmzig-file-erase-crosscheck`,
+`-Drpmzig-transaction-check`) have been removed — their behaviours
+are now unconditional.
+
 Smoke-test consumers under `libexec/tdnf/`:
 `tdnf-rpmdb-count`, `tdnf-rpmdb-list`, `tdnf-rpmdb-pubkeys`,
 `tdnf-rpm-info`, `tdnf-rpm-files`, `tdnf-rpm-verify` (the last
 supports `--key` and `--rpmdb [root]`, using the same pure-Zig
-verification path as libtdnf).
+verification path as libtdnf), `tdnf-rpm-install`, `tdnf-rpm-erase`,
+`tdnf-rpm-trigger`, `tdnf-rpm-scriptlet`.
 
-After T3, librpm in libtdnf is purely the
-**transaction-execution backend** — the same role it plays in
-`dnf5`. T4 (transaction execution) is intentionally out of
-scope.
+**Remaining librpm dependencies** (documented follow-up, not
+scope for T4): `client/gpgcheck.c` still uses
+`rpmReadPackageFile`/`rpmtsImportPubkey`/`rpmtsVfyLevel` for
+package-header parsing and pubkey import; `client/utils.c` uses
+`rpmtsInitIterator(RPMTAG_PROVIDES)` for distroverpkg lookup;
+`client/api.c` retains the `rpm --root` verify path. As a
+result, `librpm.so.9`/`librpmio.so.9` are still linked and
+`librpm-dev` remains a build dependency.
 
 **Adding gpgme-using Zig code:** don't put
 `mod.linkSystemLibrary("gpgme", …)` on a static-library module —
