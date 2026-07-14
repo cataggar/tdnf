@@ -10,7 +10,7 @@ names; equivalent `*-devel` packages on rpm distros):
 
 ```
 librpm-dev libexpat1-dev \
-libsqlite3-dev libgpgme-dev libpopt-dev pkg-config
+libsqlite3-dev libgpgme-dev libpopt-dev liblua5.4-dev pkg-config
 ```
 
 Then:
@@ -26,19 +26,20 @@ Debug build:
 zig build -Doptimize=Debug install --prefix ./out
 ```
 
-Optional native Lua scriptlet support (for `<lua>` RPM scriptlets) is
-enabled by default. Disable it with:
+Native Lua scriptlet support (for `<lua>` RPM scriptlets) is enabled by
+default, since real base packages in supported distros (Fedora
+`bash`/`glibc`/`filesystem`/`setup`, Azure Linux `filesystem`) use
+`<lua>`-tagged scriptlets. The default link name is `lua`; on distros
+that package the library under another name (for example Debian/
+Ubuntu's `liblua5.4-dev`), pass `-Drpmzig-lua-lib=lua5.4`:
 
 ```sh
-zig build -Drpmzig-lua=false install --prefix ./out
+zig build -Drpmzig-lua-lib=lua5.4 install --prefix ./out
 ```
 
-Real base packages in supported distros (Fedora `bash`/`glibc`/
-`filesystem`/`setup`, Azure Linux `filesystem`) use `<lua>`-tagged
-scriptlets, so leaving this on is recommended. The default link
-name is `lua`; on distros that package the library under another
-name (for example Debian/Ubuntu's `liblua5.4-dev`), pass
-`-Drpmzig-lua-lib=lua5.4`.
+Disable Lua support entirely with `-Drpmzig-lua=false` (this fails
+loudly on any `<lua>`-tagged scriptlet at execution time rather than
+silently mis-executing it).
 
 The composed native transaction executor (rpmzig install, rpmdb-write,
 file-erase, scriptlet, trigger engines) is the sole transaction-

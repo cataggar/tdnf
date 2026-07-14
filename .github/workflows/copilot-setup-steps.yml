@@ -38,6 +38,7 @@ jobs:
             libsqlite3-dev \
             libgpgme-dev \
             libpopt-dev \
+            liblua5.4-dev \
             pkg-config \
             flake8
 
@@ -61,9 +62,9 @@ jobs:
       - name: Warm build (Debug + ReleaseSafe)
         continue-on-error: true
         run: |
-          zig build install --prefix ./out
+          zig build -Drpmzig-lua-lib=lua5.4 install --prefix ./out
           rm -rf out zig-out
-          zig build -Doptimize=ReleaseSafe install --prefix ./out
+          zig build -Doptimize=ReleaseSafe -Drpmzig-lua-lib=lua5.4 install --prefix ./out
 
       - name: Smoke test
         continue-on-error: true
