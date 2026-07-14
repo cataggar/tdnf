@@ -36,6 +36,7 @@ jobs:
             libsqlite3-dev \
             libgpgme-dev \
             libpopt-dev \
+            liblua5.4-dev \
             pkg-config
 
       - name: Install Zig
@@ -56,6 +57,7 @@ jobs:
         run: |
           zig build \
             -Doptimize=ReleaseSafe \
+            -Drpmzig-lua-lib=lua5.4 \
             "-Dversion=${{ steps.version.outputs.version }}" \
             install --prefix ./out
 

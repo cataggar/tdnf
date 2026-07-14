@@ -9,11 +9,16 @@ HTTP/TLS stack. It ships a public C library (`libtdnf`) plus CLI binaries.
 The build is driven by **Zig 0.16+** (no CMake — migrated to `build.zig`).
 The host needs `librpm-dev`, `libexpat1-dev`,
 `libsqlite3-dev`, `libgpgme-dev`,
-`libpopt-dev` (Debian/Ubuntu names — `*-devel` on rpm distros).
+`libpopt-dev`, `liblua5.4-dev` (Debian/Ubuntu names — `*-devel`/`lua-devel`
+on rpm distros). Native Lua scriptlet support (`rpmzig-lua`) defaults to
+`true` (real base packages use `<lua>`-tagged scriptlets), so on Debian/
+Ubuntu every `zig build` invocation needs `-Drpmzig-lua-lib=lua5.4` (the
+system package links as `lua5.4`, not the default `lua`) — this applies
+to `install`, `test`, and `lint`/`check` alike.
 
 ```sh
 # build + install into ./out
-zig build -Doptimize=ReleaseSafe install --prefix ./out
+zig build -Doptimize=ReleaseSafe -Drpmzig-lua-lib=lua5.4 install --prefix ./out
 
 # tests only (runs `pytest -v` in pytests/, depends on install). Needs an
 # rpm-aware host with rpmbuild + createrepo_c + python pytest/requests/pyOpenSSL.
