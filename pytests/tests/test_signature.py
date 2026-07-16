@@ -167,6 +167,39 @@ def test_install_local_key(utils):
     assert get_new_gpg_keys(get_host_gpg_keys(utils), host_gpg_keys)
 
 
+def test_install_imports_all_configured_keys_before_verifying(utils):
+    set_gpgcheck(utils, True)
+    keydir = os.path.join(utils.config['repo_path'], 'photon-test', 'keys')
+    correct_key = os.path.join(keydir, 'pubkey.asc')
+    wrong_key = os.path.join(keydir, 'pubkey.wrong.asc')
+    set_repo_key(utils, 'file://{} file://{}'.format(wrong_key, correct_key))
+    host_gpg_keys = get_host_gpg_keys(utils)
+    pkgname = utils.config["sglversion_pkgname"]
+
+    ret = utils.run(['tdnf', 'install', '-y', pkgname])
+    assert ret['retval'] == 0
+    assert utils.check_package(pkgname)
+    assert len(get_new_gpg_keys(get_host_gpg_keys(utils), host_gpg_keys)) >= 2
+
+
+def test_install_rejects_malformed_repo_keyring(utils):
+    set_gpgcheck(utils, True)
+    keypath = os.path.join(
+        utils.config['repo_path'], 'photon-test', 'keys', 'malformed.asc')
+    with open(keypath, 'w') as keyfile:
+        keyfile.write('not an OpenPGP public key\n')
+
+    try:
+        set_repo_key(utils, 'file://{}'.format(keypath))
+        pkgname = utils.config["sglversion_pkgname"]
+        ret = utils.run(['tdnf', 'install', '-y', pkgname])
+        assert ret['retval'] == 1505
+        assert not utils.check_package(pkgname)
+    finally:
+        if os.path.exists(keypath):
+            os.remove(keypath)
+
+
 # import remote, correct key during install from repo config, expect success
 def test_install_remote_key(utils):
     set_gpgcheck(utils, True)

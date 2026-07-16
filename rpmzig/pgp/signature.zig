@@ -1,26 +1,27 @@
-//! OpenPGP Tag 2 (Signature) packet parser — v4 only.
+//! OpenPGP Tag 2 (Signature) packet parser — versions 4 and 6.
 //!
 //! Phase B, PR #4 of the pure-Zig PGP verifier plan
 //! (plan-pure-zig-pgp.md, section 5). Builds on the packet-framing
 //! and MPI reader from `packet.zig` (PR #2).
 //!
-//! Wire format (RFC 4880 §5.2.3 / RFC 9580 §5.2.3 — v4 body):
+//! Wire format (RFC 4880 §5.2.3 / RFC 9580 §5.2.3):
 //!
 //!   1 octet  version = 0x04
 //!   1 octet  signature type
 //!   1 octet  pk algorithm ID
 //!   1 octet  hash algorithm ID
-//!   2 octets hashed-subpacket length (N, BE16)
+//!   2 (v4) or 4 (v6) octets hashed-subpacket length (N)
 //!   N octets hashed subpackets
-//!   2 octets unhashed-subpacket length (M, BE16)
+//!   2 (v4) or 4 (v6) octets unhashed-subpacket length (M)
 //!   M octets unhashed subpackets
 //!   2 octets hash hint (first two octets of computed hash)
+//!   [v6 only: 1-octet salt length followed by the salt]
 //!   [signature material — algorithm-specific]
 //!
 //! For verification PR #5 needs the exact byte range from the
 //! version byte through the end of the hashed-subpacket data, which
 //! we expose as `Signature.hashed_prefix` — this is what feeds into
-//! the hash trailer `0x04 || 0xFF || BE32(hashed_prefix.len)`.
+//! the hash trailer `version || 0xFF || BE32(hashed_prefix.len)`.
 //!
 //! Subpacket framing (RFC 4880 §5.2.3.1): length is encoded the same
 //! way as a new-format packet body length (1/2/5 octets). The length
@@ -72,6 +73,8 @@ pub const HashAlgorithm = enum(u8) {
     sha384 = 9,
     sha512 = 10,
     sha224 = 11,
+    sha3_256 = 12,
+    sha3_512 = 14,
     _,
 };
 
@@ -90,10 +93,12 @@ pub const SignatureParseError = error{
     TruncatedPacket,
     UnknownCriticalSubpacket,
     MalformedSubpacket,
+    MalformedSalt,
+    MalformedSignatureMaterial,
 } || packet.ReaderError || packet.MpiError;
 
 pub const Signature = struct {
-    /// Always 4 for now — v3 is rejected, v6 not yet supported.
+    /// Version 4 or 6.
     version: u8,
     sig_type: SigType,
     pk_algo: PkAlgorithm,
@@ -107,19 +112,40 @@ pub const Signature = struct {
     hashed_subpackets: []const u8,
     unhashed_subpackets: []const u8,
     hash_hint: [2]u8,
+    /// Empty for v4. For v6 this aliases the packet body and has the
+    /// algorithm-defined length from RFC 9580 Table 23.
+    salt: []const u8,
     material: SigMaterial,
 
-    /// Walk the hashed area for an Issuer Fingerprint subpacket
-    /// (type 33). Returns the fingerprint payload with the leading
-    /// 1-octet version byte stripped (20 bytes for v4 keys, 32 for
-    /// v6). Returns `null` if the subpacket is absent. Errors
-    /// during iteration are swallowed — `parseBody` has already
-    /// validated framing.
+    /// Find an Issuer Fingerprint subpacket (type 33), preferring the
+    /// hashed area and falling back to the unhashed area. Returns the
+    /// fingerprint payload with its key-version octet stripped.
     pub fn issuerFingerprint(self: Signature) ?[]const u8 {
-        var it = iterateSubpackets(self.hashed_subpackets);
-        while (it.next() catch return null) |sub| {
-            if (sub.type_id == 33 and sub.data.len >= 1) {
-                return sub.data[1..];
+        const issuer = self.issuerFingerprintInfo() orelse return null;
+        return issuer.bytes;
+    }
+
+    pub const IssuerFingerprint = struct {
+        key_version: u8,
+        bytes: []const u8,
+    };
+
+    /// Issuer Fingerprint subpacket including its key version. A hashed
+    /// value is authoritative; an unhashed value is accepted only as a
+    /// fallback when the hashed area has none.
+    pub fn issuerFingerprintInfo(self: Signature) ?IssuerFingerprint {
+        inline for ([_][]const u8{
+            self.hashed_subpackets,
+            self.unhashed_subpackets,
+        }) |area| {
+            var it = iterateSubpackets(area);
+            while (it.next() catch return null) |sub| {
+                if (sub.type_id == 33 and sub.data.len >= 1) {
+                    return .{
+                        .key_version = sub.data[0],
+                        .bytes = sub.data[1..],
+                    };
+                }
             }
         }
         return null;
@@ -228,77 +254,146 @@ fn validateSubpackets(area: []const u8) SignatureParseError!void {
     }
 }
 
-fn parseMaterial(pk_algo: PkAlgorithm, material_bytes: []const u8) SignatureParseError!SigMaterial {
-    var r = packet.Reader{ .bytes = material_bytes };
-    switch (pk_algo) {
-        .rsa_sign_and_encrypt, .rsa_sign_only => {
-            const m = try packet.readMpi(&r);
-            return .{ .rsa = m };
-        },
-        .dsa => {
-            const rr = try packet.readMpi(&r);
-            const s = try packet.readMpi(&r);
-            return .{ .dsa = .{ .r = rr, .s = s } };
-        },
-        .ecdsa => {
-            const rr = try packet.readMpi(&r);
-            const s = try packet.readMpi(&r);
-            return .{ .ecdsa = .{ .r = rr, .s = s } };
-        },
-        .eddsa_legacy => {
-            const rr = try packet.readMpi(&r);
-            const s = try packet.readMpi(&r);
-            return .{ .eddsa_legacy = .{ .r = rr, .s = s } };
-        },
-        .ed25519 => {
-            const s = r.take(64) catch return error.TruncatedPacket;
-            var out: [64]u8 = undefined;
-            @memcpy(&out, s);
-            return .{ .ed25519 = out };
-        },
-        else => return .{ .unsupported = pk_algo },
+fn validateIssuerFingerprints(version: u8, area: []const u8) SignatureParseError!void {
+    var it = iterateSubpackets(area);
+    while (try it.next()) |sub| {
+        if (sub.type_id != 33) continue;
+        if (sub.data.len < 1 or sub.data[0] != version)
+            return error.MalformedSubpacket;
+        const expected_len: usize = switch (version) {
+            4 => 1 + 20,
+            6 => 1 + 32,
+            else => unreachable,
+        };
+        if (sub.data.len != expected_len) return error.MalformedSubpacket;
     }
 }
 
-/// Parse a v4 Signature packet body (the bytes *inside* the Tag 2
+fn readMaterialMpi(
+    reader: *packet.Reader,
+    strict: bool,
+) SignatureParseError!packet.Mpi {
+    const mpi = try packet.readMpi(reader);
+    if (strict and !packet.isCanonicalMpi(mpi))
+        return error.MalformedSignatureMaterial;
+    return mpi;
+}
+
+fn parseMaterial(
+    version: u8,
+    pk_algo: PkAlgorithm,
+    material_bytes: []const u8,
+) SignatureParseError!SigMaterial {
+    var r = packet.Reader{ .bytes = material_bytes };
+    const strict_mpi = version == 6;
+    const material: SigMaterial = switch (pk_algo) {
+        .rsa_sign_and_encrypt, .rsa_sign_only => blk: {
+            const m = try readMaterialMpi(&r, strict_mpi);
+            break :blk .{ .rsa = m };
+        },
+        .dsa => blk: {
+            const rr = try readMaterialMpi(&r, strict_mpi);
+            const s = try readMaterialMpi(&r, strict_mpi);
+            break :blk .{ .dsa = .{ .r = rr, .s = s } };
+        },
+        .ecdsa => blk: {
+            const rr = try readMaterialMpi(&r, strict_mpi);
+            const s = try readMaterialMpi(&r, strict_mpi);
+            break :blk .{ .ecdsa = .{ .r = rr, .s = s } };
+        },
+        .eddsa_legacy => blk: {
+            const rr = try packet.readMpi(&r);
+            const s = try packet.readMpi(&r);
+            break :blk .{ .eddsa_legacy = .{ .r = rr, .s = s } };
+        },
+        .ed25519 => blk: {
+            const s = r.take(64) catch return error.TruncatedPacket;
+            var out: [64]u8 = undefined;
+            @memcpy(&out, s);
+            break :blk .{ .ed25519 = out };
+        },
+        else => return .{ .unsupported = pk_algo },
+    };
+    if (r.pos != material_bytes.len) return error.MalformedSignatureMaterial;
+    return material;
+}
+
+fn readLength(body: []const u8, offset: usize, width: usize) SignatureParseError!usize {
+    if (width != 2 and width != 4) unreachable;
+    if (body.len - offset < width) return error.TruncatedPacket;
+    var value: usize = 0;
+    for (body[offset .. offset + width]) |byte| {
+        value = std.math.mul(usize, value, 256) catch return error.TruncatedPacket;
+        value = std.math.add(usize, value, byte) catch return error.TruncatedPacket;
+    }
+    return value;
+}
+
+fn saltLength(hash_algo: HashAlgorithm) ?usize {
+    return switch (hash_algo) {
+        .sha224, .sha256, .sha3_256 => 16,
+        .sha384 => 24,
+        .sha512, .sha3_512 => 32,
+        else => null,
+    };
+}
+
+/// Parse a v4 or v6 Signature packet body (the bytes *inside* the Tag 2
 /// packet header — caller has already framed via `packet.iterate`).
 pub fn parseBody(body: []const u8) SignatureParseError!Signature {
     if (body.len < 1) return error.TruncatedPacket;
     const version = body[0];
-    if (version != 4) return error.UnsupportedVersion;
+    if (version != 4 and version != 6) return error.UnsupportedVersion;
 
-    // Fixed v4 prefix: version(1) + sig_type(1) + pk_algo(1)
-    //                + hash_algo(1) + hashed_sub_len(2) = 6 octets.
-    if (body.len < 6) return error.TruncatedPacket;
+    const length_width: usize = if (version == 4) 2 else 4;
+    const fixed_prefix_len = 4 + length_width;
+    if (body.len < fixed_prefix_len) return error.TruncatedPacket;
 
     const sig_type: SigType = @enumFromInt(body[1]);
     const pk_algo: PkAlgorithm = @enumFromInt(body[2]);
     const hash_algo: HashAlgorithm = @enumFromInt(body[3]);
-    const hashed_sub_len: usize = (@as(usize, body[4]) << 8) | @as(usize, body[5]);
+    const hashed_sub_len = try readLength(body, 4, length_width);
 
-    // Need room for hashed subpackets + 2-octet unhashed length.
-    if (body.len < 6 + hashed_sub_len + 2) return error.TruncatedPacket;
-    const hashed_subpackets = body[6 .. 6 + hashed_sub_len];
-    const hashed_prefix = body[0 .. 6 + hashed_sub_len];
+    const hashed_end = std.math.add(usize, fixed_prefix_len, hashed_sub_len) catch
+        return error.TruncatedPacket;
+    if (body.len < hashed_end or body.len - hashed_end < length_width)
+        return error.TruncatedPacket;
+    const hashed_subpackets = body[fixed_prefix_len..hashed_end];
+    const hashed_prefix = body[0..hashed_end];
 
-    const unhashed_off = 6 + hashed_sub_len;
-    const unhashed_sub_len: usize =
-        (@as(usize, body[unhashed_off]) << 8) | @as(usize, body[unhashed_off + 1]);
+    const unhashed_sub_len = try readLength(body, hashed_end, length_width);
 
-    const sub_end = unhashed_off + 2 + unhashed_sub_len;
+    const unhashed_start = hashed_end + length_width;
+    const sub_end = std.math.add(usize, unhashed_start, unhashed_sub_len) catch
+        return error.TruncatedPacket;
     // Need room for unhashed subpackets + 2-octet hash hint.
     if (body.len < sub_end + 2) return error.TruncatedPacket;
-    const unhashed_subpackets = body[unhashed_off + 2 .. sub_end];
+    const unhashed_subpackets = body[unhashed_start..sub_end];
 
     const hash_hint = [_]u8{ body[sub_end], body[sub_end + 1] };
-    const material_bytes = body[sub_end + 2 ..];
+    var material_start = sub_end + 2;
+    var salt: []const u8 = &.{};
+    if (version == 6) {
+        if (material_start >= body.len) return error.TruncatedPacket;
+        const salt_len: usize = body[material_start];
+        material_start += 1;
+        if (body.len - material_start < salt_len) return error.TruncatedPacket;
+        salt = body[material_start .. material_start + salt_len];
+        material_start += salt_len;
+        if (saltLength(hash_algo)) |expected| {
+            if (salt.len != expected) return error.MalformedSalt;
+        }
+    }
+    const material_bytes = body[material_start..];
 
     // Validate subpacket framing in both areas before we surface the
     // packet — unknown criticals reject here.
     try validateSubpackets(hashed_subpackets);
     try validateSubpackets(unhashed_subpackets);
+    try validateIssuerFingerprints(version, hashed_subpackets);
+    try validateIssuerFingerprints(version, unhashed_subpackets);
 
-    const material = try parseMaterial(pk_algo, material_bytes);
+    const material = try parseMaterial(version, pk_algo, material_bytes);
 
     return Signature{
         .version = version,
@@ -309,6 +404,7 @@ pub fn parseBody(body: []const u8) SignatureParseError!Signature {
         .hashed_subpackets = hashed_subpackets,
         .unhashed_subpackets = unhashed_subpackets,
         .hash_hint = hash_hint,
+        .salt = salt,
         .material = material,
     };
 }
@@ -381,8 +477,13 @@ test "issuer fingerprint subpacket (type 33) extracted" {
     // length=22 (1 type + 1 version + 20 fpr), type=33, ver=4, 20-byte fpr.
     const hashed = [_]u8{
         0x16, 0x21, 0x04,
-        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A,
-        0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14,
+        0x01, 0x02, 0x03,
+        0x04, 0x05, 0x06,
+        0x07, 0x08, 0x09,
+        0x0A, 0x0B, 0x0C,
+        0x0D, 0x0E, 0x0F,
+        0x10, 0x11, 0x12,
+        0x13, 0x14,
     };
     const body = buildRsaBody(&hashed, "");
     const sig = try parseBody(&body);
@@ -391,11 +492,31 @@ test "issuer fingerprint subpacket (type 33) extracted" {
     try testing.expectEqualSlices(u8, hashed[3..], fpr);
 }
 
+test "issuer fingerprint falls back to unhashed area" {
+    const unhashed = [_]u8{
+        0x16, 0x21, 0x04,
+        0x01, 0x02, 0x03,
+        0x04, 0x05, 0x06,
+        0x07, 0x08, 0x09,
+        0x0A, 0x0B, 0x0C,
+        0x0D, 0x0E, 0x0F,
+        0x10, 0x11, 0x12,
+        0x13, 0x14,
+    };
+    const body = buildRsaBody("", &unhashed);
+    const sig = try parseBody(&body);
+    const fpr = sig.issuerFingerprint() orelse return error.TestExpectedFpr;
+    try testing.expectEqualSlices(u8, unhashed[3..], fpr);
+}
+
 test "issuer key id from unhashed area" {
     // length=9 (1 type + 8 keyid), type=16.
     const unhashed = [_]u8{
         0x09, 0x10,
-        0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
+        0xDE, 0xAD,
+        0xBE, 0xEF,
+        0xCA, 0xFE,
+        0xBA, 0xBE,
     };
     const body = buildRsaBody("", &unhashed);
     const sig = try parseBody(&body);
@@ -406,16 +527,47 @@ test "issuer key id from unhashed area" {
 test "hashed wins over unhashed for keyId" {
     const hashed = [_]u8{
         0x09, 0x10,
-        0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+        0x11, 0x11,
+        0x11, 0x11,
+        0x11, 0x11,
+        0x11, 0x11,
     };
     const unhashed = [_]u8{
         0x09, 0x10,
-        0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
+        0x22, 0x22,
+        0x22, 0x22,
+        0x22, 0x22,
+        0x22, 0x22,
     };
     const body = buildRsaBody(&hashed, &unhashed);
     const sig = try parseBody(&body);
     const kid = sig.issuerKeyId() orelse return error.TestExpectedKid;
     try testing.expectEqualSlices(u8, hashed[2..], &kid);
+}
+
+test "v6 signature MPIs require canonical bit lengths" {
+    var body = [_]u8{0} ** 34;
+    body[0] = 6;
+    body[2] = @intFromEnum(PkAlgorithm.rsa_sign_and_encrypt);
+    body[3] = @intFromEnum(HashAlgorithm.sha256);
+    body[14] = 16;
+    body[32] = 8;
+    body[33] = 0x80;
+    _ = try parseBody(&body);
+
+    body[32] = 7;
+    try testing.expectError(
+        error.MalformedSignatureMaterial,
+        parseBody(&body),
+    );
+
+    var v4_body = [_]u8{0} ** 13;
+    v4_body[0] = 4;
+    v4_body[2] = @intFromEnum(PkAlgorithm.rsa_sign_and_encrypt);
+    v4_body[3] = @intFromEnum(HashAlgorithm.sha256);
+    v4_body[11] = 7;
+    v4_body[12] = 0x80;
+    _ = try parseBody(&v4_body);
 }
 
 test "unknown non-critical subpacket is skipped" {

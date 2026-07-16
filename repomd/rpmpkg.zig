@@ -337,8 +337,17 @@ fn appendRelations(
         return error.InvalidRpmHeader;
     }
 
+    var name_iter = (hdr.stringArrayIteratorChecked(resolved.name) catch
+        return error.InvalidRpmHeader) orelse return error.InvalidRpmHeader;
+    var version_iter = (hdr.stringArrayIteratorChecked(resolved.version) catch
+        return error.InvalidRpmHeader) orelse return error.InvalidRpmHeader;
+
     const start = relations.items.len;
     for (0..count) |index| {
+        const name = (name_iter.next() catch
+            return error.InvalidRpmHeader) orelse return error.InvalidRpmHeader;
+        const version = (version_iter.next() catch
+            return error.InvalidRpmHeader) orelse return error.InvalidRpmHeader;
         const raw_flags = hdr.u32ArrayItem(resolved.flags, index) orelse return error.InvalidRpmHeader;
         if (resolved.require_strong) |want_strong| {
             const is_strong = (raw_flags & dep_strong) != 0;
@@ -347,14 +356,10 @@ fn appendRelations(
             }
         }
 
-        const name = hdr.stringArrayItem(resolved.name, index) orelse return error.InvalidRpmHeader;
         if (name.len == 0) return error.InvalidRpmHeader;
 
         const flags = try decodeRelationFlags(raw_flags);
-        const evr = try parseEvr(
-            allocator,
-            hdr.stringArrayItem(resolved.version, index) orelse return error.InvalidRpmHeader,
-        );
+        const evr = try parseEvr(allocator, version);
 
         relations.append(.{
             .name = try model.dup(allocator, name),
@@ -397,13 +402,28 @@ fn appendFiles(
     else
         0;
 
+    const dirnames = allocator.alloc([]const u8, dirname_count) catch
+        return error.OutOfMemory;
+    defer allocator.free(dirnames);
+
+    var dirname_iter = (hdr.stringArrayIteratorChecked(.dirnames) catch
+        return error.InvalidRpmHeader) orelse return error.InvalidRpmHeader;
+    for (dirnames) |*dirname| {
+        dirname.* = (dirname_iter.next() catch
+            return error.InvalidRpmHeader) orelse return error.InvalidRpmHeader;
+    }
+
+    var basename_iter = (hdr.stringArrayIteratorChecked(.basenames) catch
+        return error.InvalidRpmHeader) orelse return error.InvalidRpmHeader;
+
     const start = files.items.len;
     for (0..basename_count) |index| {
         const dirname_index = hdr.u32ArrayItem(.dirindexes, index) orelse return error.InvalidRpmHeader;
+        const basename_raw = (basename_iter.next() catch
+            return error.InvalidRpmHeader) orelse return error.InvalidRpmHeader;
         if (dirname_index >= dirname_count) continue;
 
-        const dirname = hdr.stringArrayItem(.dirnames, dirname_index) orelse return error.InvalidRpmHeader;
-        const basename_raw = hdr.stringArrayItem(.basenames, index) orelse return error.InvalidRpmHeader;
+        const dirname = dirnames[dirname_index];
         const basename = if (basename_raw.len != 0 and basename_raw[0] == '/') basename_raw[1..] else basename_raw;
 
         files.append(.{
@@ -431,18 +451,21 @@ fn appendChangelogs(
     if (author_count == 0 or text_count == 0 or time_count == 0) return .{};
     if (author_count != text_count or author_count != time_count) return .{};
 
+    var author_iter = (hdr.stringArrayIteratorChecked(.changelogname) catch
+        return error.InvalidRpmHeader) orelse return error.InvalidRpmHeader;
+    var text_iter = (hdr.stringArrayIteratorChecked(.changelogtext) catch
+        return error.InvalidRpmHeader) orelse return error.InvalidRpmHeader;
+
     const start = changelogs.items.len;
     for (0..author_count) |index| {
+        const author = (author_iter.next() catch
+            return error.InvalidRpmHeader) orelse return error.InvalidRpmHeader;
+        const text = (text_iter.next() catch
+            return error.InvalidRpmHeader) orelse return error.InvalidRpmHeader;
         changelogs.append(.{
-            .author = try model.dup(
-                allocator,
-                hdr.stringArrayItem(.changelogname, index) orelse return error.InvalidRpmHeader,
-            ),
+            .author = try model.dup(allocator, author),
             .timestamp = hdr.u32ArrayItem(.changelogtime, index) orelse return error.InvalidRpmHeader,
-            .text = try model.dup(
-                allocator,
-                hdr.stringArrayItem(.changelogtext, index) orelse return error.InvalidRpmHeader,
-            ),
+            .text = try model.dup(allocator, text),
         }) catch return error.OutOfMemory;
     }
 
@@ -673,6 +696,15 @@ fn buildHeaderBlob(
     defer index.deinit();
 
     for (entries) |entry| {
+        const alignment: usize = switch (entry) {
+            .int16_array => 2,
+            .int32, .int32_array => 4,
+            .int64 => 8,
+            else => 1,
+        };
+        while (data.items.len % alignment != 0) {
+            try data.append(0);
+        }
         const offset: u32 = @intCast(data.items.len);
         var tag: u32 = 0;
         var typ: TestEntryType = .string;
@@ -750,9 +782,41 @@ fn buildHeaderBlob(
 fn buildStandaloneHeader(
     allocator: std.mem.Allocator,
     header_blob: []const u8,
+    region_tag: rpm_header.RegionTag,
 ) ![]u8 {
     const magic = [_]u8{ 0x8e, 0xad, 0xe8, 0x01, 0x00, 0x00, 0x00, 0x00 };
-    return std.mem.concat(allocator, u8, &.{ &magic, header_blob });
+    const index_count = readBeU32(header_blob[0..4]);
+    const data_size = readBeU32(header_blob[4..8]);
+    const new_index_count = index_count + 1;
+    const new_data_size = data_size + 16;
+    const raw_len = 8 + @as(usize, new_index_count) * 16 + new_data_size;
+    const standalone = try allocator.alloc(u8, magic.len + raw_len);
+    @memcpy(standalone[0..magic.len], &magic);
+
+    const raw = standalone[magic.len..];
+    writeBeU32(raw[0..4], new_index_count);
+    writeBeU32(raw[4..8], new_data_size);
+    writeBeU32(raw[8..12], @intFromEnum(region_tag));
+    writeBeU32(raw[12..16], @intFromEnum(rpm_header.TypeId.bin));
+    writeBeU32(raw[16..20], data_size);
+    writeBeU32(raw[20..24], 16);
+
+    const old_index_len = @as(usize, index_count) * 16;
+    @memcpy(raw[24 .. 24 + old_index_len], header_blob[8 .. 8 + old_index_len]);
+    const data_start = 8 + @as(usize, new_index_count) * 16;
+    @memcpy(
+        raw[data_start .. data_start + data_size],
+        header_blob[8 + old_index_len ..][0..data_size],
+    );
+    const trailer = raw[data_start + data_size ..][0..16];
+    writeBeU32(trailer[0..4], @intFromEnum(region_tag));
+    writeBeU32(trailer[4..8], @intFromEnum(rpm_header.TypeId.bin));
+    writeBeU32(
+        trailer[8..12],
+        @bitCast(-@as(i32, @intCast(new_index_count * 16))),
+    );
+    writeBeU32(trailer[12..16], 16);
+    return standalone;
 }
 
 fn buildMinimalRpmBytes(
@@ -767,10 +831,18 @@ fn buildMinimalRpmBytes(
     });
     defer allocator.free(sig_header_blob);
 
-    const sig_standalone = try buildStandaloneHeader(allocator, sig_header_blob);
+    const sig_standalone = try buildStandaloneHeader(
+        allocator,
+        sig_header_blob,
+        .signatures,
+    );
     defer allocator.free(sig_standalone);
 
-    const main_standalone = try buildStandaloneHeader(allocator, main_header_blob);
+    const main_standalone = try buildStandaloneHeader(
+        allocator,
+        main_header_blob,
+        .immutable,
+    );
     defer allocator.free(main_standalone);
 
     const sig_pad = (8 - (sig_standalone.len % 8)) % 8;
@@ -795,6 +867,20 @@ fn appendBeU16(list: *std.array_list.Managed(u8), value: u16) !void {
     try list.append(@intCast(value & 0xff));
 }
 
+fn readBeU32(bytes: []const u8) u32 {
+    return @as(u32, bytes[0]) << 24 |
+        @as(u32, bytes[1]) << 16 |
+        @as(u32, bytes[2]) << 8 |
+        @as(u32, bytes[3]);
+}
+
+fn writeBeU32(bytes: []u8, value: u32) void {
+    bytes[0] = @intCast((value >> 24) & 0xff);
+    bytes[1] = @intCast((value >> 16) & 0xff);
+    bytes[2] = @intCast((value >> 8) & 0xff);
+    bytes[3] = @intCast(value & 0xff);
+}
+
 fn appendBeU32(list: *std.array_list.Managed(u8), value: u32) !void {
     try list.append(@intCast((value >> 24) & 0xff));
     try list.append(@intCast((value >> 16) & 0xff));
@@ -811,6 +897,25 @@ fn appendBeU64(list: *std.array_list.Managed(u8), value: u64) !void {
     try list.append(@intCast((value >> 16) & 0xff));
     try list.append(@intCast((value >> 8) & 0xff));
     try list.append(@intCast(value & 0xff));
+}
+
+pub fn makeMinimalTransactionHeaderForTest(
+    allocator: std.mem.Allocator,
+) ![]u8 {
+    const header_blob = try buildHeaderBlob(allocator, &.{
+        .{ .string = .{ .tag = @intFromEnum(rpm_header.TagId.name), .value = "verified-package" } },
+        .{ .string = .{ .tag = @intFromEnum(rpm_header.TagId.version), .value = "1.0" } },
+        .{ .string = .{ .tag = @intFromEnum(rpm_header.TagId.release), .value = "1" } },
+        .{ .string = .{ .tag = @intFromEnum(rpm_header.TagId.arch), .value = "noarch" } },
+    });
+    defer allocator.free(header_blob);
+    const standalone = try buildStandaloneHeader(
+        allocator,
+        header_blob,
+        .immutable,
+    );
+    defer allocator.free(standalone);
+    return allocator.dupe(u8, standalone[8..]);
 }
 
 test "builds package from rpm header tags" {
@@ -971,12 +1076,6 @@ test "builds packages from rpm file and rpmdb iterator" {
         .{ .string = .{ .tag = @intFromEnum(rpm_header.TagId.summary), .value = "Package two" } },
         .{ .int32 = .{ .tag = @intFromEnum(rpm_header.TagId.size), .value = 1234 } },
         .{ .string = .{ .tag = @intFromEnum(rpm_header.TagId.sha256header), .value = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
-        .{ .string_array = .{ .tag = @intFromEnum(rpm_header.TagId.providename), .values = &[_][]const u8{} } },
-        .{ .string_array = .{ .tag = @intFromEnum(rpm_header.TagId.provideversion), .values = &[_][]const u8{} } },
-        .{ .int32_array = .{ .tag = @intFromEnum(rpm_header.TagId.provideflags), .values = &[_]u32{} } },
-        .{ .string_array = .{ .tag = @intFromEnum(rpm_header.TagId.requirename), .values = &[_][]const u8{} } },
-        .{ .string_array = .{ .tag = @intFromEnum(rpm_header.TagId.requireversion), .values = &[_][]const u8{} } },
-        .{ .int32_array = .{ .tag = @intFromEnum(rpm_header.TagId.requireflags), .values = &[_]u32{} } },
     });
     defer testing.allocator.free(header_blob);
 

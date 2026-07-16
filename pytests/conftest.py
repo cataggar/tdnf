@@ -12,6 +12,7 @@ import sys
 import time
 import json
 import errno
+import fcntl
 import socket
 import shutil
 import pytest
@@ -20,6 +21,7 @@ import platform
 import requests
 import subprocess
 import configparser
+import uuid
 from OpenSSL import crypto
 from urllib.parse import urlparse
 from multiprocessing import Process
@@ -32,10 +34,76 @@ from cli_testlib import (
 )
 
 ARCH = platform.machine()
+sys.modules.setdefault('conftest', sys.modules[__name__])
+_SESSION_REPOS = {}
+
+
+def _cleanup_session_repo(path):
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def _rewrite_session_repo_paths(repo_path):
+    for config_path in [
+            os.path.join(repo_path, 'tdnf.conf'),
+            os.path.join(repo_path, '.baseline', 'tdnf.conf')]:
+        config = configparser.ConfigParser()
+        config.read(config_path)
+        config['main']['repodir'] = os.path.join(
+            repo_path,
+            'yum.repos.d',
+        )
+        config['main']['cachedir'] = os.path.join(
+            repo_path,
+            'cache',
+            'tdnf',
+        )
+        with open(config_path, 'w') as stream:
+            config.write(stream, space_around_delimiters=False)
+
+
+def _prepare_session_repo(config):
+    seed_path = os.path.abspath(config['repo_path'])
+    existing = _SESSION_REPOS.get(seed_path)
+    if existing:
+        return existing
+
+    build_dir = os.path.abspath(config['build_dir'])
+    os.makedirs(build_dir, exist_ok=True)
+    lock_path = os.path.join(build_dir, '.pytest-repo-seed.lock')
+    script = os.path.join(config['test_path'], 'repo/setup-repo.sh')
+    with open(lock_path, 'a+') as seed_lock:
+        fcntl.flock(seed_lock, fcntl.LOCK_EX)
+        result = subprocess.run(
+            ['bash', script, seed_path, config['specs_dir']],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if result.returncode:
+            pytest.exit(
+                'Failed to prepare immutable test repository seed:\n{}'
+                .format(result.stderr)
+            )
+
+        session_parent = os.path.join(build_dir, 'pytest-sessions')
+        os.makedirs(session_parent, exist_ok=True)
+        session_root = os.path.join(
+            session_parent,
+            '{}-{}'.format(os.getpid(), uuid.uuid4().hex),
+        )
+        repo_path = os.path.join(session_root, 'repo')
+        shutil.copytree(seed_path, repo_path)
+
+    _rewrite_session_repo_paths(repo_path)
+    _SESSION_REPOS[seed_path] = repo_path
+    atexit.register(_cleanup_session_repo, session_root)
+    return repo_path
 
 
 def StopTestRepoServer(server):
-    server.terminate()
+    if server.is_alive():
+        server.terminate()
     server.join()
 
 
@@ -155,14 +223,19 @@ class TestUtils(object):
         self.config = JsonWrapper(config_file).read()
         if cli_args:
             self.config.update(cli_args)
+        test_prefix = os.environ.get('TDNF_TEST_PREFIX')
+        if test_prefix:
+            test_prefix = os.path.abspath(test_prefix)
+            self.config['build_dir'] = test_prefix
+            self.config['bin_dir'] = os.path.join(test_prefix, 'bin')
+            self.config['plugin_path'] = os.path.join(
+                test_prefix, 'lib', 'tdnf-plugins')
+            self.config['repo_path'] = os.path.join(test_prefix, 'repo')
+            self.config['history_util_binary'] = os.path.join(
+                test_prefix, 'libexec', 'tdnf', 'tdnf-history-util')
         self.config['distribution'] = os.environ.get('DIST', 'photon')
-        script = os.path.join(self.config['test_path'], 'repo/setup-repo.sh')
-        ret = self.run(['bash', script, self.config['repo_path'], self.config['specs_dir']])
-        if ret['retval']:
-            pytest.exit("An error occured while running {}, stdout: \n{}".format(
-                script,
-                "\n".join(ret['stdout'])
-            ))
+        self.config['repo_seed_path'] = self.config['repo_path']
+        self.config['repo_path'] = _prepare_session_repo(self.config)
         self.tdnf_config = configparser.ConfigParser()
         self.tdnf_config.read(os.path.join(self.config['repo_path'],
                                            'tdnf.conf'))
@@ -205,6 +278,28 @@ class TestUtils(object):
 
         with open(filename, 'w') as f:
             config.write(f, space_around_delimiters=False)
+
+    def reset_repo_config(self):
+        script = os.path.join(
+            self.config['test_path'],
+            'repo/setup-repo.sh',
+        )
+        ret = self._run([
+            'bash',
+            script,
+            self.config['repo_path'],
+            self.config['specs_dir'],
+        ])
+        if ret['retval']:
+            pytest.fail(
+                "Failed to restore test repository configuration:\n{}"
+                .format("\n".join(ret['stderr']))
+            )
+        self.tdnf_config.clear()
+        self.tdnf_config.read(os.path.join(
+            self.config['repo_path'],
+            'tdnf.conf',
+        ))
 
     def version_str_to_int(self, version):
         version_parts = version.split('.')
@@ -434,6 +529,11 @@ def utils():
     for retry in range(0, 10):
         result = sock.connect_ex(('localhost', 8080))
         if not result:
+            if not server.is_alive():
+                pytest.exit(
+                    'Port 8080 is owned by another process; '
+                    'run pytest in an isolated network namespace'
+                )
             print('Server is up and running')
             sock.close()
             break
@@ -453,9 +553,11 @@ def check_packages_consistency(utils, request):
     Automatically runs before and after every test.
     Verifies that the set of installed packages remains unchanged.
     """
+    utils.reset_repo_config()
     baseline = [p for p in utils.list_installed_packages() if not p.startswith('gpg-pubkey')]
     yield
     final = [p for p in utils.list_installed_packages() if not p.startswith('gpg-pubkey')]
+    utils.reset_repo_config()
     if set(final) != set(baseline):
         __tracebackhide__ = True
         added = sorted(set(final) - set(baseline))

@@ -80,8 +80,8 @@ Common Options
                            Example: tdnf --repoid=base install pkg
 --rpmdefine <macro>        Define RPM macro
                            Example: tdnf --rpmdefine='_dbpath <path>' install package
---rpmverbosity <level>     RPM verbosity level (emergency|alert|critical|error|warning|notice|info|debug)
-                           Example: tdnf --rpmverbosity=debug install package
+--rpmverbosity <level>     Compatibility no-op; accepted for CLI compatibility
+                           (the native transaction engine has no RPM logger)
 --sec-severity <level>     Filter by security severity (Critical|Important|Moderate|Low)
                            Example: tdnf updateinfo --sec-severity=Critical
 --security                 Only show security updates

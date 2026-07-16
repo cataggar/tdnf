@@ -13,6 +13,17 @@
 
 extern uid_t gEuid;
 
+uint32_t
+tdnf_repomd_native_verified_transaction_solve_config(
+    const TDNF_REPOMD_NATIVE_TRANSACTION_ITEM_V2 *pItems,
+    const unsigned char *const *ppbHeaders,
+    const size_t *pnHeaderLengths,
+    const uint64_t *pqwPackageSizes,
+    uint32_t dwItemCount,
+    const tdnf_rpm_config *pConfig,
+    TDNF_REPOMD_NATIVE_TRANSACTION_PLAN **ppPlan
+    );
+
 //client.c
 uint32_t
 TDNFApplyScopeFilter(
@@ -139,17 +150,41 @@ ReadGPGKeyFile(
 
 uint32_t
 TDNFImportGPGKeyFile(
-    rpmts pTS,
+    void *pLegacyTransaction,
     const char* pszFile
     );
 
 uint32_t
+TDNFImportGPGKeyData(
+    const tdnf_rpm_config *pRpmConfig,
+    const void *pKeyData,
+    size_t nKeyDataSize
+    );
+
+uint32_t
 TDNFGPGCheckPackage(
-    PTDNFRPMTS pTS,
     PTDNF pTdnf,
     PTDNF_REPO_DATA pRepo,
     const char* pszFilePath,
-    Header *pRpmHeader
+    tdnf_rpm_file **ppRpmFile
+    );
+
+uint32_t
+TDNFGPGCheckPackageEx(
+    PTDNF pTdnf,
+    PTDNF_REPO_DATA pRepo,
+    const char* pszFilePath,
+    tdnf_rpm_file **ppRpmFile,
+    int *pnPolicyRejected
+    );
+
+uint32_t
+TDNFGPGCheckPackageWithFile(
+    PTDNF pTdnf,
+    PTDNF_REPO_DATA pRepo,
+    const char* pszFilePath,
+    tdnf_rpm_file *pRpmFile,
+    int *pnPolicyRejected
     );
 
 uint32_t
@@ -842,12 +877,12 @@ TDNFRpmExecHistoryTransaction(
 
 void*
 TDNFRpmCB(
-    const void* pArg,
-    const rpmCallbackType what,
-    const rpm_loff_t amount,
-    const rpm_loff_t total,
-    fnpyKey key,
-    void* data
+    const void *pArg,
+    int nWhat,
+    int64_t llAmount,
+    int64_t llTotal,
+    const void *pKey,
+    void *pData
     );
 
 uint32_t
@@ -860,12 +895,14 @@ TDNFPopulateTransaction(
 uint32_t
 TDNFTransAddErasePkgs(
     PTDNFRPMTS pTS,
+    PTDNF pTdnf,
     PTDNF_PKG_INFO pInfo
     );
 
 uint32_t
 TDNFTransAddErasePkg(
     PTDNFRPMTS pTS,
+    PTDNF pTdnf,
     PTDNF_PKG_INFO pInfo
     );
 
@@ -970,6 +1007,13 @@ TDNFTouchFile(
 uint32_t
 TDNFGetReleaseVersion(
    const char* pszRootDir,
+   const char* pszDistroVerPkg,
+   char** ppszVersion
+   );
+
+uint32_t
+TdnfGetReleaseVersionConfig(
+   const tdnf_rpm_config* pRpmConfig,
    const char* pszDistroVerPkg,
    char** ppszVersion
    );

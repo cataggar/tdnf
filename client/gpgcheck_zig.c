@@ -1,147 +1,184 @@
 /*
- * libtdnf's pure-Zig rpmzig signature verifier for
- * TDNFGPGCheckPackage.
- *
- * This function replaces the historical librpm
- * signature-verification path: rpmzig is the sole signature verifier
- * on the install path. The rpmts is separately set to
- * RPMVSF_MASK_NOSIGNATURES so rpmReadPackageFile runs as a
- * header-only reader.
- *
- * Trust set:
- *   - every gpg-pubkey-* installed in the rpmdb (the same keyring
- *     'rpm --import' / TDNFImportGPGKeyFile build up over time)
- *   - the fresh key tdnf just fetched for this repo
- *
- * The status codes match TDNF_RPMZIG_STATUS_* from verify.h.
+ * The C package-checker keeps error-code policy and user interaction.  This
+ * narrow bridge owns no files or buffers: rpmzig receives the parsed file
+ * handle, configuration, and complete fresh key set directly.
  */
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include "includes.h"
 
-#include "../rpmzig/rpmdb.h"
 #include "../rpmzig/verify.h"
 #include "gpgcheck_zig.h"
 
-/*
- * Slurp a key file into a heap buffer. Returns 0 on success.
- * Caller frees *out.
- */
-static int slurp_key(const char *path, unsigned char **out, size_t *out_len)
-{
-    FILE *fp = NULL;
-    long n = 0;
-    unsigned char *buf = NULL;
+static int
+SlurpKey(
+    const char *pszPath,
+    unsigned char **ppKey,
+    size_t *pnKeyLength
+    );
 
-    fp = fopen(path, "rb");
-    if (!fp) return -1;
-    if (fseek(fp, 0, SEEK_END) != 0) {
-        fclose(fp);
-        return -1;
-    }
-    n = ftell(fp);
-    if (n < 0) {
-        fclose(fp);
-        return -1;
-    }
-    rewind(fp);
-    buf = malloc((size_t)n);
-    if (!buf) {
-        fclose(fp);
-        return -1;
-    }
-    if (fread(buf, 1, (size_t)n, fp) != (size_t)n) {
-        free(buf);
-        fclose(fp);
-        return -1;
-    }
-    fclose(fp);
-    *out = buf;
-    *out_len = (size_t)n;
-    return 0;
-}
-
-int TDNFRpmzigVerify(
-    const char *pkg_path,
-    const char *key_path,
-    const char *install_root,
-    int *out_status)
+int
+TDNFRpmzigVerify(
+    const char *pszPkgPath,
+    const char *pszKeyPath,
+    const char *pszInstallRoot,
+    int *pnStatus
+    )
 {
-    tdnf_rpm_file *fh = NULL;
-    unsigned char *fresh_key = NULL;
-    size_t fresh_key_len = 0;
-    tdnf_rpmdb_pubkeys_iter *it = NULL;
+    tdnf_rpm_file *pFile = NULL;
+    unsigned char *pFreshKey = NULL;
+    size_t nFreshKeyLength = 0;
+    tdnf_rpmdb_pubkeys_iter *pIter = NULL;
 #define MAX_RPMDB_KEYS 128
-    char *rpmdb_keys[MAX_RPMDB_KEYS];
-    size_t rpmdb_key_lens[MAX_RPMDB_KEYS];
-    size_t rpmdb_count = 0;
-    const void *blobs[MAX_RPMDB_KEYS + 1];
-    size_t lens[MAX_RPMDB_KEYS + 1];
-    size_t total_keys = 0;
-    int status = TDNF_RPMZIG_STATUS_INTERNAL_ERROR;
-    int rc = 0;
+    char *ppRpmDbKeys[MAX_RPMDB_KEYS] = {0};
+    size_t pnRpmDbKeyLengths[MAX_RPMDB_KEYS] = {0};
+    size_t nRpmDbCount = 0;
+    const void *ppKeys[MAX_RPMDB_KEYS + 1] = {0};
+    size_t pnKeyLengths[MAX_RPMDB_KEYS + 1] = {0};
+    size_t nKeyCount = 0;
+    int nStatus = TDNF_RPMZIG_STATUS_INTERNAL_ERROR;
+    int nResult = 0;
     size_t i = 0;
 
-    if (!pkg_path || !key_path || !out_status) return -1;
-
-    fh = tdnf_rpm_file_open(pkg_path);
-    if (!fh) {
-        fprintf(stderr,
-            "rpmzig: open %s: %s\n",
-            pkg_path, tdnf_rpmdb_last_error());
+    if(!pszPkgPath || !pszKeyPath || !pnStatus)
+    {
         return -1;
     }
 
-    if (slurp_key(key_path, &fresh_key, &fresh_key_len) != 0) {
-        fprintf(stderr,
-            "rpmzig: read key %s failed\n", key_path);
-        tdnf_rpm_file_close(fh);
+    pFile = tdnf_rpm_file_open(pszPkgPath);
+    if(!pFile)
+    {
+        pr_err("rpmzig: open %s: %s\n",
+               pszPkgPath,
+               tdnf_rpmdb_last_error());
         return -1;
     }
 
-    /* Walk gpg-pubkey-* entries in the rpmdb. If this fails for any
-     * reason we keep going with just the fresh key — a missing rpmdb
-     * keyring shouldn't block install of a freshly-trusted package. */
-    it = tdnf_rpmdb_pubkeys_open(install_root);
-    if (it) {
-        while (rpmdb_count < MAX_RPMDB_KEYS) {
-            char *kbuf = NULL;
-            size_t klen = 0;
-            int n = tdnf_rpmdb_pubkeys_next(it, &kbuf, &klen, NULL);
-            if (n == 0) break;
-            if (n < 0) {
-                fprintf(stderr,
-                    "rpmzig: rpmdb pubkey walk: %s\n",
-                    tdnf_rpmdb_last_error());
+    if(SlurpKey(pszKeyPath, &pFreshKey, &nFreshKeyLength) != 0)
+    {
+        pr_err("rpmzig: read key %s failed\n", pszKeyPath);
+        tdnf_rpm_file_close(pFile);
+        return -1;
+    }
+
+    pIter = tdnf_rpmdb_pubkeys_open(pszInstallRoot);
+    if(pIter)
+    {
+        while(nRpmDbCount < MAX_RPMDB_KEYS)
+        {
+            char *pKey = NULL;
+            size_t nKeyLength = 0;
+            int nNext = tdnf_rpmdb_pubkeys_next(
+                            pIter,
+                            &pKey,
+                            &nKeyLength,
+                            NULL);
+            if(nNext == 0)
+            {
                 break;
             }
-            rpmdb_keys[rpmdb_count] = kbuf;
-            rpmdb_key_lens[rpmdb_count] = klen;
-            rpmdb_count++;
+            if(nNext < 0)
+            {
+                pr_err("rpmzig: rpmdb pubkey walk: %s\n",
+                       tdnf_rpmdb_last_error());
+                break;
+            }
+            ppRpmDbKeys[nRpmDbCount] = pKey;
+            pnRpmDbKeyLengths[nRpmDbCount] = nKeyLength;
+            nRpmDbCount++;
         }
-        tdnf_rpmdb_pubkeys_close(it);
+        tdnf_rpmdb_pubkeys_close(pIter);
     }
 
-    for (i = 0; i < rpmdb_count; i++) {
-        blobs[total_keys] = rpmdb_keys[i];
-        lens[total_keys] = rpmdb_key_lens[i];
-        total_keys++;
+    for(i = 0; i < nRpmDbCount; i++)
+    {
+        ppKeys[nKeyCount] = ppRpmDbKeys[i];
+        pnKeyLengths[nKeyCount] = pnRpmDbKeyLengths[i];
+        nKeyCount++;
     }
-    blobs[total_keys] = fresh_key;
-    lens[total_keys] = fresh_key_len;
-    total_keys++;
+    ppKeys[nKeyCount] = pFreshKey;
+    pnKeyLengths[nKeyCount] = nFreshKeyLength;
+    nKeyCount++;
 
-    (void)tdnf_rpmzig_verify_pure(fh, blobs, lens, total_keys, &status);
+    (void)tdnf_rpmzig_verify_pure(
+              pFile,
+              ppKeys,
+              pnKeyLengths,
+              nKeyCount,
+              &nStatus);
 
-    *out_status = status;
-    rc = (status == TDNF_RPMZIG_STATUS_OK) ? 0 : 1;
+    *pnStatus = nStatus;
+    nResult = nStatus == TDNF_RPMZIG_STATUS_OK ? 0 : 1;
 
-    for (i = 0; i < rpmdb_count; i++) {
-        tdnf_rpmdb_string_free(rpmdb_keys[i]);
+    for(i = 0; i < nRpmDbCount; i++)
+    {
+        tdnf_rpmdb_string_free(ppRpmDbKeys[i]);
     }
-    free(fresh_key);
-    tdnf_rpm_file_close(fh);
-    return rc;
+    free(pFreshKey);
+    tdnf_rpm_file_close(pFile);
+    return nResult;
 #undef MAX_RPMDB_KEYS
+}
+
+int
+TDNFRpmzigVerifyFile(
+    tdnf_rpm_file *pRpmFile,
+    const tdnf_rpm_config *pRpmConfig,
+    const void *const *ppFreshKeys,
+    const size_t *pnFreshKeyLengths,
+    size_t nFreshKeyCount,
+    int *out_status)
+{
+    return tdnf_rpm_file_verify_signatures_config(
+               pRpmFile,
+               pRpmConfig,
+               ppFreshKeys,
+               pnFreshKeyLengths,
+               nFreshKeyCount,
+               out_status);
+}
+
+static int
+SlurpKey(
+    const char *pszPath,
+    unsigned char **ppKey,
+    size_t *pnKeyLength
+    )
+{
+    FILE *pFile = NULL;
+    long nLength = 0;
+    unsigned char *pKey = NULL;
+
+    pFile = fopen(pszPath, "rb");
+    if(!pFile)
+    {
+        return -1;
+    }
+    if(fseek(pFile, 0, SEEK_END) != 0)
+    {
+        fclose(pFile);
+        return -1;
+    }
+    nLength = ftell(pFile);
+    if(nLength < 0)
+    {
+        fclose(pFile);
+        return -1;
+    }
+    rewind(pFile);
+    pKey = malloc((size_t)nLength);
+    if(!pKey)
+    {
+        fclose(pFile);
+        return -1;
+    }
+    if(fread(pKey, 1, (size_t)nLength, pFile) != (size_t)nLength)
+    {
+        free(pKey);
+        fclose(pFile);
+        return -1;
+    }
+    fclose(pFile);
+    *ppKey = pKey;
+    *pnKeyLength = (size_t)nLength;
+    return 0;
 }

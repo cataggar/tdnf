@@ -9,7 +9,31 @@
 #include "includes.h"
 
 #include "gpgcheck_zig.h"
-#include "../rpmzig/verify.h"
+
+static void
+TDNFFreeFreshGPGKeys(
+    void **ppKeys,
+    size_t nKeyCount
+    );
+
+static uint32_t
+TDNFMapDigestIntegrityOutcome(
+    int nOutcome
+    );
+
+static uint32_t
+TDNFMapSignatureIntegrityOutcome(
+    int nOutcome
+    );
+
+static uint32_t
+TDNFGPGCheckPackageInternal(
+    PTDNF pTdnf,
+    PTDNF_REPO_DATA pRepo,
+    const char* pszFilePath,
+    tdnf_rpm_file *pRpmFile,
+    int *pnPolicyRejected
+    );
 
 uint32_t
 ReadGPGKeyFile(
@@ -57,19 +81,16 @@ error:
 
 uint32_t
 TDNFImportGPGKeyFile(
-    rpmts pTS,
+    void *pLegacyTransaction,
     const char* pszFile
     )
 {
     uint32_t dwError = 0;
-    uint8_t* pPkt = NULL;
-    size_t nPktLen = 0;
+    tdnf_rpm_config *pRpmConfig = NULL;
     char* pszKeyData = NULL;
-    int nKeyDataSize;
-    int nKeys = 0;
-    int nOffset = 0;
+    int nKeyDataSize = 0;
 
-    if(pTS == NULL || IsNullOrEmptyString(pszFile))
+    if(pLegacyTransaction == NULL || IsNullOrEmptyString(pszFile))
     {
         dwError = ERROR_TDNF_INVALID_PARAMETER;
         BAIL_ON_TDNF_ERROR(dwError);
@@ -78,24 +99,23 @@ TDNFImportGPGKeyFile(
     dwError = ReadGPGKeyFile(pszFile, &pszKeyData, &nKeyDataSize);
     BAIL_ON_TDNF_ERROR(dwError);
 
-    while (nOffset < nKeyDataSize)
+    pRpmConfig = tdnf_rpm_config_create("/");
+    if(!pRpmConfig)
     {
-        pgpArmor nArmor = pgpParsePkts(pszKeyData + nOffset, &pPkt, &nPktLen);
-        if(nArmor == PGPARMOR_PUBKEY)
-        {
-            dwError = rpmtsImportPubkey(pTS, pPkt, nPktLen);
-            BAIL_ON_TDNF_ERROR(dwError);
-            nKeys++;
-        }
-        nOffset += nPktLen;
-    }
-
-    if (nKeys == 0) {
-        dwError = ERROR_TDNF_INVALID_PUBKEY_FILE;
+        pr_err("Unable to initialize native package configuration: %s\n",
+               tdnf_rpm_config_last_error());
+        dwError = ERROR_TDNF_RPM_CHECK;
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
+    dwError = TDNFImportGPGKeyData(
+                  pRpmConfig,
+                  pszKeyData,
+                  (size_t)nKeyDataSize);
+    BAIL_ON_TDNF_ERROR(dwError);
+
 cleanup:
+    tdnf_rpm_config_destroy(pRpmConfig);
     TDNF_SAFE_FREE_MEMORY(pszKeyData);
     return dwError;
 error:
@@ -103,210 +123,453 @@ error:
 }
 
 uint32_t
-TDNFGPGCheckPackage(
-    PTDNFRPMTS pTS,
-    PTDNF pTdnf,
-    PTDNF_REPO_DATA pRepo,
-    const char* pszFilePath,
-    Header *pRpmHeader
+TDNFImportGPGKeyData(
+    const tdnf_rpm_config *pRpmConfig,
+    const void *pKeyData,
+    size_t nKeyDataSize
     )
 {
     uint32_t dwError = 0;
-    Header rpmHeader = NULL;
-    FD_t fp = NULL;
-    char** ppszUrlGPGKeys = NULL;
-    char* pszLocalGPGKey = NULL;
-    int nAnswer = 0;
-    int nRemote = 0;
-    int i;
-    int nMatched = 0;
-    char *pszTmp = NULL;
-    int nSavedVfyLevel = 0;
-    rpmVSFlags savedVSFlags = 0;
+    size_t nImported = 0;
 
-    if(pTS == NULL || pTdnf == NULL || pRepo == NULL || IsNullOrEmptyString(pszFilePath))
+    if(pRpmConfig == NULL || pKeyData == NULL || nKeyDataSize == 0)
     {
         dwError = ERROR_TDNF_INVALID_PARAMETER;
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    nSavedVfyLevel = rpmtsVfyLevel(pTS->pTS);
-    savedVSFlags = rpmtsVSFlags(pTS->pTS);
-
-    if (pRepo->nGPGCheck)
+    if(tdnf_rpmdb_import_pubkeys_config(
+           pRpmConfig,
+           pKeyData,
+           nKeyDataSize,
+           &nImported) != 0 ||
+       nImported == 0)
     {
-        int level = RPMSIG_VERIFIABLE_TYPE;
-        if (pTdnf->pConf->nSkipSignature) {
-            level &= ~RPMSIG_SIGNATURE_TYPE;
-            rpmtsSetVSFlags(pTS->pTS, rpmtsVSFlags(pTS->pTS) | RPMVSF_MASK_NOSIGNATURES);
-        }
-        if (pTdnf->pConf->nSkipDigest) {
-            level &= ~RPMSIG_DIGEST_TYPE;
-            rpmtsSetVSFlags(pTS->pTS, rpmtsVSFlags(pTS->pTS) | RPMVSF_MASK_NODIGESTS);
-        }
-        /* librpm is no longer the signature verifier — rpmzig's
-         * pure-Zig path is. Skip librpm's sig check so
-         * rpmReadPackageFile acts as a pure header reader and
-         * doesn't fail with RPMRC_NOTTRUSTED on rpms whose keys
-         * aren't yet in the rpmdb trust set. Header digest checks
-         * stay active. */
-        rpmtsSetVSFlags(pTS->pTS, rpmtsVSFlags(pTS->pTS) | RPMVSF_MASK_NOSIGNATURES);
-        level &= ~RPMSIG_SIGNATURE_TYPE;
-        rpmtsSetVfyLevel(pTS->pTS, level);
-    } else {
-        rpmtsSetVfyLevel(pTS->pTS, RPMSIG_NONE_TYPE);
+        pr_err("Unable to import repository key: %s\n",
+               tdnf_rpmdb_last_error());
+        dwError = ERROR_TDNF_INVALID_PUBKEY_FILE;
+        BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    fp = Fopen (pszFilePath, "r.ufdio");
-    if(!fp)
+cleanup:
+    return dwError;
+error:
+    goto cleanup;
+}
+
+static uint32_t
+TDNFGPGCheckPackageInternal(
+    PTDNF pTdnf,
+    PTDNF_REPO_DATA pRepo,
+    const char* pszFilePath,
+    tdnf_rpm_file *pRpmFile,
+    int *pnPolicyRejected
+    )
+{
+    uint32_t dwError = 0;
+    char** ppszUrlGPGKeys = NULL;
+    char* pszLocalGPGKey = NULL;
+    char* pszKeyData = NULL;
+    void **ppFreshKeys = NULL;
+    size_t *pnFreshKeyLengths = NULL;
+    size_t nFreshKeyCount = 0;
+    size_t nConfiguredKeyCount = 0;
+    int nAnswer = 0;
+    int nRemote = 0;
+    int nIntegrityOutcome = TDNF_RPMZIG_INTEGRITY_INTERNAL;
+    int nSigned = 0;
+    int nKeyDataSize = 0;
+    size_t nIndex = 0;
+
+    if(pnPolicyRejected)
     {
-        dwError = errno;
-        BAIL_ON_TDNF_SYSTEM_ERROR(dwError);
+        *pnPolicyRejected = 0;
     }
 
-    dwError = rpmReadPackageFile(
-                  pTS->pTS,
-                  fp,
-                  pszFilePath,
-                  &rpmHeader);
-    Fclose(fp);
-    fp = NULL;
+    if(pTdnf == NULL || pTdnf->pConf == NULL ||
+       pTdnf->pRpmConfig == NULL || pRepo == NULL ||
+       IsNullOrEmptyString(pszFilePath) || pRpmFile == NULL)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
 
-    BAIL_ON_TDNF_RPM_ERROR(dwError);
+    /*
+     * --nogpgcheck still requires a syntactically valid RPM, but leaves its
+     * internal digest and signature candidates unchecked.
+     */
+    if (!pRepo->nGPGCheck)
+    {
+        goto cleanup;
+    }
 
-    if (pRepo->nGPGCheck && !pTdnf->pConf->nSkipSignature) {
-        /* refuse to install an unsigned package if gpgcheck is enabled */
-        if (((pszTmp = headerGetAsString(rpmHeader, RPMTAG_SIGPGP)) == NULL) &&
-            ((pszTmp = headerGetAsString(rpmHeader, RPMTAG_SIGGPG)) == NULL) &&
-            ((pszTmp = headerGetAsString(rpmHeader, RPMTAG_DSAHEADER)) == NULL) &&
-#ifdef BUILD_WITH_RPM_6X
-            ((pszTmp = headerGetAsString(rpmHeader, RPMTAG_OPENPGP)) == NULL) &&
-#endif
-            ((pszTmp = headerGetAsString(rpmHeader, RPMTAG_RSAHEADER)) == NULL))
+    if (!pTdnf->pConf->nSkipDigest)
+    {
+        if(tdnf_rpm_file_verify_digests(pRpmFile, &nIntegrityOutcome) != 0)
         {
-            dwError = ERROR_TDNF_RPM_UNSIGNED;
+            pr_err("Unable to verify package digests for %s: %s\n",
+                   pszFilePath, tdnf_rpmdb_last_error());
+            dwError = ERROR_TDNF_RPM_CHECK;
             BAIL_ON_TDNF_ERROR(dwError);
         }
+        dwError = TDNFMapDigestIntegrityOutcome(nIntegrityOutcome);
+        if(dwError && pnPolicyRejected &&
+           nIntegrityOutcome != TDNF_RPMZIG_INTEGRITY_INTERNAL)
+        {
+            *pnPolicyRejected = 1;
+        }
+        BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    if (pRepo->nGPGCheck && !pTdnf->pConf->nSkipSignature)
+    if (pTdnf->pConf->nSkipSignature)
     {
-        dwError = TDNFGetGPGKeys(pTdnf, pRepo, &ppszUrlGPGKeys);
+        goto cleanup;
+    }
+
+    nSigned = tdnf_rpm_file_is_signed(pRpmFile);
+    if(nSigned < 0)
+    {
+        dwError = ERROR_TDNF_RPM_CHECK;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+    if(!nSigned)
+    {
+        if(pnPolicyRejected)
+        {
+            *pnPolicyRejected = 1;
+        }
+        dwError = ERROR_TDNF_RPM_UNSIGNED;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    if(TDNFRpmzigVerifyFile(
+           pRpmFile,
+           pTdnf->pRpmConfig,
+           NULL,
+           NULL,
+           0,
+           &nIntegrityOutcome) != 0)
+    {
+        pr_err("Unable to verify package signature for %s: %s\n",
+               pszFilePath, tdnf_rpmdb_last_error());
+        dwError = ERROR_TDNF_RPM_CHECK;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+    if(nIntegrityOutcome == TDNF_RPMZIG_INTEGRITY_OK)
+    {
+        goto cleanup;
+    }
+    if(nIntegrityOutcome != TDNF_RPMZIG_INTEGRITY_MISSING)
+    {
+        dwError = TDNFMapSignatureIntegrityOutcome(nIntegrityOutcome);
+        if(dwError && pnPolicyRejected &&
+           nIntegrityOutcome != TDNF_RPMZIG_INTEGRITY_INTERNAL)
+        {
+            *pnPolicyRejected = 1;
+        }
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    dwError = TDNFGetGPGKeys(pTdnf, pRepo, &ppszUrlGPGKeys);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    for(nIndex = 0; ppszUrlGPGKeys[nIndex]; nIndex++)
+    {
+        nConfiguredKeyCount++;
+    }
+    if(!nConfiguredKeyCount)
+    {
+        dwError = ERROR_TDNF_NO_GPGKEY_CONF_ENTRY;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    dwError = TDNFAllocateMemory(
+                  nConfiguredKeyCount,
+                  sizeof(*ppFreshKeys),
+                  (void **)&ppFreshKeys);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    dwError = TDNFAllocateMemory(
+                  nConfiguredKeyCount,
+                  sizeof(*pnFreshKeyLengths),
+                  (void **)&pnFreshKeyLengths);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    for(nIndex = 0; ppszUrlGPGKeys[nIndex]; nIndex++)
+    {
+        pr_info("importing key from %s\n", ppszUrlGPGKeys[nIndex]);
+        nAnswer = 0;
+        dwError = TDNFYesOrNo(pTdnf->pArgs, "Is this ok [y/N]: ", &nAnswer);
         BAIL_ON_TDNF_ERROR(dwError);
 
-        for (i = 0; ppszUrlGPGKeys[i]; i++) {
-            pr_info("importing key from %s\n", ppszUrlGPGKeys[i]);
-            dwError = TDNFYesOrNo(pTdnf->pArgs, "Is this ok [y/N]: ", &nAnswer);
+        if(!nAnswer)
+        {
+            dwError = ERROR_TDNF_OPERATION_ABORTED;
             BAIL_ON_TDNF_ERROR(dwError);
+        }
 
-            if(!nAnswer)
-            {
-                dwError = ERROR_TDNF_OPERATION_ABORTED;
-                BAIL_ON_TDNF_ERROR(dwError);
-            }
+        nRemote = 0;
+        dwError = TDNFUriIsRemote(ppszUrlGPGKeys[nIndex], &nRemote);
+        if (dwError == ERROR_TDNF_URL_INVALID)
+        {
+            dwError = ERROR_TDNF_KEYURL_INVALID;
+        }
+        BAIL_ON_TDNF_ERROR(dwError);
 
-            dwError = TDNFUriIsRemote(ppszUrlGPGKeys[i], &nRemote);
+        if(nRemote)
+        {
+            dwError = TDNFFetchRemoteGPGKey(
+                          pTdnf,
+                          pRepo,
+                          ppszUrlGPGKeys[nIndex],
+                          &pszLocalGPGKey);
+            BAIL_ON_TDNF_ERROR(dwError);
+        }
+        else
+        {
+            dwError = TDNFPathFromUri(
+                          ppszUrlGPGKeys[nIndex],
+                          &pszLocalGPGKey);
             if (dwError == ERROR_TDNF_URL_INVALID)
             {
                 dwError = ERROR_TDNF_KEYURL_INVALID;
             }
             BAIL_ON_TDNF_ERROR(dwError);
-
-            if (nRemote)
-            {
-                dwError = TDNFFetchRemoteGPGKey(pTdnf, pRepo, ppszUrlGPGKeys[i], &pszLocalGPGKey);
-                BAIL_ON_TDNF_ERROR(dwError);
-            }
-            else
-            {
-                dwError = TDNFPathFromUri(ppszUrlGPGKeys[i], &pszLocalGPGKey);
-                if (dwError == ERROR_TDNF_URL_INVALID)
-                {
-                    dwError = ERROR_TDNF_KEYURL_INVALID;
-                }
-                BAIL_ON_TDNF_ERROR(dwError);
-            }
-            /* Persist each user-approved repo key to the rpmdb as a
-             * gpg-pubkey-* entry so subsequent installs and external
-             * rpm(8) queries see the same trust set. rpmzig still
-             * receives the fresh key directly below; this import is
-             * for durable keyring compatibility, not for the current
-             * verification attempt. */
-            dwError = TDNFImportGPGKeyFile(pTS->pTS, pszLocalGPGKey);
-            BAIL_ON_TDNF_ERROR(dwError);
-
-            {
-                int rpmzig_status = TDNF_RPMZIG_STATUS_INTERNAL_ERROR;
-                (void)TDNFRpmzigVerify(
-                    pszFilePath, pszLocalGPGKey,
-                    pTdnf->pArgs ? pTdnf->pArgs->pszInstallRoot : NULL,
-                    &rpmzig_status);
-                if (rpmzig_status == TDNF_RPMZIG_STATUS_OK)
-                {
-                    nMatched++;
-                }
-                else if (rpmzig_status == TDNF_RPMZIG_STATUS_NO_KEY)
-                {
-                    /* The fresh key didn't match this signature.
-                     * Try the next gpgkey url, if any. */
-                }
-                else
-                {
-                    pr_err("rpmzig refused signature on %s "
-                           "(status=%d). Refusing to install.\n",
-                           pszFilePath, rpmzig_status);
-                    dwError = ERROR_TDNF_RPM_GPG_NO_MATCH;
-                    BAIL_ON_TDNF_ERROR(dwError);
-                }
-            }
-
-            if (nRemote)
-            {
-                if (unlink(pszLocalGPGKey))
-                {
-                    dwError = errno;
-                    BAIL_ON_TDNF_SYSTEM_ERROR(dwError);
-                }
-            }
-
-            TDNF_SAFE_FREE_MEMORY(pszLocalGPGKey);
         }
 
-        if (nMatched == 0)
+        dwError = ReadGPGKeyFile(
+                      pszLocalGPGKey,
+                      &pszKeyData,
+                      &nKeyDataSize);
+        BAIL_ON_TDNF_ERROR(dwError);
+        if(nKeyDataSize <= 0)
         {
-            dwError = ERROR_TDNF_RPM_GPG_NO_MATCH;
+            dwError = ERROR_TDNF_INVALID_PUBKEY_FILE;
             BAIL_ON_TDNF_ERROR(dwError);
         }
+
+        dwError = TDNFImportGPGKeyData(
+                      pTdnf->pRpmConfig,
+                      pszKeyData,
+                      (size_t)nKeyDataSize);
+        BAIL_ON_TDNF_ERROR(dwError);
+
+        ppFreshKeys[nFreshKeyCount] = pszKeyData;
+        pnFreshKeyLengths[nFreshKeyCount] = (size_t)nKeyDataSize;
+        nFreshKeyCount++;
+        pszKeyData = NULL;
+        nKeyDataSize = 0;
+
+        if(nRemote && unlink(pszLocalGPGKey))
+        {
+            dwError = errno;
+            BAIL_ON_TDNF_SYSTEM_ERROR(dwError);
+        }
+        nRemote = 0;
+        TDNF_SAFE_FREE_MEMORY(pszLocalGPGKey);
     }
 
-    /* optional output parameter */
-    if (pRpmHeader != NULL)
+    if(TDNFRpmzigVerifyFile(
+           pRpmFile,
+           pTdnf->pRpmConfig,
+           (const void *const *)ppFreshKeys,
+           pnFreshKeyLengths,
+           nFreshKeyCount,
+           &nIntegrityOutcome) != 0)
     {
-        *pRpmHeader = rpmHeader;
+        pr_err("Unable to verify package signature for %s: %s\n",
+               pszFilePath, tdnf_rpmdb_last_error());
+        dwError = ERROR_TDNF_RPM_CHECK;
+        BAIL_ON_TDNF_ERROR(dwError);
     }
-    else if(rpmHeader)
+    dwError = TDNFMapSignatureIntegrityOutcome(nIntegrityOutcome);
+    if(dwError && pnPolicyRejected &&
+       nIntegrityOutcome != TDNF_RPMZIG_INTEGRITY_INTERNAL)
     {
-        headerFree(rpmHeader);
+        *pnPolicyRejected = 1;
     }
+    BAIL_ON_TDNF_ERROR(dwError);
 
 cleanup:
-    rpmtsSetVSFlags(pTS->pTS, savedVSFlags);
-    rpmtsSetVfyLevel(pTS->pTS, nSavedVfyLevel);
     TDNF_SAFE_FREE_STRINGARRAY(ppszUrlGPGKeys);
-    TDNF_SAFE_FREE_MEMORY(pszLocalGPGKey);
-    TDNF_SAFE_FREE_MEMORY(pszTmp);
-    if(fp)
+    TDNF_SAFE_FREE_MEMORY(pszKeyData);
+    TDNFFreeFreshGPGKeys(ppFreshKeys, nFreshKeyCount);
+    TDNF_SAFE_FREE_MEMORY(pnFreshKeyLengths);
+    if(nRemote && pszLocalGPGKey)
     {
-        Fclose(fp);
+        (void)unlink(pszLocalGPGKey);
     }
+    TDNF_SAFE_FREE_MEMORY(pszLocalGPGKey);
     return dwError;
 
 error:
-    if(rpmHeader)
-    {
-        headerFree(rpmHeader);
-    }
     goto cleanup;
+}
+
+uint32_t
+TDNFGPGCheckPackageWithFile(
+    PTDNF pTdnf,
+    PTDNF_REPO_DATA pRepo,
+    const char* pszFilePath,
+    tdnf_rpm_file *pRpmFile,
+    int *pnPolicyRejected
+    )
+{
+    return TDNFGPGCheckPackageInternal(
+               pTdnf,
+               pRepo,
+               pszFilePath,
+               pRpmFile,
+               pnPolicyRejected);
+}
+
+uint32_t
+TDNFGPGCheckPackageEx(
+    PTDNF pTdnf,
+    PTDNF_REPO_DATA pRepo,
+    const char* pszFilePath,
+    tdnf_rpm_file **ppRpmFile,
+    int *pnPolicyRejected
+    )
+{
+    uint32_t dwError = 0;
+    tdnf_rpm_file *pRpmFile = NULL;
+
+    if(ppRpmFile)
+    {
+        *ppRpmFile = NULL;
+    }
+    if(pnPolicyRejected)
+    {
+        *pnPolicyRejected = 0;
+    }
+
+    if(pTdnf == NULL || pTdnf->pConf == NULL ||
+       pTdnf->pRpmConfig == NULL || pRepo == NULL ||
+       IsNullOrEmptyString(pszFilePath))
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    pRpmFile = tdnf_rpm_file_open(pszFilePath);
+    if(!pRpmFile)
+    {
+        pr_err("Unable to parse package %s: %s\n",
+               pszFilePath, tdnf_rpmdb_last_error());
+        dwError = ERROR_TDNF_RPMRC_NOTFOUND;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    dwError = TDNFGPGCheckPackageInternal(
+                  pTdnf,
+                  pRepo,
+                  pszFilePath,
+                  pRpmFile,
+                  pnPolicyRejected);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    if(ppRpmFile)
+    {
+        *ppRpmFile = pRpmFile;
+        pRpmFile = NULL;
+    }
+
+cleanup:
+    tdnf_rpm_file_close(pRpmFile);
+    return dwError;
+
+error:
+    goto cleanup;
+}
+
+uint32_t
+TDNFGPGCheckPackage(
+    PTDNF pTdnf,
+    PTDNF_REPO_DATA pRepo,
+    const char* pszFilePath,
+    tdnf_rpm_file **ppRpmFile
+    )
+{
+    return TDNFGPGCheckPackageEx(
+               pTdnf,
+               pRepo,
+               pszFilePath,
+               ppRpmFile,
+               NULL);
+}
+
+static void
+TDNFFreeFreshGPGKeys(
+    void **ppKeys,
+    size_t nKeyCount
+    )
+{
+    size_t nIndex = 0;
+
+    if(!ppKeys)
+    {
+        return;
+    }
+    for(nIndex = 0; nIndex < nKeyCount; nIndex++)
+    {
+        TDNFFreeMemory(ppKeys[nIndex]);
+    }
+    TDNFFreeMemory(ppKeys);
+}
+
+static uint32_t
+TDNFMapDigestIntegrityOutcome(
+    int nOutcome
+    )
+{
+    switch(nOutcome)
+    {
+        case TDNF_RPMZIG_INTEGRITY_OK:
+            return 0;
+        case TDNF_RPMZIG_INTEGRITY_MISSING:
+            pr_err("RPM is missing required internal digest coverage\n");
+            return ERROR_TDNF_RPM_CHECK;
+        case TDNF_RPMZIG_INTEGRITY_BAD:
+            pr_err("RPM internal digest verification failed\n");
+            return ERROR_TDNF_RPM_CHECK;
+        case TDNF_RPMZIG_INTEGRITY_UNSUPPORTED:
+            pr_err("RPM uses an unsupported internal digest\n");
+            return ERROR_TDNF_RPM_CHECK;
+        case TDNF_RPMZIG_INTEGRITY_MALFORMED:
+            pr_err("RPM contains malformed internal digest metadata\n");
+            return ERROR_TDNF_RPM_CHECK;
+        default:
+            pr_err("RPM internal digest verification could not complete\n");
+            return ERROR_TDNF_RPM_CHECK;
+    }
+}
+
+static uint32_t
+TDNFMapSignatureIntegrityOutcome(
+    int nOutcome
+    )
+{
+    switch(nOutcome)
+    {
+        case TDNF_RPMZIG_INTEGRITY_OK:
+            return 0;
+        case TDNF_RPMZIG_INTEGRITY_MISSING:
+            pr_err("RPM signature has no matching trusted key\n");
+            return ERROR_TDNF_RPM_GPG_NO_MATCH;
+        case TDNF_RPMZIG_INTEGRITY_BAD:
+            pr_err("RPM signature verification failed\n");
+            return ERROR_TDNF_RPM_GPG_NO_MATCH;
+        case TDNF_RPMZIG_INTEGRITY_UNSUPPORTED:
+            pr_err("RPM signature uses unsupported OpenPGP metadata\n");
+            return ERROR_TDNF_RPM_GPG_PARSE_FAILED;
+        case TDNF_RPMZIG_INTEGRITY_MALFORMED:
+            pr_err("RPM contains malformed OpenPGP signature metadata\n");
+            return ERROR_TDNF_RPM_GPG_PARSE_FAILED;
+        default:
+            pr_err("RPM signature verification could not complete\n");
+            return ERROR_TDNF_RPM_CHECK;
+    }
 }
 
 uint32_t

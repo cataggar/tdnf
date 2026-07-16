@@ -339,7 +339,65 @@ error:
     goto cleanup;
 }
 
-//get package version using rpmlib
+uint32_t
+TdnfGetReleaseVersionConfig(
+   const tdnf_rpm_config* pRpmConfig,
+   const char* pszDistroVerPkg,
+   char** ppszVersion
+   )
+{
+    uint32_t dwError = 0;
+    char* pszVersion = NULL;
+    char* pszNativeVersion = NULL;
+    int nResult = 0;
+
+    if(!pRpmConfig ||
+       IsNullOrEmptyString(pszDistroVerPkg) ||
+       !ppszVersion)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    nResult = tdnf_rpmdb_resolve_provider_version_config(
+                  pRpmConfig,
+                  pszDistroVerPkg,
+                  &pszNativeVersion);
+    if(nResult < 0)
+    {
+        pr_err("Failed to read distroverpkg provider '%s': %s\n",
+               pszDistroVerPkg, tdnf_rpmdb_last_error());
+        dwError = ERROR_TDNF_DISTROVERPKG_READ;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+    if(nResult == 0)
+    {
+        dwError = ERROR_TDNF_NO_DISTROVERPKG;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+    if(IsNullOrEmptyString(pszNativeVersion))
+    {
+        dwError = ERROR_TDNF_DISTROVERPKG_READ;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    dwError = TDNFAllocateString(pszNativeVersion, &pszVersion);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    *ppszVersion = pszVersion;
+cleanup:
+    tdnf_rpmdb_string_free(pszNativeVersion);
+    return dwError;
+
+error:
+    if(ppszVersion)
+    {
+        *ppszVersion = NULL;
+    }
+    TDNF_SAFE_FREE_MEMORY(pszVersion);
+    goto cleanup;
+}
+
 uint32_t
 TDNFGetReleaseVersion(
    const char* pszRootDir,
@@ -348,12 +406,7 @@ TDNFGetReleaseVersion(
    )
 {
     uint32_t dwError = 0;
-    const char* pszVersionTemp = NULL;
-    char* pszVersion = NULL;
-    rpmts pTS = NULL;
-    Header pHeader = NULL;
-    rpmdbMatchIterator pIter = NULL;
-    rpmds pProvides = NULL;
+    tdnf_rpm_config* pRpmConfig = NULL;
 
     if(IsNullOrEmptyString(pszRootDir) ||
        IsNullOrEmptyString(pszDistroVerPkg) ||
@@ -363,88 +416,23 @@ TDNFGetReleaseVersion(
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    pTS = rpmtsCreate();
-    if(!pTS)
+    pRpmConfig = tdnf_rpm_config_create(pszRootDir);
+    if(!pRpmConfig)
     {
-        dwError = ERROR_TDNF_RPMTS_CREATE_FAILED;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    if(rpmtsSetRootDir (pTS, pszRootDir))
-    {
-        dwError = ERROR_TDNF_RPMTS_BAD_ROOT_DIR;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    pIter = rpmtsInitIterator(pTS, RPMTAG_PROVIDES, pszDistroVerPkg, 0);
-    if(!pIter)
-    {
-        dwError = ERROR_TDNF_NO_DISTROVERPKG;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    pHeader = rpmdbNextIterator(pIter);
-    if(!pHeader)
-    {
-        dwError = ERROR_TDNF_DISTROVERPKG_READ;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-    pHeader = headerLink(pHeader);
-    if(!pHeader)
-    {
+        pr_err("Failed to initialize native rpm configuration: %s\n",
+               tdnf_rpm_config_last_error());
         dwError = ERROR_TDNF_DISTROVERPKG_READ;
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    /*
-        Follow logic in dnf/rpm/__init__.py  - if the package provides distroverpkg,
-        check which version it provides. Otherwise, use the version of the
-        package itself.
-    */
-    pszVersionTemp = headerGetString(pHeader, RPMTAG_VERSION);
-    if(IsNullOrEmptyString(pszVersionTemp))
-    {
-        dwError = ERROR_TDNF_DISTROVERPKG_READ;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    pProvides = rpmdsNew(pHeader, RPMTAG_PROVIDENAME, 0);
-    if(!pProvides)
-    {
-        dwError = ERROR_TDNF_DISTROVERPKG_READ;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    while (rpmdsNext(pProvides) >= 0) {
-        const char *pszName = rpmdsN(pProvides);
-        if (strcmp(pszName, pszDistroVerPkg) == 0) {
-            if (rpmdsFlags(pProvides) & RPMSENSE_EQUAL) {
-                pszVersionTemp = rpmdsEVR(pProvides);
-                break;
-            }
-        }
-    }
-
-    dwError = TDNFAllocateString(pszVersionTemp, &pszVersion);
+    dwError = TdnfGetReleaseVersionConfig(
+                  pRpmConfig,
+                  pszDistroVerPkg,
+                  ppszVersion);
     BAIL_ON_TDNF_ERROR(dwError);
 
-    *ppszVersion = pszVersion;
 cleanup:
-    if(pHeader)
-    {
-        headerFree(pHeader);
-    }
-    if(pIter)
-    {
-        rpmdbFreeIterator(pIter);
-    }
-    if(pTS)
-    {
-        rpmtsFree(pTS);
-    }
-    if (pProvides) {
-        rpmdsFree(pProvides);
-    }
+    tdnf_rpm_config_destroy(pRpmConfig);
     return dwError;
 
 error:
@@ -452,7 +440,6 @@ error:
     {
         *ppszVersion = NULL;
     }
-    TDNF_SAFE_FREE_MEMORY(pszVersion);
     goto cleanup;
 }
 

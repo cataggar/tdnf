@@ -4,6 +4,11 @@ plugins are a way to extend tdnf functionality.
 
 tdnf plugins follow the same config and command line conventions as yum.
 
+Plugins link to the public `libtdnf` ABI and must not include or link
+system RPM development interfaces. The metalink plugin has no additional
+system dependency; the repository-signature plugin uses GPGME, so
+building it requires the GPGME development headers.
+
 ## enable plugins
 tdnf will install with plugins deactivated by default. This is because the primary switch
 to turn on plugins is in tdnf conf file (/etc/tdnf/tdnf.conf by default).

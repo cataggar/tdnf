@@ -19,8 +19,12 @@ Exercise Requires(preun) ordering.
 mkdir -p %{buildroot}%{_datadir}/tdnf-native-order
 echo preun > %{buildroot}%{_datadir}/tdnf-native-order/preun
 
-%preun
-test -x %{_bindir}/tdnf-native-order-helper
+%preun -p <lua>
+local helper = io.open("%{_bindir}/tdnf-native-order-helper", "r")
+if helper == nil then
+    error("transaction provider was erased before dependent erase script")
+end
+helper:close()
 
 %files
 %{_datadir}/tdnf-native-order/preun

@@ -8,7 +8,6 @@
  */
 
 #include "includes.h"
-#include <rpmdb.h>
 
 uint32_t
 SolvReadYumRepo(
@@ -481,7 +480,8 @@ error:
 uint32_t
 SolvReadInstalledRpms(
     Repo* pRepo,
-    const char *pszCacheFileName
+    const char *pszCacheFileName,
+    const tdnf_rpm_config *pRpmConfig
     )
 {
     uint32_t dwError = 0;
@@ -499,7 +499,9 @@ SolvReadInstalledRpms(
     pszRootDir = pool_get_rootdir(pRepo->pool);
     if(!IsNullOrEmptyString(pszCacheFileName))
     {
-        pszCookie = tdnf_rpmdb_cookie(pszRootDir);
+        pszCookie = pRpmConfig ?
+                        tdnf_rpmdb_cookie_config(pRpmConfig) :
+                        tdnf_rpmdb_cookie(pszRootDir);
         nUseInstalledCache = SolvUseInstalledRepoCache(
                                  pRepo,
                                  pszCacheFileName,
@@ -512,7 +514,11 @@ SolvReadInstalledRpms(
     }
 
     dwFlags = REPO_REUSE_REPODATA | RPM_ADD_WITH_HDRID | REPO_USE_ROOTDIR;
-    dwError = SolvReadInstalledRpmsNative(pRepo, pszRootDir, dwFlags);
+    dwError = SolvReadInstalledRpmsNative(
+                  pRepo,
+                  pszRootDir,
+                  pRpmConfig,
+                  dwFlags);
     BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
 
     SolvCreateInstalledRepoCache(pRepo, pszCacheFileName, pszCookie);

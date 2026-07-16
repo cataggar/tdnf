@@ -2,7 +2,7 @@
 //!
 //! Produces the same set of artifacts the CMake build did:
 //!   * static libs: common, tdnfsolv, tdnfllconf, jsondump, tdnfhistory
-//!   * shared libs: libtdnf.so (SOVERSION=3), libtdnfcli.so (SOVERSION=3)
+//!   * shared libs: libtdnf.so (SOVERSION=4), libtdnfcli.so (SOVERSION=4)
 //!   * executables: tdnf, tdnf-config, tdnf-history-util, jsondumptest
 //!   * plugins:     libtdnfmetalink.so, libtdnfrepogpgcheck.so
 //!
@@ -111,7 +111,6 @@ pub fn build(b: *Build) void {
     ) orelse "lua";
     const prefix = b.install_prefix;
     const libdir = "lib";
-    const full_libdir = b.fmt("{s}/{s}", .{ prefix, libdir });
     // `b.install_prefix` is the literal `--prefix` argument (e.g. `./out`)
     // and is left relative when the caller passes a relative path — unlike
     // the default `zig-out`, which build.zig resolves to an absolute path
@@ -123,6 +122,7 @@ pub fn build(b: *Build) void {
         prefix
     else
         b.pathJoin(&.{ b.build_root.path.?, prefix });
+    const full_libdir = b.fmt("{s}/{s}", .{ abs_prefix, libdir });
     // Vendored sqlite backs the Zig-side history and rpmdb code paths.
     const sqlite_dep = b.dependency("sqlite", .{});
     const tls_dep = b.dependency("tls", .{});
@@ -140,11 +140,6 @@ pub fn build(b: *Build) void {
     const libsolvext = libsolv_dep.artifact("solvext");
     const libsolv_include = libsolv.getEmittedIncludeTree();
     const libsolvext_include = libsolvext.getEmittedIncludeTree();
-
-    const build_with_rpm_6x = detectRpm6(b);
-    if (build_with_rpm_6x) {
-        std.log.info("rpm >= 6.0 detected; enabling BUILD_WITH_RPM_6X", .{});
-    }
 
     // ----- generated headers (written into source tree to match the CMake
     //       layout, which avoids the "two config.h" search-order problem).
@@ -197,6 +192,8 @@ pub fn build(b: *Build) void {
         .{ .key = "PLUGIN_PATH", .value = b.fmt("{s}/{s}", .{ abs_prefix, plugin_dir_rel }) },
         .{ .key = "NATIVE_FILE_INSTALL_BINARY", .value = b.fmt("{s}/libexec/tdnf/tdnf-rpm-install", .{abs_prefix}) },
         .{ .key = "NATIVE_FILE_ERASE_BINARY", .value = b.fmt("{s}/libexec/tdnf/tdnf-rpm-erase", .{abs_prefix}) },
+        .{ .key = "HISTORY_UTIL_BINARY", .value = b.fmt("{s}/libexec/tdnf/tdnf-history-util", .{abs_prefix}) },
+        .{ .key = "AUTOMATIC_SCRIPT", .value = b.fmt("{s}/bin/tdnf-automatic", .{abs_prefix}) },
     });
 
     // ----- generated text files (autoconf_at style: @VAR@ only) ----- //
@@ -206,7 +203,7 @@ pub fn build(b: *Build) void {
         .style = .{ .autoconf_at = b.path("client/tdnf.pc.in") },
         .include_path = "tdnf.pc",
     }, .{
-        .CMAKE_INSTALL_PREFIX = prefix,
+        .CMAKE_INSTALL_PREFIX = abs_prefix,
         .CMAKE_INSTALL_LIBDIR = libdir,
         .PROJECT_VERSION = project_version,
     });
@@ -215,19 +212,97 @@ pub fn build(b: *Build) void {
         .style = .{ .autoconf_at = b.path("tools/cli/lib/tdnf-cli-libs.pc.in") },
         .include_path = "tdnf-cli-libs.pc",
     }, .{
-        .CMAKE_INSTALL_PREFIX = prefix,
+        .CMAKE_INSTALL_PREFIX = abs_prefix,
         .CMAKE_INSTALL_LIBDIR = libdir,
         .PROJECT_VERSION = project_version,
     });
 
-    const tdnf_automatic = b.addConfigHeader(.{
-        .style = .{ .autoconf_at = b.path("bin/tdnf-automatic.in") },
-        .include_path = "tdnf-automatic",
-    }, .{
-        .VERSION = project_version,
-    });
+    writeTemplateExecutable(
+        b,
+        "bin/tdnf-automatic.in",
+        "bin/tdnf-automatic",
+        &.{.{ .key = "VERSION", .value = project_version }},
+    );
 
     const zig_test_step = b.step("test", "Run Zig unit tests");
+    const migration_audit_step = b.step(
+        "migration-audit",
+        "Reject increases in the remaining C-to-Zig migration surface",
+    );
+    const run_migration_audit = b.addSystemCommand(
+        &.{ "python3", "scripts/c-to-zig-audit.py" },
+    );
+    run_migration_audit.setCwd(b.path("."));
+    migration_audit_step.dependOn(&run_migration_audit.step);
+    const native_dependency_audit_step = b.step(
+        "native-dependency-audit",
+        "Reject system RPM source and ELF dependencies",
+    );
+    const run_native_dependency_audit = b.addSystemCommand(
+        &.{
+            "python3",
+            "scripts/librpm-audit.py",
+            "--prefix",
+            b.getInstallPath(.prefix, ""),
+        },
+    );
+    run_native_dependency_audit.setCwd(b.path("."));
+    run_native_dependency_audit.step.dependOn(b.getInstallStep());
+    native_dependency_audit_step.dependOn(&run_native_dependency_audit.step);
+    const public_api_audit_step = b.step(
+        "public-api-audit",
+        "Compile and link an external C consumer using installed metadata",
+    );
+    const run_public_api_audit = b.addSystemCommand(
+        &.{
+            "python3",
+            "scripts/public-api-audit.py",
+            "--prefix",
+            b.getInstallPath(.prefix, ""),
+        },
+    );
+    run_public_api_audit.setCwd(b.path("."));
+    run_public_api_audit.step.dependOn(b.getInstallStep());
+    public_api_audit_step.dependOn(&run_public_api_audit.step);
+    const abi_audit_step = b.step(
+        "abi-audit",
+        "Build and compare the public C ABI with its baseline",
+    );
+    const run_abi_audit = b.addSystemCommand(
+        &.{
+            "python3",
+            "scripts/abi-audit.py",
+            "--prefix",
+            b.getInstallPath(.prefix, ""),
+        },
+    );
+    run_abi_audit.setCwd(b.path("."));
+    run_abi_audit.step.dependOn(b.getInstallStep());
+    abi_audit_step.dependOn(&run_abi_audit.step);
+
+    const tdnf_error_mod = b.createModule(.{
+        .root_source_file = b.path("abi/error_codes.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    {
+        const tests = b.addTest(.{ .root_module = tdnf_error_mod });
+        const run_tests = b.addRunArtifact(tests);
+        zig_test_step.dependOn(&run_tests.step);
+    }
+
+    const repomd_abi_mod = b.createModule(.{
+        .root_source_file = b.path("abi/repomd_layout.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    repomd_abi_mod.addIncludePath(b.path("include"));
+    {
+        const tests = b.addTest(.{ .root_module = repomd_abi_mod });
+        const run_tests = b.addRunArtifact(tests);
+        zig_test_step.dependOn(&run_tests.step);
+    }
 
     const xml_mod = b.createModule(.{
         .root_source_file = b.path("xml/xml.zig"),
@@ -395,7 +470,7 @@ pub fn build(b: *Build) void {
 
     const history_zig_lib = history_lib;
 
-    // ----- rpmzig (Zig-side librpm replacement, see plan-replace-librpm.md) //
+    // ----- rpmzig (native RPM implementation) ----- //
 
     const rpmzig_lib = blk: {
         const mod = b.createModule(.{
@@ -428,9 +503,9 @@ pub fn build(b: *Build) void {
             .pic = true,
             .imports = &.{
                 .{ .name = "tls", .module = tls_dep.module("tls") },
+                .{ .name = "tdnf_error", .module = tdnf_error_mod },
             },
         });
-        mod.addIncludePath(b.path("include"));
         const lib = b.addLibrary(.{
             .name = "tdnfdownloadzig",
             .linkage = .static,
@@ -476,9 +551,7 @@ pub fn build(b: *Build) void {
     }
 
     // `zig build test` runs the rpmzig Zig unit tests (path-building,
-    // txn-config resolution, plus the pure-Zig parser/verifier
-    // submodules). The C ABI surface is smoke-tested via
-    // tdnf-rpmdb-count against a live rpmdb.
+    // txn-config resolution, plus the pure-Zig parser/verifier submodules).
     {
         const test_mod = b.createModule(.{
             .root_source_file = b.path("rpmzig/rpmdb.zig"),
@@ -560,9 +633,9 @@ pub fn build(b: *Build) void {
             .link_libc = true,
             .imports = &.{
                 .{ .name = "tls", .module = tls_dep.module("tls") },
+                .{ .name = "tdnf_error", .module = tdnf_error_mod },
             },
         });
-        test_mod.addIncludePath(b.path("include"));
         const tests = b.addTest(.{ .root_module = test_mod });
         const run_tests = b.addRunArtifact(tests);
         zig_test_step.dependOn(&run_tests.step);
@@ -700,6 +773,34 @@ pub fn build(b: *Build) void {
         b.getInstallStep().dependOn(&install.step);
     }
 
+    // tdnf-rpmdb-import-pubkeys: smoke-test exe for atomic native
+    // OpenPGP certificate import.
+    {
+        const mod = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .pic = true,
+        });
+        mod.addIncludePath(b.path("rpmzig"));
+        mod.addCSourceFiles(.{
+            .root = b.path("rpmzig"),
+            .files = &.{"pubkey_import_main.c"},
+            .flags = &tdnf_cflags,
+        });
+        mod.linkLibrary(rpmzig_lib);
+        linkLuaScriptletDeps(mod, rpmzig_lua, rpmzig_lua_lib);
+        const exe = b.addExecutable(.{
+            .name = "tdnf-rpmdb-import-pubkeys",
+            .root_module = mod,
+        });
+        hardenExe(exe);
+        const install = b.addInstallArtifact(exe, .{
+            .dest_dir = .{ .override = .{ .custom = "libexec/tdnf" } },
+        });
+        b.getInstallStep().dependOn(&install.step);
+    }
+
     // tdnf-rpmdb-write: smoke-test exe for the native sqlite rpmdb
     // write path.
     {
@@ -765,6 +866,7 @@ pub fn build(b: *Build) void {
             .link_libc = true,
             .pic = true,
         });
+        mod.addIncludePath(b.path("include"));
         mod.addIncludePath(b.path("rpmzig"));
         mod.addCSourceFiles(.{
             .root = b.path("rpmzig"),
@@ -793,6 +895,7 @@ pub fn build(b: *Build) void {
             .link_libc = true,
             .pic = true,
         });
+        mod.addIncludePath(b.path("include"));
         mod.addIncludePath(b.path("rpmzig"));
         mod.addCSourceFiles(.{
             .root = b.path("rpmzig"),
@@ -821,6 +924,7 @@ pub fn build(b: *Build) void {
             .link_libc = true,
             .pic = true,
         });
+        mod.addIncludePath(b.path("include"));
         mod.addIncludePath(b.path("rpmzig"));
         mod.addCSourceFiles(.{
             .root = b.path("rpmzig"),
@@ -849,6 +953,7 @@ pub fn build(b: *Build) void {
             .link_libc = true,
             .pic = true,
         });
+        mod.addIncludePath(b.path("include"));
         mod.addIncludePath(b.path("rpmzig"));
         mod.addCSourceFiles(.{
             .root = b.path("rpmzig"),
@@ -909,25 +1014,19 @@ pub fn build(b: *Build) void {
     tdnf_so_mod.addIncludePath(b.path("client"));
     tdnf_so_mod.addSystemIncludePath(libsolv_include);
     tdnf_so_mod.addSystemIncludePath(libsolvext_include);
-    if (build_with_rpm_6x) tdnf_so_mod.addCMacro("BUILD_WITH_RPM_6X", "1");
     tdnf_so_mod.addIncludePath(b.path("rpmzig"));
-    // Native transaction ordering / dep+conflict check and the
-    // composed native transaction executor are now both unconditional
-    // (the crosscheck-only `-Drpmzig-transaction-check` and rollback-
-    // safety `-Drpmzig-transaction-execute` flags have both been
-    // removed). Every install/erase/upgrade dispatches through the
-    // native executor in client/rpmtrans_native.c; there is no
-    // librpm `rpmtsRun` fallback.
+    // Native transaction ordering, dependency/conflict checks, and the
+    // composed transaction executor are unconditional.
     tdnf_so_mod.addCMacro("TDNF_RPMZIG_TRANSACTION_CHECK", "1");
     tdnf_so_mod.addCSourceFiles(.{
         .root = b.path("client"),
         .files = &.{
-            "api.c",         "client.c",   "config.c",  "eventdata.c",
-            "goal.c",        "gpgcheck.c", "init.c",    "packageutils.c",
-            "querynative.c", "plugins.c",  "repo.c",    "repoutils.c",
-            "remoterepo.c",  "repolist.c", "resolve.c", "rpmtrans.c",
-            "rpmtrans_native.c",
-            "updateinfo.c",  "utils.c",    "history.c", "varsdir.c",
+            "api.c",             "client.c",     "config.c",  "eventdata.c",
+            "goal.c",            "gpgcheck.c",   "init.c",    "packageutils.c",
+            "querynative.c",     "plugins.c",    "repo.c",    "repoutils.c",
+            "remoterepo.c",      "repolist.c",   "resolve.c", "rpmtrans.c",
+            "rpmtrans_native.c", "updateinfo.c", "utils.c",   "history.c",
+            "varsdir.c",
         },
         .flags = &tdnf_cflags,
     });
@@ -954,8 +1053,6 @@ pub fn build(b: *Build) void {
     tdnf_so_mod.linkLibrary(download_zig_lib);
     tdnf_so_mod.addObjectFile(libsolv.getEmittedBin());
     tdnf_so_mod.addObjectFile(libsolvext.getEmittedBin());
-    linkSystem(tdnf_so_mod, &.{ "rpm", "sqlite3" });
-
     const libtdnf = b.addLibrary(.{
         .name = "tdnf",
         .linkage = .dynamic,
@@ -1031,8 +1128,7 @@ pub fn build(b: *Build) void {
     hardenExe(tdnf_config_exe);
     b.installArtifact(tdnf_config_exe);
 
-    // tdnf-history-util — librpm-free as of T1 PR #5; links the
-    // vendored-SQLite history and rpmzig static libs.
+    // tdnf-history-util links the vendored-SQLite history and rpmzig libs.
     const history_util_mod = b.createModule(.{
         .target = target,
         .optimize = optimize,
@@ -1121,7 +1217,6 @@ pub fn build(b: *Build) void {
             .link_libc = true,
         });
         test_mod.addImport("xml", xml_mod);
-        test_mod.addIncludePath(b.path("plugins/metalink"));
         const tests = b.addTest(.{ .root_module = test_mod });
         const run_tests = b.addRunArtifact(tests);
         zig_test_step.dependOn(&run_tests.step);
@@ -1203,7 +1298,11 @@ pub fn build(b: *Build) void {
         &b.addInstallFileWithDir(tdnf_cli_libs_pc.getOutputFile(), pkgconfig_dir, "tdnf-cli-libs.pc").step,
     );
 
-    const install_automatic = b.addInstallFileWithDir(tdnf_automatic.getOutputFile(), .bin, "tdnf-automatic");
+    const install_automatic = b.addInstallFileWithDir(
+        b.path("bin/tdnf-automatic"),
+        .bin,
+        "tdnf-automatic",
+    );
     b.getInstallStep().dependOn(&install_automatic.step);
     const chmod_automatic = b.addSystemCommand(&.{ "chmod", "+x", b.getInstallPath(.bin, "tdnf-automatic") });
     chmod_automatic.step.dependOn(&install_automatic.step);
@@ -1271,6 +1370,11 @@ pub fn build(b: *Build) void {
     const run_flake8 = b.addSystemCommand(&.{ "flake8", "pytests" });
     run_flake8.setCwd(b.path("."));
     lint_step.dependOn(&run_flake8.step);
+    const run_source_dependency_audit = b.addSystemCommand(
+        &.{ "python3", "scripts/librpm-audit.py" },
+    );
+    run_source_dependency_audit.setCwd(b.path("."));
+    lint_step.dependOn(&run_source_dependency_audit.step);
 }
 
 // -------------------------------------------------------------------------
@@ -1320,6 +1424,7 @@ fn configureLuaScriptletSupport(
     lua_lib: []const u8,
     link_system_libs: bool,
 ) void {
+    mod.addIncludePath(b.path("include"));
     mod.addIncludePath(b.path("rpmzig"));
     if (enabled) {
         mod.addCSourceFiles(.{
@@ -1357,21 +1462,6 @@ fn hardenExe(exe: *Build.Step.Compile) void {
     // link_z_relro is true by default in 0.16; -z now is not directly
     // exposed by the Compile step API, so it relies on the linker default.
     exe.link_z_relro = true;
-}
-
-/// Detect rpm >= 6.0 at configure time. Returns false if pkg-config is
-/// missing, the rpm package is not registered, or the version can't be
-/// parsed.
-fn detectRpm6(b: *Build) bool {
-    var code: u8 = undefined;
-    const stdout = b.runAllowFail(
-        &.{ "pkg-config", "--modversion", "rpm" },
-        &code,
-        .ignore,
-    ) catch return false;
-    const trimmed = std.mem.trim(u8, stdout, " \r\n\t");
-    const v = std.SemanticVersion.parse(trimmed) catch return false;
-    return v.major >= 6;
 }
 
 const TemplateVar = struct {
@@ -1413,6 +1503,25 @@ fn writeTemplate(
 
     root.writeFile(io, .{ .sub_path = out_rel, .data = out.items }) catch |err|
         std.debug.panic("unable to write generated file '{s}': {t}", .{ out_rel, err });
+}
+
+fn writeTemplateExecutable(
+    b: *Build,
+    in_rel: []const u8,
+    out_rel: []const u8,
+    vars: []const TemplateVar,
+) void {
+    writeTemplate(b, in_rel, out_rel, vars);
+    b.build_root.handle.setFilePermissions(
+        b.graph.io,
+        out_rel,
+        .executable_file,
+        .{},
+    ) catch |err|
+        std.debug.panic(
+            "unable to mark generated file '{s}' executable: {t}",
+            .{ out_rel, err },
+        );
 }
 
 fn renderTemplateLine(

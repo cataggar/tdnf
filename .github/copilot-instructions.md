@@ -1,16 +1,17 @@
 # tdnf - Copilot instructions
 
 tdnf is "tiny dandified yum" — a C implementation of a dnf/yum-compatible package
-manager built on `libsolv` and `librpm`, with downloads handled by Zig's
-HTTP/TLS stack. It ships a public C library (`libtdnf`) plus CLI binaries.
+manager built on vendored `libsolv` and the native Zig RPM stack in
+`rpmzig/`, with downloads handled by Zig's HTTP/TLS stack. It ships a
+public C library (`libtdnf`) plus CLI binaries and has no production
+dependency on system RPM libraries, headers, or development metadata.
 
 ## Build, test, lint
 
 The build is driven by **Zig 0.16+** (no CMake — migrated to `build.zig`).
-The host needs `librpm-dev`, `libexpat1-dev`,
-`libsqlite3-dev`, `libgpgme-dev`,
-`libpopt-dev`, `liblua5.4-dev` (Debian/Ubuntu names — `*-devel`/`lua-devel`
-on rpm distros). Native Lua scriptlet support (`rpmzig-lua`) defaults to
+The host needs `libgpgme-dev` and `liblua5.4-dev` on Debian/Ubuntu
+(equivalent development packages on other distributions). SQLite and
+libsolv are vendored. Native Lua scriptlet support (`rpmzig-lua`) defaults to
 `true` (real base packages use `<lua>`-tagged scriptlets), so on Debian/
 Ubuntu every `zig build` invocation needs `-Drpmzig-lua-lib=lua5.4` (the
 system package links as `lua5.4`, not the default `lua`) — this applies
@@ -36,10 +37,11 @@ All compilation goes through **`zig cc`** (clang from Zig's bundled LLVM).
 There is no longer a separate gcc/clang CI matrix; what `zig build`
 produces locally is what CI produces.
 
-CI runs the build + flake8 only — the pytest integration suite is run
-by the developer on a local rpm-aware host. There is no Docker image,
-no RPM packaging, and no source-tarball production in this repo
-anymore.
+CI builds with no RPM development files, runs unit tests, lint, ABI and
+migration audits, compiles an isolated public C consumer, checks all
+installed ELF files, and executes every native smoke helper. The full
+pytest integration suite is run by the developer on a local rpm-aware
+host. There is no Docker image or RPM packaging in this repo.
 
 The pytest harness (`pytests/conftest.py`) sets up an HTTP repo on
 `localhost:8080`, generates RPMs from specs under `pytests/repo/`, and
@@ -55,8 +57,7 @@ every test, so tests must clean up anything they install. Use
 `DIST` env var (`photon` or `fedora`) is read by `conftest.py` and a
 handful of test files; some tests skip or branch on distro.
 
-The default branch for PRs is **`dev`**, not `main`/`master` (see
-CONTRIBUTING.md).
+The default branch for PRs is **`main`** (see CONTRIBUTING.md).
 
 ## Architecture
 
@@ -103,10 +104,11 @@ Pkg-config files and the `tdnf-automatic` script are produced via
 `b.addConfigHeader(.autoconf_at, ...)` into the build cache, then
 installed.
 
-## librpm replacement (T1+T2+T3+T4 complete)
+## Native RPM implementation (issue #137 complete)
 
-`rpmzig/` is a Zig static library that has taken over librpm's
-read-side responsibilities and the composed transaction executor.
+`rpmzig/` is a Zig static library that owns package parsing, rpmdb
+access, OpenPGP verification, configuration, pubkey import, and the
+composed transaction executor.
 Today it exposes (via the C ABI in `rpmzig/rpmdb.h`,
 `rpmzig/verify.h`, and the install/erase/scriptlet/trigger
 engines used from `client/rpmtrans_native.c`):
@@ -114,8 +116,7 @@ engines used from `client/rpmtrans_native.c`):
 - **rpmdb reader** (T1): `tdnf_rpmdb_count_packages`,
   `tdnf_rpmdb_iter_*`, `tdnf_rpmdb_cookie`,
   `tdnf_rpmdb_pubkeys_*` (walks `gpg-pubkey-*` entries — the
-  imported public-key keyring). `history/history.c` is fully
-  off librpm.
+  imported public-key keyring).
 - **`.rpm` file parser** (T2): `tdnf_rpm_file_*` — opens a
   `.rpm`, parses lead + signature header + main header, walks
   the cpio payload via `std.compress.{flate,zstd,xz}`.
@@ -127,7 +128,7 @@ engines used from `client/rpmtrans_native.c`):
 - **Composed native transaction executor** (T4, issue #117):
   `client/rpmtrans_native.c` composes the rpmzig install,
   rpmdb-write, file-erase, scriptlet, trigger, and (optional)
-  Lua engines into a full replacement for `rpmtsRun`. It runs
+  Lua engines into the sole transaction path. It runs
   `%pretrans` once, then per-item in native order
   `%pre`→file-install→rpmdb-write→`%post`→`%triggerin`; for
   upgrades the old blob is torn down via
@@ -136,19 +137,17 @@ engines used from `client/rpmtrans_native.c`):
   finally `%posttrans` once. Multi-instance upgrades
   (`nPriors >= 2`) are refused loudly with a clear error.
 
-libtdnf now uses the pure-Zig OpenPGP verifier
-unconditionally on the package-install path, with
-`rpmReadPackageFile` running under `RPMVSF_MASK_NOSIGNATURES`
-for the initial header read. The build no longer has a
-verifier-selection switch, and libtdnf does **not** link
-`libgpgme.so.11`, `libgpg-error.so.0`, or `libassuan.so.0`.
+libtdnf uses the pure-Zig OpenPGP verifier unconditionally on the
+package-install path. Package headers and imported keys are handled by
+rpmzig. The GPGME dependency is isolated to the optional repository
+metadata signature plugin.
 
 Build flags:
 
 | Flag                                        | Default | Meaning                                                    |
 |---------------------------------------------|---------|------------------------------------------------------------|
 | `-Drpmzig-lua=<bool>`                       | `true`  | Native Lua scriptlet dispatch (`<lua>`-tagged `%pre`/`%post`/etc.). Needed for real base packages (Fedora `bash`/`filesystem`/`glibc`/`setup`, Azure Linux `filesystem`). |
-| `-Drpmzig-lua-lib=lua5.4`/`lua`             | detected | pkg-config module name for the Lua runtime. |
+| `-Drpmzig-lua-lib=lua5.4`/`lua`             | `lua`   | System linker name for the Lua runtime. |
 
 The crosscheck-only scaffolding flags used during T4 development
 (`-Drpmzig-file-install-crosscheck`, `-Drpmzig-file-erase-crosscheck`,
@@ -157,24 +156,23 @@ The crosscheck-only scaffolding flags used during T4 development
 native executor after PR #132 flipped it on by default) have been
 removed — their behaviours are now unconditional. Every
 `tdnf install`/`erase`/`upgrade` dispatches through the native
-executor in `client/rpmtrans_native.c`; there is no librpm `rpmtsRun`
+executor in `client/rpmtrans_native.c`; there is no host implementation
 fallback.
 
 Smoke-test consumers under `libexec/tdnf/`:
 `tdnf-rpmdb-count`, `tdnf-rpmdb-list`, `tdnf-rpmdb-pubkeys`,
+`tdnf-rpmdb-import-pubkeys`, `tdnf-rpmdb-write`,
 `tdnf-rpm-info`, `tdnf-rpm-files`, `tdnf-rpm-verify` (the last
 supports `--key` and `--rpmdb [root]`, using the same pure-Zig
 verification path as libtdnf), `tdnf-rpm-install`, `tdnf-rpm-erase`,
 `tdnf-rpm-trigger`, `tdnf-rpm-scriptlet`.
 
-**Remaining librpm dependencies** (documented follow-up, not
-scope for T4): `client/gpgcheck.c` still uses
-`rpmReadPackageFile`/`rpmtsImportPubkey`/`rpmtsVfyLevel` for
-package-header parsing and pubkey import; `client/utils.c` uses
-`rpmtsInitIterator(RPMTAG_PROVIDES)` for distroverpkg lookup;
-`client/api.c` retains the `rpm --root` verify path. As a
-result, `librpm.so.9`/`librpmio.so.9` are still linked and
-`librpm-dev` remains a build dependency.
+**Zero production librpm dependency:** system RPM headers, ABI symbols,
+version probes, and link declarations are forbidden by
+`scripts/librpm-audit.py`. Host `rpm`, `rpmkeys`, `rpmbuild`, and
+`rpmsign` remain test-only fixture tools and behavior oracles.
+`TDNFInit`/`TDNFUninit` and the legacy verbosity option remain
+ABI-compatible no-ops.
 
 **Adding gpgme-using Zig code:** don't put
 `mod.linkSystemLibrary("gpgme", …)` on a static-library module —
@@ -236,12 +234,13 @@ they are defined; defined at the bottom of the file.
 - `client/config.h`, `history/config.h`, the plugin `config.h`s, and
   the `.pc` files are **generated**. Edit the `.in` files, not the
   outputs.
-- Version is hardcoded as `project_version = "4.0.0"` in `build.zig`
+- Version defaults to `default_project_version = "4.0.0"` in `build.zig`
   and also appears in `build.zig.zon`. There is no `VERSION` file
   anymore. Bumping requires both edits.
-- `pkg-config` is queried at configure time to detect rpm ≥ 6.0; that
-  toggles the `BUILD_WITH_RPM_6X` compile-time macro on the
-  `client`/`history`/`solv` modules.
+- `zig build native-dependency-audit --prefix ./out` scans source,
+  dynamic dependencies, and undefined symbols. `zig build
+  public-api-audit --prefix ./out` compiles each installed header and
+  links a consumer with isolated package metadata.
 - Plugins are off by default — set `plugins=1` in `tdnf.conf` to load
   them, and CLI flags `--enableplugin=<glob>` /
   `--disableplugin=<glob>` override per-plugin config
@@ -254,7 +253,7 @@ they are defined; defined at the bottom of the file.
 
 ## Commits & PRs
 
-- Open PRs against the `dev` branch.
+- Open PRs against the `main` branch.
 - Keep commits as logical units; squash fixups into the commit that
   introduced them (CONTRIBUTING.md "Updating pull requests"). One
   self-contained commit per merge is the rule of thumb.

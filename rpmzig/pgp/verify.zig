@@ -4,16 +4,15 @@
 //! Combines `armor` (PR #1), `packet` (PR #2), `pubkey` (PR #3),
 //! `signature` (PR #4) and `keyring` (PR #6) with
 //! `std.crypto.Certificate.rsa`, `std.crypto.sign.ecdsa` and
-//! `std.crypto.sign.Ed25519` to verify v4 OpenPGP detached
-//! signatures.
+//! `std.crypto.sign.Ed25519` to verify v4 and salted v6 OpenPGP
+//! detached signatures.
 //!
 //! Algorithms wired in so far:
 //!
 //!   * RSA-PKCS#1v1.5 + SHA-256 / SHA-512  (PR #5).
 //!   * ECDSA P-256+SHA-256 / P-384+SHA-384 (PR #8). The curve/hash
 //!     pairing is strict — RPM 4.20's rpmsign emits the matching
-//!     pair; deviation suggests malformed input and is rejected as
-//!     `.internal`.
+//!     pair; deviations are typed as unsupported.
 //!   * Ed25519 — both native (algo 27, RFC 9580) and EdDSALegacy
 //!     (algo 22, GnuPG `--openpgp` default) wire formats — with
 //!     SHA-256 or SHA-512 (PR #9).
@@ -30,9 +29,11 @@
 //!     embedded type-0x19 back-sig from the subkey. A subkey
 //!     grafted onto a legitimate primary blob without a valid
 //!     binding chain is rejected as `.no_key`.
-//!
-//! Out-of-scope cases coerce to `.internal`; subsequent PRs shrink
-//! that surface to zero.
+//!   * V6 primary RSA, ECDSA, and Ed25519 keys and their RFC 9580
+//!     SHA-256 fingerprints are supported. V6 subkey bindings are
+//!     not yet verified, so signatures from v6 subkeys return
+//!     `.no_key`. An RPM6 OPENPGP array may still contain ordinary
+//!     v4 signatures made by v4 keys; those remain fully supported.
 
 const std = @import("std");
 
@@ -57,7 +58,40 @@ pub const Status = enum(c_int) {
     internal = 4,
 };
 
+pub const DetailedStatus = enum {
+    verified,
+    no_signature,
+    no_key,
+    bad_signature,
+    malformed_openpgp,
+    unsupported_openpgp,
+};
+
+pub const ParseDetachedError = error{
+    NoSignature,
+    MalformedOpenPgp,
+    UnsupportedOpenPgp,
+};
+
+pub const ParsedSignature = signature.Signature;
+
 const HashKind = enum { sha256, sha384, sha512 };
+
+/// Parse exactly one detached Tag-2 packet. The returned slices alias
+/// `sig_pkt_bytes`.
+pub fn parseDetached(sig_pkt_bytes: []const u8) ParseDetachedError!ParsedSignature {
+    var sig_iter = packet.iterate(sig_pkt_bytes);
+    const first = (sig_iter.next() catch return error.MalformedOpenPgp) orelse
+        return error.NoSignature;
+    if (first.tag != .signature) return error.MalformedOpenPgp;
+    const sig = signature.parseBody(first.body) catch |err| switch (err) {
+        error.UnsupportedVersion => return error.UnsupportedOpenPgp,
+        else => return error.MalformedOpenPgp,
+    };
+    if ((sig_iter.next() catch return error.MalformedOpenPgp) != null)
+        return error.MalformedOpenPgp;
+    return sig;
+}
 
 /// Verify a single OpenPGP detached signature blob over `signed_data`,
 /// against the supplied keyring. Returns a verdict; never raises.
@@ -77,41 +111,73 @@ pub fn verifyDetached(
     signed_data: []const u8,
     key_blobs: []const []const u8,
 ) Status {
+    return switch (verifyDetachedDetailed(allocator, sig_pkt_bytes, signed_data, key_blobs)) {
+        .verified => .ok,
+        .no_signature => .no_sig,
+        .no_key => .no_key,
+        .bad_signature, .malformed_openpgp => .bad,
+        .unsupported_openpgp => .internal,
+    };
+}
+
+pub fn verifyDetachedDetailed(
+    allocator: std.mem.Allocator,
+    sig_pkt_bytes: []const u8,
+    signed_data: []const u8,
+    key_blobs: []const []const u8,
+) DetailedStatus {
     // --- 1. Decode the signature packet. ----------------------------
-    var sig_iter = packet.iterate(sig_pkt_bytes);
-    const first = (sig_iter.next() catch return .bad) orelse return .no_sig;
-    if (first.tag != .signature) return .bad;
-    const sig = signature.parseBody(first.body) catch return .bad;
-    // signature.parseBody enforces v4 already.
+    const sig = parseDetached(sig_pkt_bytes) catch |err| return switch (err) {
+        error.NoSignature => .no_signature,
+        error.MalformedOpenPgp => .malformed_openpgp,
+        error.UnsupportedOpenPgp => .unsupported_openpgp,
+    };
 
     // --- 2. Scope filter. -------------------------------------------
-    if (sig.sig_type != .binary_document) return .internal;
+    if (sig.sig_type != .binary_document) return .unsupported_openpgp;
     const hash_kind: HashKind = switch (sig.hash_algo) {
         .sha256 => .sha256,
         .sha384 => .sha384,
         .sha512 => .sha512,
-        else => return .internal,
+        else => return .unsupported_openpgp,
     };
     switch (sig.material) {
         .rsa, .ed25519, .eddsa_legacy, .ecdsa => {},
-        else => return .internal,
+        else => return .unsupported_openpgp,
+    }
+    if (sig.version == 6) {
+        switch (sig.material) {
+            .eddsa_legacy => return .unsupported_openpgp,
+            else => {},
+        }
     }
 
     // --- 3. Locate the issuer identity. -----------------------------
     const IssuerKind = enum { fpr, kid };
     var issuer_kind: IssuerKind = undefined;
-    var issuer_fpr_buf: [20]u8 = undefined;
+    var issuer_fpr_buf: [32]u8 = @splat(0);
+    var issuer_fpr_len: usize = 0;
+    var issuer_key_version: u8 = 0;
     var issuer_keyid: [8]u8 = undefined;
 
-    if (sig.issuerFingerprint()) |fpr_slice| {
-        if (fpr_slice.len != 20) return .bad;
-        @memcpy(&issuer_fpr_buf, fpr_slice);
+    if (sig.issuerFingerprintInfo()) |issuer| {
+        const expected_len: usize = switch (issuer.key_version) {
+            4 => 20,
+            6 => 32,
+            else => return .malformed_openpgp,
+        };
+        if (issuer.key_version != sig.version or issuer.bytes.len != expected_len)
+            return .malformed_openpgp;
+        @memcpy(issuer_fpr_buf[0..expected_len], issuer.bytes);
+        issuer_fpr_len = expected_len;
+        issuer_key_version = issuer.key_version;
         issuer_kind = .fpr;
     } else if (sig.issuerKeyId()) |kid| {
+        if (sig.version != 4) return .malformed_openpgp;
         issuer_keyid = kid;
         issuer_kind = .kid;
     } else {
-        return .bad;
+        return .malformed_openpgp;
     }
 
     // --- 4. Walk the keyring; find a matching public key. -----------
@@ -140,7 +206,12 @@ pub fn verifyDetached(
         for (kr.entries) |entry| {
             if (entry.kind == .subkey and !entry.binding_ok) continue;
             const is_match = switch (issuer_kind) {
-                .fpr => std.crypto.timing_safe.eql([20]u8, entry.fingerprint.bytes, issuer_fpr_buf),
+                .fpr => entry.fingerprint.version == issuer_key_version and
+                    std.mem.eql(
+                        u8,
+                        entry.fingerprint.slice(),
+                        issuer_fpr_buf[0..issuer_fpr_len],
+                    ),
                 .kid => std.crypto.timing_safe.eql([8]u8, entry.fingerprint.keyId(), issuer_keyid),
             };
             if (is_match) {
@@ -152,6 +223,12 @@ pub fn verifyDetached(
         }
     }
     const matched_pk = matched orelse return .no_key;
+    if (!algorithmsCompatible(sig.pk_algo, matched_pk.algo))
+        return .unsupported_openpgp;
+    switch (matched_pk.material) {
+        .unsupported => return .unsupported_openpgp,
+        else => {},
+    }
 
     // --- 5. Compute the hash trailer + digest. ----------------------
     // Hash input (RFC 4880 §5.2.4 v4 detached, sig_type 0x00):
@@ -174,7 +251,7 @@ pub fn verifyDetached(
     // `concatVerify` recomputes the digest internally.
     const prefix_len: u32 = @intCast(sig.hashed_prefix.len);
     const trailer: [6]u8 = .{
-        0x04,
+        sig.version,
         0xFF,
         @intCast((prefix_len >> 24) & 0xFF),
         @intCast((prefix_len >> 16) & 0xFF),
@@ -186,6 +263,7 @@ pub fn verifyDetached(
     const digest: []const u8 = switch (hash_kind) {
         .sha256 => blk: {
             var h = std.crypto.hash.sha2.Sha256.init(.{});
+            h.update(sig.salt);
             h.update(signed_data);
             h.update(sig.hashed_prefix);
             h.update(&trailer);
@@ -194,6 +272,7 @@ pub fn verifyDetached(
         },
         .sha384 => blk: {
             var h = std.crypto.hash.sha2.Sha384.init(.{});
+            h.update(sig.salt);
             h.update(signed_data);
             h.update(sig.hashed_prefix);
             h.update(&trailer);
@@ -202,6 +281,7 @@ pub fn verifyDetached(
         },
         .sha512 => blk: {
             var h = std.crypto.hash.sha2.Sha512.init(.{});
+            h.update(sig.salt);
             h.update(signed_data);
             h.update(sig.hashed_prefix);
             h.update(&trailer);
@@ -209,10 +289,11 @@ pub fn verifyDetached(
             break :blk digest_buf[0..64];
         },
     };
-    if (digest[0] != sig.hash_hint[0] or digest[1] != sig.hash_hint[1]) return .bad;
+    if (digest[0] != sig.hash_hint[0] or digest[1] != sig.hash_hint[1])
+        return .bad_signature;
 
     // --- 6. Algorithm dispatch. -------------------------------------
-    return switch (matched_pk.material) {
+    const status: Status = switch (matched_pk.material) {
         .rsa => |rsa_key| verifyRsa(
             sig,
             rsa_key,
@@ -228,6 +309,27 @@ pub fn verifyDetached(
         else
             verifyEd25519(sig, ed_key, digest),
         .unsupported => .internal,
+    };
+    return switch (status) {
+        .ok => .verified,
+        .no_sig => .no_signature,
+        .no_key => .no_key,
+        .bad => .bad_signature,
+        .internal => .unsupported_openpgp,
+    };
+}
+
+fn algorithmsCompatible(
+    sig_algo: signature.PkAlgorithm,
+    key_algo: pubkey.Algorithm,
+) bool {
+    return switch (sig_algo) {
+        .rsa_sign_and_encrypt => key_algo == .rsa_sign_and_encrypt,
+        .rsa_sign_only => key_algo == .rsa_sign_only,
+        .ecdsa => key_algo == .ecdsa,
+        .eddsa_legacy => key_algo == .eddsa_legacy,
+        .ed25519 => key_algo == .ed25519,
+        else => false,
     };
 }
 
@@ -265,7 +367,12 @@ fn verifyRsa(
     const modulus_len = rsa_key.n.bytes.len;
     if (sig_rsa_mpi.bytes.len > modulus_len) return .bad;
 
-    const msg_parts = &[_][]const u8{ signed_data, sig.hashed_prefix, trailer };
+    const msg_parts = &[_][]const u8{
+        sig.salt,
+        signed_data,
+        sig.hashed_prefix,
+        trailer,
+    };
 
     inline for (.{ 256, 384, 512 }) |comptime_mod_len| {
         if (modulus_len == comptime_mod_len) {
@@ -425,6 +532,64 @@ const fixture_sig = @embedFile("testdata/rsa2048-sig.bin");
 const fixture_data = @embedFile("testdata/rsa2048-data.bin");
 const microsoft_key = @embedFile("testdata/microsoft-rpm-key.bin");
 
+const V6Ed25519Fixture = struct {
+    key_packet: [44]u8,
+    signature_packet: [148]u8,
+};
+
+fn makeV6Ed25519Fixture(signed_data: []const u8) !V6Ed25519Fixture {
+    const Ed = std.crypto.sign.Ed25519;
+    var seed: [Ed.KeyPair.seed_length]u8 = undefined;
+    for (&seed, 0..) |*byte, index| byte.* = @intCast(index + 1);
+    const key_pair = try Ed.KeyPair.generateDeterministic(seed);
+
+    var key_packet: [44]u8 = @splat(0);
+    key_packet[0] = 0xc6;
+    key_packet[1] = 42;
+    const key_body = key_packet[2..];
+    key_body[0] = 6;
+    key_body[5] = 27;
+    key_body[9] = 32;
+    @memcpy(key_body[10..42], &key_pair.public_key.toBytes());
+    const fingerprint = pubkey.fingerprintV6(key_body);
+
+    var signature_packet: [148]u8 = @splat(0);
+    signature_packet[0] = 0xc2;
+    signature_packet[1] = 146;
+    const body = signature_packet[2..];
+    body[0] = 6;
+    body[1] = 0;
+    body[2] = 27;
+    body[3] = 10;
+    body[7] = 35;
+    body[8] = 34;
+    body[9] = 33;
+    body[10] = 6;
+    @memcpy(body[11..43], fingerprint.slice());
+
+    body[49] = 32;
+    for (body[50..82], 0..) |*byte, index| byte.* = @intCast(0xa0 + index);
+
+    const hashed_prefix = body[0..43];
+    const trailer = [_]u8{ 6, 0xff, 0, 0, 0, hashed_prefix.len };
+    var hasher = std.crypto.hash.sha2.Sha512.init(.{});
+    hasher.update(body[50..82]);
+    hasher.update(signed_data);
+    hasher.update(hashed_prefix);
+    hasher.update(&trailer);
+    var digest: [64]u8 = undefined;
+    hasher.final(&digest);
+    body[47] = digest[0];
+    body[48] = digest[1];
+    const sig = try key_pair.sign(&digest, null);
+    @memcpy(body[82..146], &sig.toBytes());
+
+    return .{
+        .key_packet = key_packet,
+        .signature_packet = signature_packet,
+    };
+}
+
 test "RSA-2048 + SHA-256 happy path" {
     const keys = [_][]const u8{fixture_pubkey};
     const status = verifyDetached(
@@ -434,6 +599,35 @@ test "RSA-2048 + SHA-256 happy path" {
         &keys,
     );
     try testing.expectEqual(Status.ok, status);
+}
+
+test "salted v6 Ed25519 signature verifies with v6 key" {
+    const data = "rpm6 header bytes";
+    const fixture = try makeV6Ed25519Fixture(data);
+    const keys = [_][]const u8{&fixture.key_packet};
+    try testing.expectEqual(
+        DetailedStatus.verified,
+        verifyDetachedDetailed(testing.allocator, &fixture.signature_packet, data, &keys),
+    );
+
+    try testing.expectEqual(
+        DetailedStatus.bad_signature,
+        verifyDetachedDetailed(testing.allocator, &fixture.signature_packet, "tampered", &keys),
+    );
+
+    var salt_tampered = fixture.signature_packet;
+    salt_tampered[2 + 50] ^= 1;
+    try testing.expectEqual(
+        DetailedStatus.bad_signature,
+        verifyDetachedDetailed(testing.allocator, &salt_tampered, data, &keys),
+    );
+
+    var bad_salt_length = fixture.signature_packet;
+    bad_salt_length[2 + 49] = 31;
+    try testing.expectEqual(
+        DetailedStatus.malformed_openpgp,
+        verifyDetachedDetailed(testing.allocator, &bad_salt_length, data, &keys),
+    );
 }
 
 test "tampered signed data → bad" {

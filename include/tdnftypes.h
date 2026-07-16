@@ -8,7 +8,9 @@
 
 #pragma once
 
-#include <rpm/rpmts.h>
+#include <time.h>
+
+#include "tdnfrpmtrans.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -265,7 +267,7 @@ typedef struct _TDNF_CONF
     int nCheckUpdateCompat;
     int nDistroSyncReinstallChanged;
     int nConnectTimeout;
-    rpmtransFlags rpmTransFlags;
+    TDNF_RPMTRANS_FLAGS rpmTransFlags;
     int nPluginsEnabled;
     int nSkipDigest;
     int nSkipSignature;

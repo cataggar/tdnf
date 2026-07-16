@@ -24,6 +24,7 @@
 #include <fnmatch.h>
 #include <libgen.h>
 #include <ctype.h>
+#include <limits.h>
 #include <sys/file.h>
 #include <time.h>
 #include <sys/utsname.h>
@@ -34,25 +35,17 @@
 
 #include "../solv/includes.h"
 
-//librpm
-#include <rpm/rpmlib.h>
-#include <rpm/rpmdb.h>
-#include <rpm/rpmlog.h>
-#include <rpm/rpmps.h>
-#include <rpm/rpmts.h>
-#include <rpm/rpmkeyring.h>
-#include <rpm/header.h>
-#include <rpm/rpmcli.h>
-#include <rpm/rpmtypes.h>
-
 #include "../history/history.h"
 
 #include <tdnf.h>
 #include <tdnfdownload.h>
+#include <tdnfrpmconfig.h>
 #include <tdnfrepomd.h>
 #include <tdnfplugin.h>
 #include <tdnfplugineventmap.h>
 #include <tdnf-common-defines.h>
+
+#include "../rpmzig/rpmdb.h"
 
 #include "defines.h"
 #include "structs.h"

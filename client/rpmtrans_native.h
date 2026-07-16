@@ -14,10 +14,8 @@
  * standalone rpmzig engines (#109 file install, #110 sqlite rpmdb
  * write, #111 file erase, #112 shell scriptlets, #113 triggers).
  *
- * This is the sole transaction-execution path — the librpm
- * `rpmtsRun` fallback that lived behind
- * `-Drpmzig-transaction-execute=false` was removed as an issue #117
- * follow-up.
+ * This is the sole transaction-execution path; the former rollback
+ * implementation and its build switch have been removed.
  */
 
 #pragma once
@@ -26,14 +24,14 @@
 #include "prototypes.h"
 
 /*
- * Execute the ordered transaction items on `pTS` using the rpmzig
- * native engines. `pTS->pTransactionItems` must already be populated
- * and validated by `TDNFNativeOrderAndCheck` before this is called.
+ * Execute `pPlan` against the retained verified handles and erase metadata in
+ * `pTS`. The plan must come directly from the native verified solver.
  *
  * Returns 0 on success, or a tdnf error code on failure.
  */
 uint32_t
 TDNFRunTransactionNative(
     PTDNFRPMTS pTS,
-    PTDNF pTdnf
+    PTDNF pTdnf,
+    const TDNF_REPOMD_NATIVE_TRANSACTION_PLAN *pPlan
     );

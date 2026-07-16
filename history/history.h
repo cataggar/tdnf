@@ -11,6 +11,7 @@
 #include <time.h>
 
 #include "config.h"
+#include <tdnfrpmconfig.h>
 
 #define HISTORY_TRANS_TYPE_BASE 0
 #define HISTORY_TRANS_TYPE_DELTA 1
@@ -61,6 +62,10 @@ int history_get_current_transaction_id(struct history_ctx *ctx);
  * or "" for "/". The rpmdb is read from <root>/var/lib/rpm/rpmdb.sqlite
  * via the rpmzig API — librpm is no longer involved on the history side. */
 int history_sync(struct history_ctx *ctx, const char *root);
+int history_sync_config(
+    struct history_ctx *ctx,
+    const tdnf_rpm_config *config
+);
 
 char *history_nevra_from_id(struct history_ctx *ctx, int id);
 struct history_nevra_map *history_nevra_map(struct history_ctx *ctx);
@@ -74,6 +79,11 @@ struct history_delta *history_get_delta_range(struct history_ctx *ctx, int trans
 int history_add_transaction(struct history_ctx *ctx, const char *cmdline);
 int history_record_state(struct history_ctx *ctx);
 int history_update_state(struct history_ctx *ctx, const char *root, const char *cmdline);
+int history_update_state_config(
+    struct history_ctx *ctx,
+    const tdnf_rpm_config *config,
+    const char *cmdline
+);
 
 int history_get_transactions(struct history_ctx *ctx,
                              struct history_transaction **ptas,

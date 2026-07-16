@@ -5,6 +5,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <tdnfrpmconfig.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -69,6 +70,78 @@ typedef struct _TDNF_REPOMD_NATIVE_TRANSACTION_ITEM
     const char *pszEVR;
     const char *pszArch;
 } TDNF_REPOMD_NATIVE_TRANSACTION_ITEM, *PTDNF_REPOMD_NATIVE_TRANSACTION_ITEM;
+
+/*
+ * Versioned transaction input. The legacy structure above is ABI-stable and
+ * remains the input to the original transaction APIs.
+ */
+typedef struct _TDNF_REPOMD_NATIVE_TRANSACTION_ITEM_V2
+{
+    uint32_t dwOperation;
+    const char *pszPath;
+    const char *pszName;
+    const char *pszEVR;
+    const char *pszArch;
+    /* Exact Packages-row identity for erase; zero for legacy lookup/others. */
+    uint32_t dwRpmDbHnum;
+} TDNF_REPOMD_NATIVE_TRANSACTION_ITEM_V2,
+ *PTDNF_REPOMD_NATIVE_TRANSACTION_ITEM_V2;
+
+typedef enum _TDNF_REPOMD_NATIVE_PROBLEM_TYPE
+{
+    TDNF_REPOMD_NATIVE_PROBLEM_DEPENDENCY = 1,
+    TDNF_REPOMD_NATIVE_PROBLEM_PRETRANS = 2,
+    TDNF_REPOMD_NATIVE_PROBLEM_CONFLICT = 3,
+    TDNF_REPOMD_NATIVE_PROBLEM_OBSOLETES = 4,
+    TDNF_REPOMD_NATIVE_PROBLEM_FILE_CONFLICT = 5,
+    TDNF_REPOMD_NATIVE_PROBLEM_UNSUPPORTED_MULTIPLE = 6
+} TDNF_REPOMD_NATIVE_PROBLEM_TYPE;
+
+/*
+ * A native transaction problem. Strings alias the containing plan and remain
+ * valid until TDNFRepoMdNativeTransactionPlanFree().
+ *
+ * pszPackage is the package that raised the problem. pszRelatedPackage is
+ * populated for package/file conflicts. pszSubject is the missing dependency,
+ * conflicting path, or package name whose installed multiplicity is
+ * unsupported.
+ */
+typedef struct _TDNF_REPOMD_NATIVE_TRANSACTION_PROBLEM
+{
+    TDNF_REPOMD_NATIVE_PROBLEM_TYPE nType;
+    uint32_t dwInputIndex;
+    const char *pszPackage;
+    const char *pszRelatedPackage;
+    const char *pszSubject;
+    uint32_t dwCount;
+} TDNF_REPOMD_NATIVE_TRANSACTION_PROBLEM;
+
+/*
+ * Per-input execution metadata. Prior hnums are stored in the plan's flat
+ * pdwPriorHnums array at [dwPriorOffset, dwPriorOffset + dwPriorCount).
+ */
+typedef struct _TDNF_REPOMD_NATIVE_TRANSACTION_PLAN_ITEM
+{
+    uint32_t dwPriorOffset;
+    uint32_t dwPriorCount;
+} TDNF_REPOMD_NATIVE_TRANSACTION_PLAN_ITEM;
+
+/*
+ * One owned, validated native transaction plan. pdwOrderIndices is a complete
+ * permutation of the original input indexes. pItems is indexed by original
+ * input index and identifies the exact installed rows superseded by each
+ * upgrade or reinstall.
+ */
+typedef struct _TDNF_REPOMD_NATIVE_TRANSACTION_PLAN
+{
+    uint32_t dwItemCount;
+    uint32_t *pdwOrderIndices;
+    TDNF_REPOMD_NATIVE_TRANSACTION_PLAN_ITEM *pItems;
+    uint32_t dwPriorHnumCount;
+    uint32_t *pdwPriorHnums;
+    uint32_t dwProblemCount;
+    TDNF_REPOMD_NATIVE_TRANSACTION_PROBLEM *pProblems;
+} TDNF_REPOMD_NATIVE_TRANSACTION_PLAN;
 
 #ifndef RPMDB_REPORT_PROGRESS
 #define RPMDB_REPORT_PROGRESS           (1 << 8)
@@ -208,6 +281,13 @@ TDNFRepoMdNativeLoadInstalledSolvRepo(
     int nFlags
     );
 
+uint32_t
+TDNFRepoMdNativeLoadInstalledSolvRepoConfig(
+    Repo *pRepo,
+    const tdnf_rpm_config *pConfig,
+    int nFlags
+    );
+
 /*
  * Add a single `.rpm` file to an existing libsolv Repo using the native
  * Zig rpm-file parser plus manual solvable construction. `nFlags` mirrors
@@ -284,6 +364,47 @@ TDNFRepoMdNativeTransactionSolve(
     uint32_t *pdwOrderCount,
     char ***pppszProblemLines,
     uint32_t *pdwProblemCount
+    );
+
+/*
+ * Versioned counterpart carrying exact rpmdb row identities. Callers that
+ * populate dwRpmDbHnum must use this entry point rather than the legacy API.
+ */
+uint32_t
+TDNFRepoMdNativeTransactionSolveV2(
+    const TDNF_REPOMD_NATIVE_TRANSACTION_ITEM_V2 *pItems,
+    uint32_t dwItemCount,
+    const char *pszInstallRoot,
+    char ***pppszOrderLines,
+    uint32_t *pdwOrderCount,
+    char ***pppszProblemLines,
+    uint32_t *pdwProblemCount
+    );
+
+/*
+ * Structured counterpart to TDNFRepoMdNativeTransactionSolve(). The returned
+ * plan owns all order, prior-row, and typed-problem storage and must be freed
+ * with TDNFRepoMdNativeTransactionPlanFree().
+ */
+uint32_t
+TDNFRepoMdNativeTransactionPlanSolve(
+    const TDNF_REPOMD_NATIVE_TRANSACTION_ITEM *pItems,
+    uint32_t dwItemCount,
+    const char *pszInstallRoot,
+    TDNF_REPOMD_NATIVE_TRANSACTION_PLAN **ppPlan
+    );
+
+uint32_t
+TDNFRepoMdNativeTransactionPlanSolveV2(
+    const TDNF_REPOMD_NATIVE_TRANSACTION_ITEM_V2 *pItems,
+    uint32_t dwItemCount,
+    const char *pszInstallRoot,
+    TDNF_REPOMD_NATIVE_TRANSACTION_PLAN **ppPlan
+    );
+
+void
+TDNFRepoMdNativeTransactionPlanFree(
+    TDNF_REPOMD_NATIVE_TRANSACTION_PLAN *pPlan
     );
 
 /*
@@ -431,6 +552,158 @@ TDNFRepoMdNativeRequiresForPackageRefs(
 uint32_t
 TDNFRepoMdNativeAutoInstalledOrphanLines(
     const char *pszInstallRoot,
+    char **ppszAutoInstalledRefs,
+    char ***pppszLines,
+    uint32_t *pdwCount
+    );
+
+/*
+ * Config-aware counterparts to the native APIs that load installed rpmdb
+ * state. Each takes a non-NULL handle created by tdnf_rpm_config_create()
+ * in place of `pszInstallRoot`; installed state is resolved using that
+ * handle's macro definitions. The root-only APIs above remain compatible
+ * wrappers with their existing semantics.
+ */
+uint32_t
+TDNFRepoMdNativeListConfig(
+    const TDNF_REPOMD_NATIVE_REPO_INPUT *pRepos,
+    uint32_t dwRepoCount,
+    const tdnf_rpm_config *pConfig,
+    int nScope,
+    char **ppszPackageNameSpecs,
+    int nDetail,
+    PTDNF_PKG_INFO *ppPkgInfo,
+    uint32_t *pdwCount
+    );
+
+uint32_t
+TDNFRepoMdNativeSearchConfig(
+    const TDNF_REPOMD_NATIVE_REPO_INPUT *pRepos,
+    uint32_t dwRepoCount,
+    const tdnf_rpm_config *pConfig,
+    char **ppszSearchStrings,
+    int nStartIndex,
+    int nEndIndex,
+    PTDNF_PKG_INFO *ppPkgInfo,
+    uint32_t *punCount
+    );
+
+uint32_t
+TDNFRepoMdNativeProvidesConfig(
+    const TDNF_REPOMD_NATIVE_REPO_INPUT *pRepos,
+    uint32_t dwRepoCount,
+    const tdnf_rpm_config *pConfig,
+    const char *pszSpec,
+    PTDNF_PKG_INFO *ppPkgInfo
+    );
+
+uint32_t
+TDNFRepoMdNativeTransactionSolveConfig(
+    const TDNF_REPOMD_NATIVE_TRANSACTION_ITEM *pItems,
+    uint32_t dwItemCount,
+    const tdnf_rpm_config *pConfig,
+    char ***pppszOrderLines,
+    uint32_t *pdwOrderCount,
+    char ***pppszProblemLines,
+    uint32_t *pdwProblemCount
+    );
+
+uint32_t
+TDNFRepoMdNativeTransactionSolveConfigV2(
+    const TDNF_REPOMD_NATIVE_TRANSACTION_ITEM_V2 *pItems,
+    uint32_t dwItemCount,
+    const tdnf_rpm_config *pConfig,
+    char ***pppszOrderLines,
+    uint32_t *pdwOrderCount,
+    char ***pppszProblemLines,
+    uint32_t *pdwProblemCount
+    );
+
+uint32_t
+TDNFRepoMdNativeTransactionPlanSolveConfig(
+    const TDNF_REPOMD_NATIVE_TRANSACTION_ITEM *pItems,
+    uint32_t dwItemCount,
+    const tdnf_rpm_config *pConfig,
+    TDNF_REPOMD_NATIVE_TRANSACTION_PLAN **ppPlan
+    );
+
+uint32_t
+TDNFRepoMdNativeTransactionPlanSolveConfigV2(
+    const TDNF_REPOMD_NATIVE_TRANSACTION_ITEM_V2 *pItems,
+    uint32_t dwItemCount,
+    const tdnf_rpm_config *pConfig,
+    TDNF_REPOMD_NATIVE_TRANSACTION_PLAN **ppPlan
+    );
+
+uint32_t
+TDNFRepoMdNativeRepoQueryConfig(
+    const TDNF_REPOMD_NATIVE_REPO_INPUT *pRepos,
+    uint32_t dwRepoCount,
+    const tdnf_rpm_config *pConfig,
+    const TDNF_REPOQUERY_ARGS *pRepoqueryArgs,
+    PTDNF_PKG_INFO *ppPkgInfo,
+    uint32_t *pdwCount
+    );
+
+uint32_t
+TDNFRepoMdNativeFindNevraMatchesConfig(
+    const TDNF_REPOMD_NATIVE_REPO_INPUT *pRepos,
+    uint32_t dwRepoCount,
+    const tdnf_rpm_config *pConfig,
+    const char *pszNevra,
+    int nInstalled,
+    char ***pppszMatches,
+    uint32_t *pdwCount
+    );
+
+uint32_t
+TDNFRepoMdNativeUpdateInfoSummaryLinesConfig(
+    const TDNF_REPOMD_NATIVE_REPO_INPUT *pRepos,
+    uint32_t dwRepoCount,
+    const tdnf_rpm_config *pConfig,
+    char **ppszPackageNameSpecs,
+    uint32_t dwSecurity,
+    const char *pszSeverity,
+    char ***pppszLines,
+    uint32_t *pdwCount
+    );
+
+uint32_t
+TDNFRepoMdNativeUpdateInfoLinesConfig(
+    const TDNF_REPOMD_NATIVE_REPO_INPUT *pRepos,
+    uint32_t dwRepoCount,
+    const tdnf_rpm_config *pConfig,
+    char **ppszPackageNameSpecs,
+    uint32_t dwSecurity,
+    const char *pszSeverity,
+    uint32_t dwRebootRequired,
+    char ***pppszLines,
+    uint32_t *pdwCount
+    );
+
+uint32_t
+TDNFRepoMdNativeMinVersionExcludeLinesConfig(
+    const TDNF_REPOMD_NATIVE_REPO_INPUT *pRepos,
+    uint32_t dwRepoCount,
+    const tdnf_rpm_config *pConfig,
+    char **ppszMinVersions,
+    char ***pppszLines,
+    uint32_t *pdwCount
+    );
+
+uint32_t
+TDNFRepoMdNativeRequiresForPackageRefsConfig(
+    const TDNF_REPOMD_NATIVE_REPO_INPUT *pRepos,
+    uint32_t dwRepoCount,
+    const tdnf_rpm_config *pConfig,
+    char **ppszPackageRefs,
+    char ***pppszDeps,
+    uint32_t *pdwCount
+    );
+
+uint32_t
+TDNFRepoMdNativeAutoInstalledOrphanLinesConfig(
+    const tdnf_rpm_config *pConfig,
     char **ppszAutoInstalledRefs,
     char ***pppszLines,
     uint32_t *pdwCount

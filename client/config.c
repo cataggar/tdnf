@@ -23,12 +23,8 @@ TDNFConfGetRpmVerbosity(
     PTDNF pTdnf
     )
 {
-    rpmlogLvl nLogLevel = RPMLOG_INFO;
-    if(pTdnf && pTdnf->pArgs->nRpmVerbosity >= 0)
-    {
-        nLogLevel = pTdnf->pArgs->nRpmVerbosity;
-    }
-    return nLogLevel;
+    (void)pTdnf;
+    return 6;
 }
 
 static uint32_t TDNFParseOSInfo(PTDNF_CONF pConf, const char *os_rel_fn)
@@ -100,38 +96,36 @@ error:
 
 struct {
     const char *name;
-    rpmtransFlags flag;
+    TDNF_RPMTRANS_FLAGS flag;
+    int nCompatibilityNoOp;
 } rpmtransflags_map[] = {
-    {"noscripts",       RPMTRANS_FLAG_NOSCRIPTS },
-    {"justdb",          RPMTRANS_FLAG_JUSTDB },
-    {"notriggers",      RPMTRANS_FLAG_NOTRIGGERS },
-    {"nodocs",          RPMTRANS_FLAG_NODOCS },
-    {"allfiles",        RPMTRANS_FLAG_ALLFILES },
-    {"noplugins",       RPMTRANS_FLAG_NOPLUGINS },
-    {"nocontexts",      RPMTRANS_FLAG_NOCONTEXTS },
-    {"nocaps",          RPMTRANS_FLAG_NOCAPS},
-    {"nodb",            RPMTRANS_FLAG_NODB},
+    {"noscripts",       TDNF_RPMTRANS_FLAG_NOSCRIPTS,       0},
+    {"justdb",          TDNF_RPMTRANS_FLAG_JUSTDB,          0},
+    {"notriggers",      TDNF_RPMTRANS_FLAG_NOTRIGGERS,      0},
+    {"nodocs",          TDNF_RPMTRANS_FLAG_NODOCS,          0},
+    {"allfiles",        TDNF_RPMTRANS_FLAG_ALLFILES,        1},
+    {"noplugins",       TDNF_RPMTRANS_FLAG_NOPLUGINS,       1},
+    {"nocontexts",      TDNF_RPMTRANS_FLAG_NOCONTEXTS,      1},
+    {"nocaps",          TDNF_RPMTRANS_FLAG_NOCAPS,          0},
+    {"nodb",            TDNF_RPMTRANS_FLAG_NODB,            0},
 
-//    {"nopreuntrans",    RPMTRANS_FLAG_NOPREUNTRANS },
-//    {"nopostuntrans",   RPMTRANS_FLAG_NOPOSTUNTRANS },
-    {"notriggerprein",  RPMTRANS_FLAG_NOTRIGGERPREIN },
-    {"nopre",           RPMTRANS_FLAG_NOPRE },
-    {"nopost",          RPMTRANS_FLAG_NOPOST },
-    {"notriggerin",     RPMTRANS_FLAG_NOTRIGGERIN },
-    {"notriggerun",     RPMTRANS_FLAG_NOTRIGGERUN },
-    {"nopreun",         RPMTRANS_FLAG_NOPREUN },
-    {"nopostun",        RPMTRANS_FLAG_NOPOSTUN },
-    {"notriggerpostun", RPMTRANS_FLAG_NOTRIGGERPOSTUN },
-    {"nopretrans",      RPMTRANS_FLAG_NOPRETRANS },
-    {"noposttrans",     RPMTRANS_FLAG_NOPOSTTRANS},
-//    {"nosysusers",      RPMTRANS_FLAG_NOSYSUSERS},
-    {"nomd5",           RPMTRANS_FLAG_NOMD5},
-    {"nofiledigest",    RPMTRANS_FLAG_NOFILEDIGEST},
+    {"notriggerprein",  TDNF_RPMTRANS_FLAG_NOTRIGGERPREIN,  1},
+    {"nopre",           TDNF_RPMTRANS_FLAG_NOPRE,           0},
+    {"nopost",          TDNF_RPMTRANS_FLAG_NOPOST,          0},
+    {"notriggerin",     TDNF_RPMTRANS_FLAG_NOTRIGGERIN,     0},
+    {"notriggerun",     TDNF_RPMTRANS_FLAG_NOTRIGGERUN,     0},
+    {"nopreun",         TDNF_RPMTRANS_FLAG_NOPREUN,         0},
+    {"nopostun",        TDNF_RPMTRANS_FLAG_NOPOSTUN,        0},
+    {"notriggerpostun", TDNF_RPMTRANS_FLAG_NOTRIGGERPOSTUN, 0},
+    {"nopretrans",      TDNF_RPMTRANS_FLAG_NOPRETRANS,      0},
+    {"noposttrans",     TDNF_RPMTRANS_FLAG_NOPOSTTRANS,     0},
+    {"nomd5",           TDNF_RPMTRANS_FLAG_NOMD5,           1},
+    {"nofiledigest",    TDNF_RPMTRANS_FLAG_NOFILEDIGEST,    1},
 
-    {"noartifacts",     RPMTRANS_FLAG_NOARTIFACTS},
-    {"noconfigs",       RPMTRANS_FLAG_NOCONFIGS},
-    {"deploops",        RPMTRANS_FLAG_DEPLOOPS},
-    {NULL,              RPMTRANS_FLAG_NONE}
+    {"noartifacts",     TDNF_RPMTRANS_FLAG_NOARTIFACTS,     1},
+    {"noconfigs",       TDNF_RPMTRANS_FLAG_NOCONFIGS,       0},
+    {"deploops",        TDNF_RPMTRANS_FLAG_DEPLOOPS,        1},
+    {NULL,              TDNF_RPMTRANS_FLAG_NONE,            0}
 };
 
 static
@@ -260,7 +254,7 @@ TDNFConfigFromCnfTree(PTDNF_CONF pConf, struct cnfnode *cn_top)
         else if  (strcmp(cn->name, TDNF_CONF_KEY_TSFLAGS) == 0)
         {
             if (cn->value == NULL || strcmp(cn->value, "") == 0) {
-                pConf->rpmTransFlags = RPMTRANS_FLAG_NONE;
+                pConf->rpmTransFlags = TDNF_RPMTRANS_FLAG_NONE;
             } else {
                 char *value = NULL;
                 char *saveptr = NULL, *str, *token;
@@ -285,9 +279,10 @@ TDNFConfigFromCnfTree(PTDNF_CONF pConf, struct cnfnode *cn_top)
                         dwError = ERROR_TDNF_INVALID_PARAMETER;
                         BAIL_ON_TDNF_ERROR(dwError);
                     }
-                    /* in rpmts.h, deprecated flags will be set to 0. Warn user about it. */
-                    if (rpmtransflags_map[i].flag == 0) {
-                        pr_info("flag tsflag '%s' is not supported and has no effect\n", token);
+                    if (rpmtransflags_map[i].nCompatibilityNoOp) {
+                        pr_info("tsflag '%s' is a recognized compatibility "
+                                "no-op in the native transaction engine\n",
+                                token);
                     }
                 }
                 free(value);
@@ -557,8 +552,8 @@ TDNFConfigExpandVars(
         int i;
 
         for (i = 0; pConf->ppszDistroVerPkgs[i]; i++) {
-            dwError = TDNFGetReleaseVersion(
-                          pTdnf->pArgs->pszInstallRoot,
+            dwError = TdnfGetReleaseVersionConfig(
+                          pTdnf->pRpmConfig,
                           pConf->ppszDistroVerPkgs[i],
                           &pConf->pszVarReleaseVer);
 

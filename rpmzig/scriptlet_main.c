@@ -24,32 +24,31 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <rpm/rpmts.h>
-
+#include <tdnfrpmtrans.h>
 #include "rpmdb.h"
 
-static uint32_t parse_tsflag(const char *text)
+static TDNF_RPMTRANS_FLAGS parse_tsflag(const char *text)
 {
     if (!strcmp(text, "noscripts")) {
-        return RPMTRANS_FLAG_NOSCRIPTS;
+        return TDNF_RPMTRANS_FLAG_NOSCRIPTS;
     }
     if (!strcmp(text, "nopre")) {
-        return RPMTRANS_FLAG_NOPRE;
+        return TDNF_RPMTRANS_FLAG_NOPRE;
     }
     if (!strcmp(text, "nopost")) {
-        return RPMTRANS_FLAG_NOPOST;
+        return TDNF_RPMTRANS_FLAG_NOPOST;
     }
     if (!strcmp(text, "nopreun")) {
-        return RPMTRANS_FLAG_NOPREUN;
+        return TDNF_RPMTRANS_FLAG_NOPREUN;
     }
     if (!strcmp(text, "nopostun")) {
-        return RPMTRANS_FLAG_NOPOSTUN;
+        return TDNF_RPMTRANS_FLAG_NOPOSTUN;
     }
     if (!strcmp(text, "nopretrans")) {
-        return RPMTRANS_FLAG_NOPRETRANS;
+        return TDNF_RPMTRANS_FLAG_NOPRETRANS;
     }
     if (!strcmp(text, "noposttrans")) {
-        return RPMTRANS_FLAG_NOPOSTTRANS;
+        return TDNF_RPMTRANS_FLAG_NOPOSTTRANS;
     }
     return 0;
 }
@@ -94,7 +93,7 @@ int main(int argc, char **argv)
     tdnf_rpm_scriptlet_result result = {0};
     tdnf_rpm_scriptlet_options options = {
         .install_root = NULL,
-        .trans_flags = 0,
+        .trans_flags = TDNF_RPMTRANS_FLAG_NONE,
         .rpmdefines = NULL,
         .rpmdefine_count = 0,
         .arg1 = -1,
@@ -169,7 +168,7 @@ int main(int argc, char **argv)
         } else if (!strcmp(argv[i], "--redirect-stdout-to-stderr")) {
             options.redirect_stdout_to_stderr = 1;
         } else if (!strcmp(argv[i], "--tsflag")) {
-            uint32_t flag = 0;
+            TDNF_RPMTRANS_FLAGS flag = TDNF_RPMTRANS_FLAG_NONE;
             if (i + 1 >= argc) {
                 fprintf(stderr, "missing argument for --tsflag\n");
                 return 2;

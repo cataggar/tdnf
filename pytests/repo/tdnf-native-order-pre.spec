@@ -19,8 +19,12 @@ Exercise Requires(pre) ordering.
 mkdir -p %{buildroot}%{_datadir}/tdnf-native-order
 echo pre > %{buildroot}%{_datadir}/tdnf-native-order/pre
 
-%pre
-test -x %{_bindir}/tdnf-native-order-helper
+%pre -p <lua>
+local helper = io.open("%{_bindir}/tdnf-native-order-helper", "r")
+if helper == nil then
+    error("transaction provider was not installed before dependent script")
+end
+helper:close()
 
 %files
 %{_datadir}/tdnf-native-order/pre

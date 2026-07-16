@@ -28,12 +28,10 @@ def teardown_test(utils):
 
 
 def run_hist_util_cmd(utils, cmd):
-    hist_db_util = 'tdnf-history-util'
-    if utils.config.get('build_dir'):
-        hist_db_util = os.path.join(utils.config['build_dir'], 'bin', hist_db_util)
-    else:
-        # for tests during make check through rpm
-        hist_db_util = f"/usr/libexec/tdnf/{hist_db_util}"
+    hist_db_util = utils.config.get(
+        'history_util_binary',
+        '/usr/libexec/tdnf/tdnf-history-util',
+    )
 
     return utils._run(f"{hist_db_util} {cmd}")
 

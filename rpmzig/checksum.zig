@@ -81,7 +81,7 @@ fn requireActiveCtx(ctx: ?*DigestCtx) ?*DigestCtx {
     return digest;
 }
 
-export fn tdnf_rpmzig_digest_open(kind: c_int) ?*DigestCtx {
+pub export fn tdnf_rpmzig_digest_open(kind: c_int) ?*DigestCtx {
     clearError();
     const state = digestStateForKind(kind) orelse {
         setError("unsupported digest kind: {d}", .{kind});
@@ -96,7 +96,7 @@ export fn tdnf_rpmzig_digest_open(kind: c_int) ?*DigestCtx {
     return ctx;
 }
 
-export fn tdnf_rpmzig_digest_update(
+pub export fn tdnf_rpmzig_digest_update(
     ctx: ?*DigestCtx,
     buf: ?[*]const u8,
     len: usize,
@@ -121,7 +121,7 @@ export fn tdnf_rpmzig_digest_update(
     return 0;
 }
 
-export fn tdnf_rpmzig_digest_final(
+pub export fn tdnf_rpmzig_digest_final(
     ctx: ?*DigestCtx,
     out_digest: ?[*]u8,
     out_len: usize,
@@ -150,7 +150,7 @@ export fn tdnf_rpmzig_digest_final(
     return 0;
 }
 
-export fn tdnf_rpmzig_digest_close(ctx: ?*DigestCtx) void {
+pub export fn tdnf_rpmzig_digest_close(ctx: ?*DigestCtx) void {
     const digest = ctx orelse return;
     std.heap.c_allocator.destroy(digest);
 }

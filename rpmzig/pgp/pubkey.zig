@@ -1,4 +1,4 @@
-//! OpenPGP Public-Key / Public-Subkey packet parser + v4 fingerprint.
+//! OpenPGP Public-Key / Public-Subkey parser with v4/v6 fingerprints.
 //!
 //! Phase A, PR #3 of the pure-Zig PGP verifier plan
 //! (plan-pure-zig-pgp.md, section 5). Operates on the *body* bytes
@@ -37,13 +37,15 @@
 //! the whole walk. Callers that need the unsupported material can
 //! revisit `PublicKey.body` directly.
 //!
-//! Only v4 keys are accepted. v6 (RFC 9580 §5.5.2) lands in PR #9 if
-//! any distro starts shipping v6 signatures.
-//!
 //! v4 fingerprint (RFC 4880 §12.2):
 //!
 //!   fingerprint = SHA-1(0x99 || BE16(body_len) || body)
 //!   v4 key id   = last 8 octets of fingerprint
+//!
+//! v6 fingerprint (RFC 9580 §5.5.4):
+//!
+//!   fingerprint = SHA-256(0x9b || BE32(body_len) || body)
+//!   v6 key id   = first 8 octets of fingerprint
 
 const std = @import("std");
 const packet = @import("packet.zig");
@@ -125,66 +127,132 @@ pub const PublicKey = struct {
 };
 
 pub const Fingerprint = struct {
-    bytes: [20]u8,
+    bytes: [32]u8,
+    len: u8,
+    version: u8,
 
-    /// v4 key id = last 8 octets of the 20-octet fingerprint.
-    /// (Note: v6 key id, when added, will be the FIRST 8 octets of a
-    /// 32-octet fingerprint — opposite ends.)
+    pub fn slice(self: *const Fingerprint) []const u8 {
+        return self.bytes[0..self.len];
+    }
+
+    /// v4 key IDs use the last 8 octets; v6 uses the first 8.
     pub fn keyId(self: Fingerprint) [8]u8 {
-        return self.bytes[12..20].*;
+        return switch (self.version) {
+            4 => self.bytes[self.len - 8 .. self.len][0..8].*,
+            6 => self.bytes[0..8].*,
+            else => unreachable,
+        };
     }
 };
 
 pub const ParseError = error{
     UnsupportedVersion,
+    NonCanonicalMpi,
+    InvalidKeyMaterial,
+    TrailingKeyMaterial,
 } || packet.ReaderError || packet.MpiError;
 
-/// Parse a v4 Public-Key / Public-Subkey packet body.
+/// Parse a v4 or v6 Public-Key / Public-Subkey packet body.
 ///
 /// `body` must be the byte range returned by `packet.iterate` for a
 /// Tag 6 or Tag 14 packet (i.e. without the header octets).
 pub fn parseBody(body: []const u8) ParseError!PublicKey {
+    return parseBodyWithMode(body, .lenient);
+}
+
+/// Parse a public-key packet for persistent trust-store import.
+///
+/// The verifier deliberately preserves some historical leniency for
+/// unsupported keys. Importing a certificate is a trust boundary, so known
+/// algorithm material must be complete and consume the whole packet body.
+pub fn parseBodyStrict(body: []const u8) ParseError!PublicKey {
+    return parseBodyWithMode(body, .strict_import);
+}
+
+const ParseMode = enum {
+    lenient,
+    strict_import,
+};
+
+fn parseBodyWithMode(
+    body: []const u8,
+    mode: ParseMode,
+) ParseError!PublicKey {
     var r = packet.Reader{ .bytes = body };
 
     const version = try r.readU8();
-    if (version != 4) return error.UnsupportedVersion;
+    if (version != 4 and version != 6) return error.UnsupportedVersion;
     const created_at = try r.readU32Be();
     const algo: Algorithm = @enumFromInt(try r.readU8());
 
+    var material_reader = if (version == 6) blk: {
+        const material_len = try r.readU32Be();
+        const material = try r.take(@intCast(material_len));
+        if (r.rest().len != 0) return error.UnsupportedVersion;
+        break :blk packet.Reader{ .bytes = material };
+    } else r;
+
     const material: KeyMaterial = switch (algo) {
         .rsa_sign_and_encrypt, .rsa_encrypt_only, .rsa_sign_only => blk: {
-            const n = try packet.readMpi(&r);
-            const e = try packet.readMpi(&r);
+            const n = try packet.readMpi(&material_reader);
+            const e = try packet.readMpi(&material_reader);
+            if (version == 6 and
+                (!packet.isCanonicalMpi(n) or !packet.isCanonicalMpi(e)))
+            {
+                return error.NonCanonicalMpi;
+            }
             break :blk .{ .rsa = .{ .n = n, .e = e } };
         },
         .eddsa_legacy => blk: {
-            if (parseEddsaLegacy(&r)) |k| {
+            if (version == 6) break :blk .{ .unsupported = algo };
+            const maybe_key = parseEddsaLegacy(&material_reader) catch |err| {
+                if (mode == .strict_import) return err;
+                break :blk .{ .unsupported = algo };
+            };
+            if (maybe_key) |k| {
                 break :blk .{ .ed25519 = k };
-            } else |_| {
-                // Malformed OID / unexpected length / non-ed25519 OID.
-                // Leave the reader where it was on entry — we don't
-                // know the framing once the OID disagreed — but we
-                // still surface the packet as `unsupported` rather
-                // than failing the whole keyring walk. The caller
-                // can revisit `PublicKey.body` for raw access.
+            } else {
                 break :blk .{ .unsupported = algo };
             }
         },
         .ed25519 => blk: {
-            const raw = try r.take(32);
+            const raw = try material_reader.take(32);
             var k: Ed25519Key = .{ .point = undefined };
             @memcpy(&k.point, raw);
             break :blk .{ .ed25519 = k };
         },
         .ecdsa => blk: {
-            const k = try parseEcdsaMaterial(&r);
-            break :blk if (k) |kk| .{ .ecdsa = kk } else .{ .unsupported = algo };
+            const k = try parseEcdsaMaterial(
+                &material_reader,
+                version == 6,
+            );
+            break :blk switch (k) {
+                .key => |key| .{ .ecdsa = key },
+                .unsupported => .{ .unsupported = algo },
+                .invalid => if (mode == .strict_import)
+                    return error.InvalidKeyMaterial
+                else
+                    .{ .unsupported = algo },
+            };
         },
         else => blk: {
-            try skipAlgorithmMaterial(&r, algo);
+            try skipAlgorithmMaterial(&material_reader, algo);
             break :blk .{ .unsupported = algo };
         },
     };
+
+    if (mode == .strict_import and
+        isKnownAlgorithm(algo) and
+        material_reader.rest().len != 0)
+    {
+        return error.TrailingKeyMaterial;
+    }
+    if (version == 6 and material_reader.rest().len != 0) {
+        switch (material) {
+            .unsupported => {},
+            else => return error.UnsupportedVersion,
+        }
+    }
 
     return .{
         .version = version,
@@ -192,6 +260,20 @@ pub fn parseBody(body: []const u8) ParseError!PublicKey {
         .algo = algo,
         .material = material,
         .body = body,
+    };
+}
+
+fn isKnownAlgorithm(algo: Algorithm) bool {
+    return switch (algo) {
+        .rsa_sign_and_encrypt,
+        .rsa_encrypt_only,
+        .rsa_sign_only,
+        .dsa,
+        .ecdsa,
+        .eddsa_legacy,
+        .ed25519,
+        => true,
+        else => false,
     };
 }
 
@@ -220,12 +302,6 @@ fn skipAlgorithmMaterial(r: *packet.Reader, algo: Algorithm) ParseError!void {
     }
 }
 
-const EddsaLegacyError = error{
-    UnsupportedOid,
-    UnsupportedPointPrefix,
-    UnsupportedPointLength,
-} || packet.ReaderError || packet.MpiError;
-
 /// Parse the EdDSALegacy (algo 22) public-key material:
 ///   1 octet  OID length (= 9)
 ///   9 octets OID = ED25519_OID
@@ -237,20 +313,20 @@ const EddsaLegacyError = error{
 /// bytes; for a 263-bit MPI the top byte is 0x40 (high bit clear,
 /// but second-highest set) so no leading zero is ever produced.
 /// We defensively left-pad in case some non-standard producer emits
-/// a shorter MPI.
-fn parseEddsaLegacy(r: *packet.Reader) EddsaLegacyError!Ed25519Key {
+/// a shorter MPI. An unknown OID is well-framed but unsupported; malformed
+/// Ed25519 material is distinct so strict import can reject it.
+fn parseEddsaLegacy(r: *packet.Reader) ParseError!?Ed25519Key {
     const oid_len = try r.readU8();
-    if (oid_len != ED25519_OID.len) return error.UnsupportedOid;
     const oid = try r.take(oid_len);
-    if (!std.mem.eql(u8, oid, &ED25519_OID)) return error.UnsupportedOid;
-
     const q = try packet.readMpi(r);
-    if (q.bytes.len == 0) return error.UnsupportedPointLength;
-    if (q.bytes[0] != 0x40) return error.UnsupportedPointPrefix;
+    if (oid.len != ED25519_OID.len or !std.mem.eql(u8, oid, &ED25519_OID))
+        return null;
+    if (q.bytes.len == 0 or q.bytes[0] != 0x40)
+        return error.InvalidKeyMaterial;
 
     // After the 0x40 prefix come the 32 raw octets of the public key.
     const tail = q.bytes[1..];
-    if (tail.len > 32) return error.UnsupportedPointLength;
+    if (tail.len > 32) return error.InvalidKeyMaterial;
     var key: Ed25519Key = .{ .point = @splat(0) };
     // Left-pad with zeros if the MPI stripped any leading zeros from
     // the y-coordinate. Producers shouldn't do this (the 0x40 prefix
@@ -273,7 +349,16 @@ fn parseEddsaLegacy(r: *packet.Reader) EddsaLegacyError!Ed25519Key {
 /// `packet.readMpi`'s leading-zero strip is a no-op and the MPI
 /// payload comes back at the full curve length — see the inline
 /// assertion below.
-fn parseEcdsaMaterial(r: *packet.Reader) ParseError!?EcdsaKey {
+const EcdsaMaterial = union(enum) {
+    key: EcdsaKey,
+    unsupported,
+    invalid,
+};
+
+fn parseEcdsaMaterial(
+    r: *packet.Reader,
+    strict_mpi: bool,
+) ParseError!EcdsaMaterial {
     const oid_len = try r.readU8();
     const oid = try r.take(oid_len);
 
@@ -284,11 +369,15 @@ fn parseEcdsaMaterial(r: *packet.Reader) ParseError!?EcdsaKey {
     else {
         // Unknown curve OID — drain the MPI so the reader is left
         // in a known state, then surface as unsupported.
-        _ = try packet.readMpi(r);
-        return null;
+        const q = try packet.readMpi(r);
+        if (strict_mpi and !packet.isCanonicalMpi(q))
+            return error.NonCanonicalMpi;
+        return .unsupported;
     };
 
     const q = try packet.readMpi(r);
+    if (strict_mpi and !packet.isCanonicalMpi(q))
+        return error.NonCanonicalMpi;
     const expected_len: usize = switch (curve) {
         .p256 => 65,
         .p384 => 97,
@@ -297,10 +386,10 @@ fn parseEcdsaMaterial(r: *packet.Reader) ParseError!?EcdsaKey {
     // length and start with 0x04. (Compressed-point encoding 0x02 /
     // 0x03 is permitted by RFC 6637 but RPM signers never emit it,
     // and `std.crypto.sign.ecdsa` accepts uncompressed only.)
-    if (q.bytes.len != expected_len) return null;
-    if (q.bytes[0] != 0x04) return null;
+    if (q.bytes.len != expected_len) return .invalid;
+    if (q.bytes[0] != 0x04) return .invalid;
 
-    return EcdsaKey{ .curve = curve, .point = q.bytes };
+    return .{ .key = .{ .curve = curve, .point = q.bytes } };
 }
 
 /// Compute the v4 OpenPGP fingerprint over the given Public-Key
@@ -315,9 +404,41 @@ pub fn fingerprintV4(body: []const u8) Fingerprint {
     };
     hasher.update(&len_be);
     hasher.update(body);
-    var out: [20]u8 = undefined;
-    hasher.final(&out);
-    return .{ .bytes = out };
+    var out: Fingerprint = .{
+        .bytes = @splat(0),
+        .len = 20,
+        .version = 4,
+    };
+    hasher.final(out.bytes[0..20]);
+    return out;
+}
+
+pub fn fingerprintV6(body: []const u8) Fingerprint {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(&.{0x9b});
+    const len_be: [4]u8 = .{
+        @intCast((body.len >> 24) & 0xFF),
+        @intCast((body.len >> 16) & 0xFF),
+        @intCast((body.len >> 8) & 0xFF),
+        @intCast(body.len & 0xFF),
+    };
+    hasher.update(&len_be);
+    hasher.update(body);
+    var out: Fingerprint = .{
+        .bytes = @splat(0),
+        .len = 32,
+        .version = 6,
+    };
+    hasher.final(&out.bytes);
+    return out;
+}
+
+pub fn fingerprint(key: PublicKey) Fingerprint {
+    return switch (key.version) {
+        4 => fingerprintV4(key.body),
+        6 => fingerprintV6(key.body),
+        else => unreachable,
+    };
 }
 
 // ===== Tests =====
@@ -356,6 +477,73 @@ test "parse hand-crafted RSA pubkey body" {
     }
 }
 
+test "parse and fingerprint a v6 Ed25519 primary key" {
+    var body: [42]u8 = @splat(0);
+    body[0] = 6;
+    body[5] = 27;
+    body[9] = 32;
+    for (body[10..], 0..) |*byte, index| byte.* = @intCast(index + 1);
+
+    const key = try parseBody(&body);
+    try testing.expectEqual(@as(u8, 6), key.version);
+    try testing.expectEqual(Algorithm.ed25519, key.algo);
+    switch (key.material) {
+        .ed25519 => |ed| try testing.expectEqualSlices(u8, body[10..], &ed.point),
+        else => return error.TestExpectedEd25519Material,
+    }
+
+    const fpr = fingerprint(key);
+    try testing.expectEqual(@as(u8, 6), fpr.version);
+    try testing.expectEqual(@as(usize, 32), fpr.slice().len);
+    try testing.expectEqualSlices(u8, fpr.slice()[0..8], &fpr.keyId());
+
+    var trailing: [43]u8 = undefined;
+    @memcpy(trailing[0..42], &body);
+    trailing[42] = 0;
+    try testing.expectError(error.UnsupportedVersion, parseBody(&trailing));
+}
+
+test "v6 RSA key MPIs require canonical bit lengths" {
+    var body = [_]u8{
+        6,
+        0,
+        0,
+        0,
+        0,
+        @intFromEnum(Algorithm.rsa_sign_and_encrypt),
+        0,
+        0,
+        0,
+        6,
+        0,
+        8,
+        0x80,
+        0,
+        2,
+        0x03,
+    };
+    _ = try parseBody(&body);
+
+    body[11] = 7;
+    try std.testing.expectError(error.NonCanonicalMpi, parseBody(&body));
+
+    const v4_body = [_]u8{
+        4,
+        0,
+        0,
+        0,
+        0,
+        @intFromEnum(Algorithm.rsa_sign_and_encrypt),
+        0,
+        7,
+        0x80,
+        0,
+        2,
+        0x03,
+    };
+    _ = try parseBody(&v4_body);
+}
+
 test "parse real Microsoft Mariner key (Tag 6 in dearmored blob)" {
     const bytes = @embedFile("testdata/microsoft-rpm-key.bin");
     var it = packet.iterate(bytes);
@@ -381,7 +569,7 @@ test "parse real Microsoft Mariner key (Tag 6 in dearmored blob)" {
             0x37, 0xAD, 0x0C, 0xD9, 0xFE, 0xD3, 0x31, 0x35, 0xCE, 0x90,
         };
         const fpr = fingerprintV4(pkt.body);
-        try testing.expectEqualSlices(u8, &expected_fpr, &fpr.bytes);
+        try testing.expectEqualSlices(u8, &expected_fpr, fpr.slice());
         try testing.expectEqualSlices(
             u8,
             &[_]u8{ 0x0C, 0xD9, 0xFE, 0xD3, 0x31, 0x35, 0xCE, 0x90 },
@@ -403,14 +591,20 @@ test "fingerprintV4 of hand-crafted body matches reference SHA-1" {
         0xE7, 0x21, 0x7E, 0x8B, 0x0C, 0xD7, 0x6A, 0x2B, 0x95, 0x1B,
         0x5F, 0xF5, 0x4B, 0x00, 0x4F, 0xD5, 0x8D, 0xA1, 0x4A, 0x7B,
     };
-    try testing.expectEqualSlices(u8, &expected, &fpr.bytes);
+    try testing.expectEqualSlices(u8, &expected, fpr.slice());
 }
 
-test "keyId returns last 8 fingerprint bytes" {
-    const fpr = Fingerprint{ .bytes = .{
-        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
-        0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13,
-    } };
+test "v4 keyId returns last 8 fingerprint bytes" {
+    const fpr = Fingerprint{
+        .bytes = .{
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+            0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+            0x10, 0x11, 0x12, 0x13, 0,    0,    0,    0,
+            0,    0,    0,    0,    0,    0,    0,    0,
+        },
+        .len = 20,
+        .version = 4,
+    };
     try testing.expectEqualSlices(
         u8,
         &[_]u8{ 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13 },
@@ -433,6 +627,46 @@ test "truncated RSA modulus rejected" {
     // Version + creation + algo + start of MPI, then payload truncated.
     const body = [_]u8{ 0x04, 0x00, 0x00, 0x00, 0x00, 0x01, 0x08, 0x00, 0x80 };
     try testing.expectError(error.TruncatedMpi, parseBody(&body));
+}
+
+test "strict import parser rejects trailing and truncated v4 material" {
+    var complete: [1 + 4 + 1 + 32]u8 = undefined;
+    complete[0] = 4;
+    @memset(complete[1..5], 0);
+    complete[5] = @intFromEnum(Algorithm.ed25519);
+    @memset(complete[6..], 0xA5);
+
+    var trailing: [complete.len + 1]u8 = undefined;
+    @memcpy(trailing[0..complete.len], &complete);
+    trailing[complete.len] = 0;
+    _ = try parseBody(&trailing);
+    try testing.expectError(
+        error.TrailingKeyMaterial,
+        parseBodyStrict(&trailing),
+    );
+
+    try testing.expectError(
+        error.Truncated,
+        parseBodyStrict(complete[0 .. complete.len - 1]),
+    );
+}
+
+test "strict import parser does not hide truncated legacy EdDSA" {
+    var body: [1 + 4 + 1 + 1 + ED25519_OID.len + 1]u8 = undefined;
+    body[0] = 4;
+    @memset(body[1..5], 0);
+    body[5] = @intFromEnum(Algorithm.eddsa_legacy);
+    body[6] = ED25519_OID.len;
+    @memcpy(body[7 .. 7 + ED25519_OID.len], &ED25519_OID);
+    body[body.len - 1] = 0x01; // Truncated MPI bit-count.
+
+    // Verifier parsing remains intentionally lenient for unsupported keys.
+    const parsed = try parseBody(&body);
+    switch (parsed.material) {
+        .unsupported => {},
+        else => return error.TestExpectedUnsupportedMaterial,
+    }
+    try testing.expectError(error.TruncatedMpi, parseBodyStrict(&body));
 }
 
 test "parse ECDSA P-256 public-key body" {

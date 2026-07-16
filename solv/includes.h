@@ -32,6 +32,8 @@
 #include <tdnfrepomd.h>
 #include <tdnf-common-defines.h>
 
+#include "../rpmzig/rpmdb.h"
+
 #include "defines.h"
 #include "tdnferror.h"
 #include "../common/defines.h"

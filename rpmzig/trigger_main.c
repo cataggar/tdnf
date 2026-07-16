@@ -24,26 +24,25 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <rpm/rpmts.h>
-
+#include <tdnfrpmtrans.h>
 #include "rpmdb.h"
 
-static uint32_t parse_tsflag(const char *text)
+static TDNF_RPMTRANS_FLAGS parse_tsflag(const char *text)
 {
     if (!strcmp(text, "noscripts")) {
-        return RPMTRANS_FLAG_NOSCRIPTS;
+        return TDNF_RPMTRANS_FLAG_NOSCRIPTS;
     }
     if (!strcmp(text, "notriggers")) {
-        return RPMTRANS_FLAG_NOTRIGGERS;
+        return TDNF_RPMTRANS_FLAG_NOTRIGGERS;
     }
     if (!strcmp(text, "notriggerin")) {
-        return RPMTRANS_FLAG_NOTRIGGERIN;
+        return TDNF_RPMTRANS_FLAG_NOTRIGGERIN;
     }
     if (!strcmp(text, "notriggerun")) {
-        return RPMTRANS_FLAG_NOTRIGGERUN;
+        return TDNF_RPMTRANS_FLAG_NOTRIGGERUN;
     }
     if (!strcmp(text, "notriggerpostun")) {
-        return RPMTRANS_FLAG_NOTRIGGERPOSTUN;
+        return TDNF_RPMTRANS_FLAG_NOTRIGGERPOSTUN;
     }
     return 0;
 }
@@ -79,7 +78,7 @@ int main(int argc, char **argv)
     tdnf_rpm_trigger_options options = {
         .db_root = NULL,
         .install_root = NULL,
-        .trans_flags = 0,
+        .trans_flags = TDNF_RPMTRANS_FLAG_NONE,
         .rpmdefines = NULL,
         .rpmdefine_count = 0,
         .script_fd = -1,
@@ -153,7 +152,7 @@ int main(int argc, char **argv)
             options.arg2_override_present = 1;
             options.arg2_override_value = (int)value;
         } else if (!strcmp(argv[i], "--tsflag")) {
-            uint32_t flag = 0;
+            TDNF_RPMTRANS_FLAGS flag = TDNF_RPMTRANS_FLAG_NONE;
             if (i + 1 >= argc) {
                 fprintf(stderr, "missing argument for --tsflag\n");
                 return 2;

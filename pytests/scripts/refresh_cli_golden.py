@@ -20,7 +20,9 @@ if PYTESTS_DIR not in sys.path:
 from cli_testlib import MinimalCliRuntime  # noqa: E402
 
 CMD_RE = re.compile(
-    r'^\s*\{"([^"]+)",\s*TDNFCli[^,]+,\s*(?:true|false)\},\s*$',
+    r'^\s*\.{\s*\.pszCmdName\s*=\s*"([^"]+)",'
+    r"\s*\.pFnCmd\s*=\s*c\.TDNFCli[^,]+,"
+    r"\s*\.ReqRoot\s*=\s*(?:true|false)\s*},\s*$",
     re.MULTILINE,
 )
 BINDIR_ENV = 'TDNF_CLI_GOLDEN_BINDIR'
@@ -46,7 +48,7 @@ def parse_args():
             os.path.dirname(PYTESTS_DIR),
             'tools',
             'cli',
-            'main.c',
+            'main.zig',
         ),
         help='Path to tools/cli/main.c.',
     )

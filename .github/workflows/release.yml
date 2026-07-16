@@ -30,12 +30,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            librpm-dev \
-            libsolv-dev \
-            libexpat1-dev \
-            libsqlite3-dev \
             libgpgme-dev \
-            libpopt-dev \
             liblua5.4-dev \
             pkg-config
 

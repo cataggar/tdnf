@@ -1,36 +1,37 @@
-/*
- * Internal header for the pure-Zig rpmzig sig-verify entry point.
- * Both gpgcheck.c (caller) and gpgcheck_zig.c (definition) include
- * this.
- */
+/* Internal header for the parsed-file rpmzig integrity bridge. */
 #ifndef _TDNF_CLIENT_GPGCHECK_ZIG_H_
 #define _TDNF_CLIENT_GPGCHECK_ZIG_H_
+
+#include <stddef.h>
+
+#include "../rpmzig/rpmdb.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/*
- * Verify the GPG signature on `pkg_path` using rpmzig's pure-Zig
- * OpenPGP verifier, with a keyring built from:
- *   - every gpg-pubkey-* entry in the rpmdb under `install_root`
- *     (NULL/"" → "/"), and
- *   - the armored ASCII key in `key_path` (the fresh repo key
- *     tdnf just fetched).
- *
- * On success writes a TDNF_RPMZIG_STATUS_* status into *out_status
- * (0 = OK, 1 = NO_SIG, 2 = NO_KEY, 3 = BAD, 4 = INTERNAL_ERROR).
- * Returns 0 if *out_status == OK, non-zero otherwise (the value
- * itself is implementation-defined; callers should branch on
- * *out_status).
- *
- * Returns -1 on an unexpected I/O error before verification could
- * be attempted; in that case *out_status is left unchanged.
- */
 int TDNFRpmzigVerify(
-    const char *pkg_path,
-    const char *key_path,
-    const char *install_root,
+    const char *pszPkgPath,
+    const char *pszKeyPath,
+    const char *pszInstallRoot,
+    int *pnStatus
+);
+
+/*
+ * Verify all package-signature candidates on an already parsed native RPM
+ * file.  The configured rpmdb trust set and every user-approved fresh key
+ * are collected before the one final verifier invocation.
+ *
+ * On a successful ABI call returns 0 and writes a
+ * TDNF_RPMZIG_INTEGRITY_* value to *out_status.  Returns -1 for rpmdb or
+ * allocation failures before an integrity outcome is available.
+ */
+int TDNFRpmzigVerifyFile(
+    tdnf_rpm_file *pRpmFile,
+    const tdnf_rpm_config *pRpmConfig,
+    const void *const *ppFreshKeys,
+    const size_t *pnFreshKeyLengths,
+    size_t nFreshKeyCount,
     int *out_status
 );
 

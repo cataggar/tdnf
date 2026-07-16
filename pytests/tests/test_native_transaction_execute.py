@@ -9,13 +9,13 @@
 Targeted crosscheck for the composed rpmzig transaction executor.
 
 tdnf install/erase/upgrade always dispatch through the composed native
-executor in client/rpmtrans_native.c (there is no librpm rpmtsRun
-fallback anymore — the `-Drpmzig-transaction-execute` build flag was
-removed after issue #117), so these tests always run.
+executor in client/rpmtrans_native.c. The former rollback build flag was
+removed after issue #117, so these tests always run.
 """
 
 import json
 import os
+import platform
 import shutil
 import subprocess
 
@@ -32,12 +32,17 @@ TDNF_BIN = os.path.join(REPO_ROOT, 'out', 'bin', 'tdnf')
 TDNF_CONF = os.path.join(REPO_ROOT, 'out', 'repo', 'tdnf.conf')
 LD_LIBRARY_PATH = os.path.join(REPO_ROOT, 'out', 'lib')
 CASE_ROOT = os.path.join(REPO_ROOT, 'out', 'native-transaction-execute')
+RPMDB_WRITE = os.path.join(
+    REPO_ROOT, 'out', 'libexec', 'tdnf', 'tdnf-rpmdb-write')
 
 PKG_ONE = 'tdnf-test-one'
 PKG_TWO = 'tdnf-test-two'
 PKG_MULTI = 'tdnf-test-multiversion'
 PKG_ORPHANS = 'tdnf-test-upgrade-orphans'
 ORPHANS_ROOT_DIR = '/opt/tdnf-test-upgrade-orphans'
+ORDER_HELPER = 'tdnf-native-order-helper'
+ORDER_PRE = 'tdnf-native-order-pre'
+ORDER_PREUN = 'tdnf-native-order-preun'
 
 
 @pytest.fixture(scope='module', autouse=True)
@@ -123,6 +128,28 @@ def _rpm_qa(root):
     return sorted(line.strip() for line in result.stdout.splitlines() if line.strip())
 
 
+def _native_rpmdb_install(root, rpm_path):
+    result = subprocess.run(
+        [RPMDB_WRITE, 'install', root, rpm_path],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    return int(result.stdout.strip())
+
+
+def _repo_rpm(name, evr):
+    matches = []
+    rpm_root = os.path.join(REPO_ROOT, 'out', 'repo', 'build', 'RPMS')
+    for arch in os.listdir(rpm_root):
+        candidate = os.path.join(
+            rpm_root, arch, '{}-{}.{}.rpm'.format(name, evr, arch))
+        if os.path.isfile(candidate):
+            matches.append(candidate)
+    assert len(matches) == 1, matches
+    return matches[0]
+
+
 def _run_tdnf(root, extra_args, check=True):
     env = os.environ.copy()
     env['LD_LIBRARY_PATH'] = LD_LIBRARY_PATH
@@ -186,6 +213,29 @@ def test_native_transaction_execute_multi_install(utils):
     assert any(line.startswith(PKG_TWO + '-') for line in installed), installed
 
 
+def test_native_execution_orders_provider_before_dependent_script(utils):
+    root = _fresh_root('install-order')
+    _rpm_initdb(root)
+
+    _run_tdnf(root, ['install', ORDER_PRE, ORDER_HELPER])
+
+    installed = _rpm_qa(root)
+    assert any(line.startswith(ORDER_HELPER + '-') for line in installed)
+    assert any(line.startswith(ORDER_PRE + '-') for line in installed)
+
+
+def test_native_execution_orders_erase_script_prerequisite(utils):
+    root = _fresh_root('erase-order')
+    _rpm_initdb(root)
+    _run_tdnf(root, ['install', ORDER_HELPER, ORDER_PREUN])
+
+    _run_tdnf(root, ['erase', ORDER_HELPER, ORDER_PREUN])
+
+    installed = _rpm_qa(root)
+    assert not any(line.startswith(ORDER_HELPER + '-') for line in installed)
+    assert not any(line.startswith(ORDER_PREUN + '-') for line in installed)
+
+
 def test_native_transaction_execute_upgrade(utils):
     root = _fresh_root('upgrade')
     _rpm_initdb(root)
@@ -197,6 +247,128 @@ def test_native_transaction_execute_upgrade(utils):
         line for line in _rpm_qa(root) if line.startswith(PKG_MULTI + '-')
     ]
     assert len(installed) == 1, installed
+
+
+def test_native_transaction_execute_reinstall(utils):
+    root = _fresh_root('reinstall')
+    _rpm_initdb(root)
+
+    _run_tdnf(root, ['install', PKG_ONE])
+    _run_tdnf(root, ['reinstall', PKG_ONE])
+
+    installed = [
+        line for line in _rpm_qa(root) if line.startswith(PKG_ONE + '-')
+    ]
+    assert len(installed) == 1, installed
+
+
+def test_native_reinstall_collapses_duplicate_nevra_rows(utils):
+    root = _fresh_root('reinstall-duplicate-nevra')
+    _rpm_initdb(root)
+    rpm_path = _repo_rpm(PKG_ONE, '1.0.1-2')
+    first = _native_rpmdb_install(root, rpm_path)
+    second = _native_rpmdb_install(root, rpm_path)
+    assert first < second
+
+    _run_tdnf(root, ['reinstall', PKG_ONE])
+
+    installed = [
+        line for line in _rpm_qa(root) if line.startswith(PKG_ONE + '-')
+    ]
+    assert len(installed) == 1, installed
+    expected_file = os.path.join(
+        root, 'lib', 'systemd', 'system', 'tdnf-test-one.service'
+    )
+    assert os.path.exists(expected_file)
+
+
+def test_native_erase_exact_name_evr_with_multiple_versions(utils):
+    root = _fresh_root('erase-exact-evr')
+    _rpm_initdb(root)
+    lower = '1.0.1-1'
+    higher = '1.0.2-1'
+    _native_rpmdb_install(root, _repo_rpm(PKG_MULTI, lower))
+    _native_rpmdb_install(root, _repo_rpm(PKG_MULTI, higher))
+
+    _run_tdnf(root, ['erase', '{}={}'.format(PKG_MULTI, lower)])
+
+    installed = _rpm_qa(root)
+    assert not any(
+        line.startswith('{}-{}'.format(PKG_MULTI, lower))
+        for line in installed
+    )
+    assert any(
+        line.startswith('{}-{}'.format(PKG_MULTI, higher))
+        for line in installed
+    )
+
+
+def test_native_erase_removes_all_identical_name_evr_rows(utils):
+    root = _fresh_root('erase-identical-rows')
+    _rpm_initdb(root)
+    evr = '1.0.1-1'
+    rpm_path = _repo_rpm(PKG_MULTI, evr)
+    first = _native_rpmdb_install(root, rpm_path)
+    second = _native_rpmdb_install(root, rpm_path)
+    assert first < second
+
+    _run_tdnf(root, ['erase', '{}={}'.format(PKG_MULTI, evr)])
+
+    assert not any(
+        line.startswith('{}-{}'.format(PKG_MULTI, evr))
+        for line in _rpm_qa(root)
+    )
+
+
+def test_native_erase_handles_multiple_arch_rows(utils):
+    root = _fresh_root('erase-multiarch')
+    _rpm_initdb(root)
+    build_root = os.path.join(CASE_ROOT, 'multiarch-rpmbuild')
+    if os.path.isdir(build_root):
+        shutil.rmtree(build_root)
+    for directory in ['BUILD', 'BUILDROOT', 'RPMS', 'SRPMS',
+                      'SOURCES', 'SPECS']:
+        os.makedirs(os.path.join(build_root, directory))
+    name = 'tdnf-phase6-multiarch'
+    spec_path = os.path.join(build_root, 'SPECS', name + '.spec')
+    with open(spec_path, 'w', encoding='utf-8') as spec:
+        spec.write(
+            'Name: {0}\n'
+            'Version: 1\n'
+            'Release: 1\n'
+            'Summary: native erase multiarch test\n'
+            'License: MIT\n'
+            '\n'
+            '%description\n'
+            'native erase multiarch test\n'
+            '\n'
+            '%files\n'.format(name)
+        )
+    for arch in [platform.machine(), 'noarch']:
+        subprocess.run([
+            'rpmbuild',
+            '-D', '_topdir {}'.format(build_root),
+            '--target', arch,
+            '-bb', spec_path,
+        ], check=True, stdout=subprocess.DEVNULL)
+        _native_rpmdb_install(
+            root,
+            os.path.join(
+                build_root, 'RPMS', arch,
+                '{}-1-1.{}.rpm'.format(name, arch),
+            ),
+        )
+
+    _run_tdnf(root, ['erase', name + '.noarch'])
+
+    installed = [
+        line for line in _rpm_qa(root) if line.startswith(name + '-')
+    ]
+    assert not any(line.endswith('.noarch') for line in installed)
+    assert any(line.endswith('.' + platform.machine()) for line in installed)
+
+    _run_tdnf(root, ['erase', name])
+    assert not any(line.startswith(name + '-') for line in _rpm_qa(root))
 
 
 def _paths_under(root, rel_paths):

@@ -3,14 +3,19 @@ const std = @import("std");
 const api = @import("api.zig");
 
 const tdnf_rpmdb_iter = opaque {};
+const tdnf_rpm_config = opaque {};
 
 extern fn tdnf_rpmdb_cookie(root: ?[*:0]const u8) ?[*:0]u8;
+extern fn tdnf_rpmdb_cookie_config(config: *const tdnf_rpm_config) ?[*:0]u8;
 extern fn tdnf_rpmdb_iter_open(root: ?[*:0]const u8) ?*tdnf_rpmdb_iter;
+extern fn tdnf_rpmdb_iter_open_config(config: *const tdnf_rpm_config) ?*tdnf_rpmdb_iter;
 extern fn tdnf_rpmdb_iter_close(it: ?*tdnf_rpmdb_iter) void;
 extern fn tdnf_rpmdb_iter_next_nevra(it: *tdnf_rpmdb_iter, nevra_out: *?[*:0]u8) c_int;
 extern fn tdnf_rpmdb_string_free(s: ?[*:0]u8) void;
 
 const RealRpmdb = struct {
+    pub const Source = ?[*:0]const u8;
+
     pub fn cookie(root: ?[*:0]const u8) ![:0]u8 {
         const raw = tdnf_rpmdb_cookie(root) orelse return error.RpmdbError;
         defer tdnf_rpmdb_string_free(raw);
@@ -20,34 +25,52 @@ const RealRpmdb = struct {
     pub fn collectNevras(allocator: std.mem.Allocator, root: ?[*:0]const u8) ![][:0]u8 {
         const iter = tdnf_rpmdb_iter_open(root) orelse return error.RpmdbError;
         defer tdnf_rpmdb_iter_close(iter);
-
-        var nevras: std.ArrayList([:0]u8) = .empty;
-        errdefer {
-            for (nevras.items) |nevra| {
-                allocator.free(nevra);
-            }
-            nevras.deinit(allocator);
-        }
-
-        while (true) {
-            var raw: ?[*:0]u8 = null;
-            const rc = tdnf_rpmdb_iter_next_nevra(iter, &raw);
-            if (rc == 0) {
-                break;
-            }
-            if (rc < 0 or raw == null) {
-                return error.RpmdbError;
-            }
-
-            defer tdnf_rpmdb_string_free(raw);
-            try nevras.append(allocator, try allocator.dupeZ(u8, std.mem.span(raw.?)));
-        }
-
-        return try nevras.toOwnedSlice(allocator);
+        return collectNevrasFromIter(allocator, iter);
     }
 };
 
+const ConfigRpmdb = struct {
+    pub const Source = *const tdnf_rpm_config;
+
+    pub fn cookie(config: Source) ![:0]u8 {
+        const raw = tdnf_rpmdb_cookie_config(config) orelse return error.RpmdbError;
+        defer tdnf_rpmdb_string_free(raw);
+        return try std.heap.c_allocator.dupeZ(u8, std.mem.span(raw));
+    }
+
+    pub fn collectNevras(allocator: std.mem.Allocator, config: Source) ![][:0]u8 {
+        const iter = tdnf_rpmdb_iter_open_config(config) orelse return error.RpmdbError;
+        defer tdnf_rpmdb_iter_close(iter);
+        return collectNevrasFromIter(allocator, iter);
+    }
+};
+
+fn collectNevrasFromIter(
+    allocator: std.mem.Allocator,
+    iter: *tdnf_rpmdb_iter,
+) ![][:0]u8 {
+    var nevras: std.ArrayList([:0]u8) = .empty;
+    errdefer {
+        for (nevras.items) |nevra| {
+            allocator.free(nevra);
+        }
+        nevras.deinit(allocator);
+    }
+
+    while (true) {
+        var raw: ?[*:0]u8 = null;
+        const rc = tdnf_rpmdb_iter_next_nevra(iter, &raw);
+        if (rc == 0) break;
+        if (rc < 0 or raw == null) return error.RpmdbError;
+
+        defer tdnf_rpmdb_string_free(raw);
+        try nevras.append(allocator, try allocator.dupeZ(u8, std.mem.span(raw.?)));
+    }
+    return try nevras.toOwnedSlice(allocator);
+}
+
 const Impl = api.Api(RealRpmdb);
+const ConfigImpl = api.Api(ConfigRpmdb);
 
 pub const HistoryCtx = api.HistoryCtx;
 pub const HistoryDelta = api.HistoryDelta;
@@ -72,6 +95,18 @@ pub export fn history_get_current_transaction_id(ctx: ?*HistoryCtx) c_int {
 pub export fn history_sync(ctx: ?*HistoryCtx, root: ?[*:0]const u8) c_int {
     const value = ctx orelse return -1;
     Impl.historySync(value, root) catch |err| return @import("db.zig").errorToRc(err);
+    return 0;
+}
+
+pub export fn history_sync_config(
+    ctx: ?*HistoryCtx,
+    config: ?*const tdnf_rpm_config,
+) c_int {
+    const value = ctx orelse return -1;
+    const rpm_config = config orelse return -1;
+    ConfigImpl.historySync(value, rpm_config) catch |err| {
+        return @import("db.zig").errorToRc(err);
+    };
     return 0;
 }
 
@@ -135,6 +170,19 @@ pub export fn history_update_state(
     return 0;
 }
 
+pub export fn history_update_state_config(
+    ctx: ?*HistoryCtx,
+    config: ?*const tdnf_rpm_config,
+    cmdline: ?[*:0]const u8,
+) c_int {
+    const value = ctx orelse return -1;
+    const rpm_config = config orelse return -1;
+    const line = cmdline orelse return -1;
+    ConfigImpl.historyUpdateState(value, rpm_config, line) catch |err| {
+        return @import("db.zig").errorToRc(err);
+    };
+    return 0;
+}
 pub export fn history_get_transactions(
     ctx: ?*HistoryCtx,
     ptas: *?[*]HistoryTransaction,

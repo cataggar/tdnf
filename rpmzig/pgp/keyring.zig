@@ -19,7 +19,7 @@
 //! The 0x18 sig is verified with the primary key as signer. The
 //! embedded 0x19 back-sig — carried as the Embedded Signature
 //! subpacket (type 32, RFC 4880 §5.2.3.26) inside the 0x18 sig's
-//! hashed area — is verified with the subkey as signer over the
+//! hashed or unhashed area — is verified with the subkey as signer over the
 //! same framing.
 //!
 //! Conservative trust posture: PR #6 requires a valid back-sig for
@@ -109,7 +109,7 @@ pub fn parse(allocator: std.mem.Allocator, key_blob: []const u8) ParseError!Keyr
 
     const primary_pk = pubkey.parseBody(first_pkt.body) catch
         return error.MalformedSignature;
-    const primary_fpr = pubkey.fingerprintV4(first_pkt.body);
+    const primary_fpr = pubkey.fingerprint(primary_pk);
     const primary_body = first_pkt.body;
 
     try entries.append(.{
@@ -137,7 +137,7 @@ pub fn parse(allocator: std.mem.Allocator, key_blob: []const u8) ParseError!Keyr
                 try entries.append(.{
                     .kind = .subkey,
                     .key = sub_pk,
-                    .fingerprint = pubkey.fingerprintV4(pkt.body),
+                    .fingerprint = pubkey.fingerprint(sub_pk),
                     .binding_ok = false,
                 });
                 pending_sub = .{
@@ -194,13 +194,16 @@ fn verifyBinding(
     subkey_fpr: pubkey.Fingerprint,
     binding_sig: signature.Signature,
 ) bool {
+    if (primary_pk.version != 4 or subkey_pk.version != 4 or binding_sig.version != 4)
+        return false;
+
     // ----- Issuer match: hashed Issuer Fingerprint == primary fpr.
     // We accept Issuer Key ID (type 16) as a fallback for older
     // generators that don't emit type 33, matching the policy in
     // verify.zig.
     if (binding_sig.issuerFingerprint()) |fpr_slice| {
         if (fpr_slice.len != 20) return false;
-        if (!std.crypto.timing_safe.eql([20]u8, fpr_slice[0..20].*, primary_fpr.bytes))
+        if (!std.crypto.timing_safe.eql([20]u8, fpr_slice[0..20].*, primary_fpr.bytes[0..20].*))
             return false;
     } else if (binding_sig.issuerKeyId()) |kid| {
         if (!std.crypto.timing_safe.eql([8]u8, kid, primary_fpr.keyId()))
@@ -227,7 +230,9 @@ fn verifyBinding(
     if (!verifyRsaSig(primary_pk, binding_sig, &parts)) return false;
 
     // ----- (2) Locate + verify the embedded type-0x19 back-sig.
-    const backsig_body = findEmbeddedSignature(binding_sig.hashed_subpackets) orelse
+    const backsig_body =
+        findEmbeddedSignature(binding_sig.hashed_subpackets) orelse
+        findEmbeddedSignature(binding_sig.unhashed_subpackets) orelse
         return false;
     const backsig = signature.parseBody(backsig_body) catch return false;
     if (backsig.sig_type != .primary_key_binding) return false;
@@ -235,7 +240,7 @@ fn verifyBinding(
     // Issuer of back-sig must be the subkey.
     if (backsig.issuerFingerprint()) |fpr_slice| {
         if (fpr_slice.len != 20) return false;
-        if (!std.crypto.timing_safe.eql([20]u8, fpr_slice[0..20].*, subkey_fpr.bytes))
+        if (!std.crypto.timing_safe.eql([20]u8, fpr_slice[0..20].*, subkey_fpr.bytes[0..20].*))
             return false;
     } else if (backsig.issuerKeyId()) |kid| {
         if (!std.crypto.timing_safe.eql([8]u8, kid, subkey_fpr.keyId()))
@@ -288,9 +293,9 @@ fn verifyRsaSig(
 
     const prefix_len: u32 = @intCast(sig.hashed_prefix.len);
     const trailer: [6]u8 = .{
-        0x04,                                        0xFF,
-        @intCast((prefix_len >> 24) & 0xFF),         @intCast((prefix_len >> 16) & 0xFF),
-        @intCast((prefix_len >> 8) & 0xFF),          @intCast(prefix_len & 0xFF),
+        0x04,                                0xFF,
+        @intCast((prefix_len >> 24) & 0xFF), @intCast((prefix_len >> 16) & 0xFF),
+        @intCast((prefix_len >> 8) & 0xFF),  @intCast(prefix_len & 0xFF),
     };
 
     // Hash hint short-circuit — matches verify.zig PR #5's
@@ -386,8 +391,8 @@ test "parse keyring with primary + signing subkey + valid bindings" {
     // Primary and subkey have different fingerprints.
     try testing.expect(!std.mem.eql(
         u8,
-        &kr.entries[0].fingerprint.bytes,
-        &kr.entries[1].fingerprint.bytes,
+        kr.entries[0].fingerprint.slice(),
+        kr.entries[1].fingerprint.slice(),
     ));
 }
 
@@ -550,5 +555,5 @@ test "fixture detached sig is signed by the subkey, not the primary" {
     const sig = try signature.parseBody(pkt.body);
     const fpr = sig.issuerFingerprint().?;
     try testing.expectEqual(@as(usize, 20), fpr.len);
-    try testing.expectEqualSlices(u8, &kr.entries[1].fingerprint.bytes, fpr);
+    try testing.expectEqualSlices(u8, kr.entries[1].fingerprint.slice(), fpr);
 }

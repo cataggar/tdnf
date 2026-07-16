@@ -1,9 +1,6 @@
 const std = @import("std");
 const tls = @import("tls");
-const c = @cImport({
-    @cInclude("tdnferror.h");
-    @cInclude("errno.h");
-});
+const errors = @import("tdnf_error");
 
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -578,15 +575,15 @@ pub export fn TDNFZigDownloadFile(
     }
     const request_ptr = raw_request orelse {
         setError("null download request", .{});
-        return c.ERROR_TDNF_INVALID_PARAMETER;
+        return errors.ERROR_TDNF_INVALID_PARAMETER;
     };
     const request = parseRequest(request_ptr) catch |err| {
         if (err == error.InvalidParameter) {
             ensureErrorSet("invalid download request", .{});
-            return c.ERROR_TDNF_INVALID_PARAMETER;
+            return errors.ERROR_TDNF_INVALID_PARAMETER;
         }
         ensureErrorSet("failed to parse request: {}", .{err});
-        return c.ERROR_TDNF_INVALID_PARAMETER;
+        return errors.ERROR_TDNF_INVALID_PARAMETER;
     };
 
     var arena_state = std.heap.ArenaAllocator.init(std.heap.c_allocator);
@@ -599,30 +596,30 @@ pub export fn TDNFZigDownloadFile(
     const status = downloadWithIo(arena_state.allocator(), io, request) catch |err| {
         if (err == error.UnsupportedConfiguration) {
             ensureErrorSet("download configuration not yet supported by zig transport", .{});
-            return c.ERROR_TDNF_CALL_NOT_SUPPORTED;
+            return errors.ERROR_TDNF_CALL_NOT_SUPPORTED;
         }
         if (err == error.InvalidUrl) {
             ensureErrorSet("invalid URL: {s}", .{request.url});
-            return c.ERROR_TDNF_URL_INVALID;
+            return errors.ERROR_TDNF_URL_INVALID;
         }
         if (err == error.TlsConfiguration) {
             ensureErrorSet("tls configuration failed", .{});
-            return c.ERROR_TDNF_SET_SSL_SETTINGS;
+            return errors.ERROR_TDNF_SET_SSL_SETTINGS;
         }
         if (err == error.Timeout or err == error.LowSpeedLimit) {
             ensureErrorSet("download timed out", .{});
-            return c.ERROR_TDNF_SYSTEM_BASE + c.ETIMEDOUT;
+            return errors.ERROR_TDNF_TIMED_OUT;
         }
         if (err == error.OperationAborted) {
             ensureErrorSet("progress callback aborted download", .{});
-            return c.ERROR_TDNF_OPERATION_ABORTED;
+            return errors.ERROR_TDNF_OPERATION_ABORTED;
         }
         if (err == error.OutOfMemory) {
             ensureErrorSet("out of memory", .{});
-            return c.ERROR_TDNF_OUT_OF_MEMORY;
+            return errors.ERROR_TDNF_OUT_OF_MEMORY;
         }
         ensureErrorSet("download failed: {}", .{err});
-        return c.ERROR_TDNF_REPO_PERFORM;
+        return errors.ERROR_TDNF_REPO_PERFORM;
     };
 
     if (out_status) |status_out| {
@@ -630,7 +627,7 @@ pub export fn TDNFZigDownloadFile(
     }
     if (status >= 400) {
         setError("HTTP status {d} while downloading {s}", .{ status, request.url });
-        return c.ERROR_TDNF_INVALID_PARAMETER;
+        return errors.ERROR_TDNF_INVALID_PARAMETER;
     }
     return 0;
 }
