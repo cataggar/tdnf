@@ -1193,10 +1193,10 @@ TDNFSolvAddMinVersions(
     dwError = TDNFNativeQueryBuildRepoInputs(pTdnf, &pRepos, &dwRepoCount);
     BAIL_ON_TDNF_ERROR(dwError);
 
-    dwError = TDNFRepoMdNativeMinVersionExcludeLines(
+    dwError = TDNFRepoMdNativeMinVersionExcludeLinesConfig(
                   pRepos,
                   dwRepoCount,
-                  TDNFNativeQueryInstallRoot(pTdnf),
+                  pTdnf->pRpmConfig,
                   ppszPackages,
                   &ppszExcludeLines,
                   &dwExcludeCount);
@@ -1209,7 +1209,7 @@ TDNFSolvAddMinVersions(
         dwError = TDNFNativeQueryResolveSinglePackageRef(
                       pTdnf->pSack,
                       ppszExcludeLines[i],
-                      1,
+                      0,
                       &dwPkgId);
         BAIL_ON_TDNF_ERROR(dwError);
 

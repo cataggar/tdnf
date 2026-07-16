@@ -40,6 +40,9 @@ pub const Packet = struct {
     /// Aliases into the iterator's input slice.
     tag: Tag,
     body: []const u8,
+    /// Complete packet, including its old- or new-format header.
+    /// This lets higher-level parsers preserve certificate framing.
+    raw: []const u8,
 };
 
 pub const HeaderError = error{
@@ -66,6 +69,7 @@ pub const PacketIterator = struct {
     }
 
     fn parseNewFormat(self: *PacketIterator) HeaderError!Packet {
+        const packet_start = self.rest;
         const first = self.rest[0];
         const tag: Tag = @enumFromInt(@as(u6, @truncate(first & 0x3F)));
 
@@ -97,10 +101,15 @@ pub const PacketIterator = struct {
         if (self.rest.len - header_len < body_len) return error.TruncatedBody;
         const body = self.rest[header_len .. header_len + body_len];
         self.rest = self.rest[header_len + body_len ..];
-        return Packet{ .tag = tag, .body = body };
+        return Packet{
+            .tag = tag,
+            .body = body,
+            .raw = packet_start[0 .. header_len + body_len],
+        };
     }
 
     fn parseOldFormat(self: *PacketIterator) HeaderError!Packet {
+        const packet_start = self.rest;
         const first = self.rest[0];
         const tag: Tag = @enumFromInt(@as(u6, @truncate((first >> 2) & 0x0F)));
         const len_type: u2 = @truncate(first & 0x03);
@@ -132,7 +141,11 @@ pub const PacketIterator = struct {
         if (self.rest.len - header_len < body_len) return error.TruncatedBody;
         const body = self.rest[header_len .. header_len + body_len];
         self.rest = self.rest[header_len + body_len ..];
-        return Packet{ .tag = tag, .body = body };
+        return Packet{
+            .tag = tag,
+            .body = body,
+            .raw = packet_start[0 .. header_len + body_len],
+        };
     }
 };
 
@@ -212,6 +225,15 @@ pub fn readMpi(reader: *Reader) MpiError!Mpi {
     var i: usize = 0;
     while (i < payload.len and payload[i] == 0) : (i += 1) {}
     return Mpi{ .bit_length = bit_length, .bytes = payload[i..] };
+}
+
+pub fn isCanonicalMpi(mpi: Mpi) bool {
+    if (mpi.bit_length == 0) return mpi.bytes.len == 0;
+    const expected_len = (@as(usize, mpi.bit_length) + 7) / 8;
+    if (mpi.bytes.len != expected_len or mpi.bytes[0] == 0) return false;
+    const leading_bits: usize = 8 - @clz(mpi.bytes[0]);
+    const actual_bits = (mpi.bytes.len - 1) * 8 + leading_bits;
+    return actual_bits == mpi.bit_length;
 }
 
 // ===== Tests =====

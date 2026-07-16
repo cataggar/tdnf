@@ -1,13 +1,12 @@
 const std = @import("std");
 const sqlite = @import("sqlite");
-const c = @cImport({
-    @cInclude("time.h");
-});
 
 const history_db = @import("db.zig");
 const store = @import("store.zig");
 
 const allocator = std.heap.c_allocator;
+
+extern fn time(tloc: ?*std.posix.time_t) std.posix.time_t;
 
 pub const HistoryCtx = extern struct {
     db: ?*sqlite.c.sqlite3,
@@ -34,7 +33,7 @@ pub const HistoryTransaction = extern struct {
     id: c_int,
     type: c_int,
     cmdline: ?[*:0]u8,
-    timestamp: c.time_t,
+    timestamp: std.posix.time_t,
     cookie: ?[*:0]u8,
     delta: HistoryDelta,
     flags_delta: HistoryFlagsDelta,
@@ -62,7 +61,7 @@ fn ctxDb(ctx: *HistoryCtx) history_db.Database {
 }
 
 fn currentTime() i64 {
-    return @intCast(c.time(null));
+    return @intCast(time(null));
 }
 
 fn installedIdsSlice(ctx: *const HistoryCtx) []const c_int {
@@ -340,7 +339,7 @@ pub fn Api(comptime Rpmdb: type) type {
             ctx.trans_id = trans_id;
         }
 
-        fn dbUpdateRpms(db: history_db.Database, root: ?[*:0]const u8) ![]c_int {
+        fn dbUpdateRpms(db: history_db.Database, root: Rpmdb.Source) ![]c_int {
             try db.exec(store.sql_create_table_rpms, .{});
 
             const nevras = try Rpmdb.collectNevras(allocator, root);
@@ -404,7 +403,7 @@ pub fn Api(comptime Rpmdb: type) type {
 
         pub fn historyUpdateState(
             ctx: *HistoryCtx,
-            root: ?[*:0]const u8,
+            root: Rpmdb.Source,
             cmdline: [*:0]const u8,
         ) !void {
             var cookie_opt: ?[:0]u8 = try Rpmdb.cookie(root);
@@ -454,7 +453,7 @@ pub fn Api(comptime Rpmdb: type) type {
             committed = true;
         }
 
-        pub fn historySync(ctx: *HistoryCtx, root: ?[*:0]const u8) !void {
+        pub fn historySync(ctx: *HistoryCtx, root: Rpmdb.Source) !void {
             const current_cookie = try Rpmdb.cookie(root);
             defer allocator.free(current_cookie);
 

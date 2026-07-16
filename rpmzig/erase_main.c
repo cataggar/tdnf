@@ -12,8 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <rpm/rpmts.h>
-
+#include <tdnfrpmtrans.h>
 #include "rpmdb.h"
 
 static int parse_u32(const char *text, uint32_t *out)
@@ -27,10 +26,10 @@ static int parse_u32(const char *text, uint32_t *out)
     return 0;
 }
 
-static uint32_t parse_tsflag(const char *text)
+static TDNF_RPMTRANS_FLAGS parse_tsflag(const char *text)
 {
     if (!strcmp(text, "justdb")) {
-        return RPMTRANS_FLAG_JUSTDB;
+        return TDNF_RPMTRANS_FLAG_JUSTDB;
     }
     return 0;
 }
@@ -39,7 +38,7 @@ int main(int argc, char **argv)
 {
     const char *root = NULL;
     uint32_t hnum = 0;
-    uint32_t trans_flags = 0;
+    TDNF_RPMTRANS_FLAGS trans_flags = TDNF_RPMTRANS_FLAG_NONE;
     int i = 0;
 
     for (i = 1; i < argc; ++i) {
@@ -50,7 +49,7 @@ int main(int argc, char **argv)
             }
             root = argv[++i];
         } else if (!strcmp(argv[i], "--tsflag")) {
-            uint32_t flag = 0;
+            TDNF_RPMTRANS_FLAGS flag = TDNF_RPMTRANS_FLAG_NONE;
             if (i + 1 >= argc) {
                 fprintf(stderr, "missing argument for --tsflag\n");
                 return 2;

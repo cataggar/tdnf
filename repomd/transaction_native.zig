@@ -112,6 +112,30 @@ const TransactionOperation = enum(u32) {
     upgrade = c.TDNF_REPOMD_NATIVE_TRANSACTION_OP_UPGRADE,
 };
 
+const TransactionInput = struct {
+    operation: u32,
+    path: ?[]const u8,
+    name: ?[]const u8,
+    evr: ?[]const u8,
+    arch: ?[]const u8,
+    rpmdb_hnum: u32,
+    header_blob: ?[]const u8 = null,
+    package_size: ?u64 = null,
+};
+
+const VerifiedTransactionItems = struct {
+    items: []const c.TDNF_REPOMD_NATIVE_TRANSACTION_ITEM_V2,
+    headers: []const ?[*]const u8,
+    header_lengths: []const usize,
+    package_sizes: []const u64,
+};
+
+const RawTransactionItems = union(enum) {
+    legacy_paths: []const c.TDNF_REPOMD_NATIVE_TRANSACTION_ITEM,
+    paths_v2: []const c.TDNF_REPOMD_NATIVE_TRANSACTION_ITEM_V2,
+    verified: VerifiedTransactionItems,
+};
+
 const TransactionPackage = struct {
     input_index: usize,
     op: TransactionOperation,
@@ -135,15 +159,30 @@ const ParsedTransaction = struct {
     erased: std.array_list.Managed(TransactionPackage),
     erase_mask: []bool,
     replace_mask: []bool,
+    priors: []std.array_list.Managed(u32),
 
-    fn init(allocator: std.mem.Allocator, installed_count: usize) !ParsedTransaction {
+    fn init(
+        allocator: std.mem.Allocator,
+        installed_count: usize,
+        input_count: usize,
+    ) !ParsedTransaction {
+        const priors = try allocator.alloc(std.array_list.Managed(u32), input_count);
+        for (priors) |*prior| {
+            prior.* = std.array_list.Managed(u32).init(allocator);
+        }
         return .{
             .added = std.array_list.Managed(TransactionPackage).init(allocator),
             .erased = std.array_list.Managed(TransactionPackage).init(allocator),
             .erase_mask = try allocator.alloc(bool, installed_count),
             .replace_mask = try allocator.alloc(bool, installed_count),
+            .priors = priors,
         };
     }
+};
+
+const InstalledRepository = struct {
+    repository: model.RepositoryModel,
+    hnums: []const u32,
 };
 
 const FinalBuildResult = struct {
@@ -200,27 +239,55 @@ const RepositoryBuilder = struct {
     }
 };
 
+const ProblemKind = enum(u32) {
+    dependency = c.TDNF_REPOMD_NATIVE_PROBLEM_DEPENDENCY,
+    pretrans = c.TDNF_REPOMD_NATIVE_PROBLEM_PRETRANS,
+    conflict = c.TDNF_REPOMD_NATIVE_PROBLEM_CONFLICT,
+    obsoletes = c.TDNF_REPOMD_NATIVE_PROBLEM_OBSOLETES,
+    file_conflict = c.TDNF_REPOMD_NATIVE_PROBLEM_FILE_CONFLICT,
+    unsupported_multiple = c.TDNF_REPOMD_NATIVE_PROBLEM_UNSUPPORTED_MULTIPLE,
+};
+
+const NativeProblem = struct {
+    kind: ProblemKind,
+    input_index: usize,
+    package: []const u8,
+    related_package: ?[]const u8 = null,
+    subject: []const u8,
+    count: u32 = 0,
+};
+
 const ProblemCollector = struct {
-    allocator: std.mem.Allocator,
-    messages: std.array_list.Managed([]const u8),
-    seen: std.StringHashMap(void),
+    problems: std.array_list.Managed(NativeProblem),
 
     fn init(allocator: std.mem.Allocator) ProblemCollector {
         return .{
-            .allocator = allocator,
-            .messages = std.array_list.Managed([]const u8).init(allocator),
-            .seen = std.StringHashMap(void).init(allocator),
+            .problems = std.array_list.Managed(NativeProblem).init(allocator),
         };
     }
 
-    fn add(self: *ProblemCollector, msg: []const u8) !void {
-        const gop = try self.seen.getOrPut(msg);
-        if (gop.found_existing) {
-            return;
+    fn add(self: *ProblemCollector, problem: NativeProblem) !void {
+        for (self.problems.items) |existing| {
+            if (existing.kind == problem.kind and
+                existing.input_index == problem.input_index and
+                existing.count == problem.count and
+                std.mem.eql(u8, existing.package, problem.package) and
+                optionalStringEqual(existing.related_package, problem.related_package) and
+                std.mem.eql(u8, existing.subject, problem.subject))
+            {
+                return;
+            }
         }
-        try self.messages.append(msg);
+        try self.problems.append(problem);
     }
 };
+
+fn optionalStringEqual(left: ?[]const u8, right: ?[]const u8) bool {
+    if (left == null or right == null) {
+        return left == null and right == null;
+    }
+    return std.mem.eql(u8, left.?, right.?);
+}
 
 fn clearError() void {
     last_error_len = 0;
@@ -252,73 +319,568 @@ pub export fn TDNFRepoMdNativeTransactionSolve(
     out_problem_lines: ?*[*c][*c]u8,
     out_problem_count: ?*u32,
 ) u32 {
+    return transactionSolveLegacy(
+        raw_items,
+        item_count,
+        root_dir,
+        null,
+        false,
+        out_order_lines,
+        out_order_count,
+        out_problem_lines,
+        out_problem_count,
+    );
+}
+
+pub export fn TDNFRepoMdNativeTransactionSolveV2(
+    raw_items: ?[*]const c.TDNF_REPOMD_NATIVE_TRANSACTION_ITEM_V2,
+    item_count: u32,
+    root_dir: ?[*:0]const u8,
+    out_order_lines: ?*[*c][*c]u8,
+    out_order_count: ?*u32,
+    out_problem_lines: ?*[*c][*c]u8,
+    out_problem_count: ?*u32,
+) u32 {
+    return transactionSolveV2(
+        raw_items,
+        item_count,
+        root_dir,
+        null,
+        false,
+        out_order_lines,
+        out_order_count,
+        out_problem_lines,
+        out_problem_count,
+    );
+}
+
+pub export fn TDNFRepoMdNativeTransactionSolveConfig(
+    raw_items: ?[*]const c.TDNF_REPOMD_NATIVE_TRANSACTION_ITEM,
+    item_count: u32,
+    config: ?*const c.tdnf_rpm_config,
+    out_order_lines: ?*[*c][*c]u8,
+    out_order_count: ?*u32,
+    out_problem_lines: ?*[*c][*c]u8,
+    out_problem_count: ?*u32,
+) u32 {
+    return transactionSolveLegacy(
+        raw_items,
+        item_count,
+        null,
+        config,
+        true,
+        out_order_lines,
+        out_order_count,
+        out_problem_lines,
+        out_problem_count,
+    );
+}
+
+pub export fn TDNFRepoMdNativeTransactionSolveConfigV2(
+    raw_items: ?[*]const c.TDNF_REPOMD_NATIVE_TRANSACTION_ITEM_V2,
+    item_count: u32,
+    config: ?*const c.tdnf_rpm_config,
+    out_order_lines: ?*[*c][*c]u8,
+    out_order_count: ?*u32,
+    out_problem_lines: ?*[*c][*c]u8,
+    out_problem_count: ?*u32,
+) u32 {
+    return transactionSolveV2(
+        raw_items,
+        item_count,
+        null,
+        config,
+        true,
+        out_order_lines,
+        out_order_count,
+        out_problem_lines,
+        out_problem_count,
+    );
+}
+
+pub export fn TDNFRepoMdNativeTransactionPlanSolve(
+    raw_items: ?[*]const c.TDNF_REPOMD_NATIVE_TRANSACTION_ITEM,
+    item_count: u32,
+    root_dir: ?[*:0]const u8,
+    out_plan: ?*?*c.TDNF_REPOMD_NATIVE_TRANSACTION_PLAN,
+) u32 {
+    return transactionPlanSolveLegacy(
+        raw_items,
+        item_count,
+        root_dir,
+        null,
+        false,
+        out_plan,
+    );
+}
+
+pub export fn TDNFRepoMdNativeTransactionPlanSolveV2(
+    raw_items: ?[*]const c.TDNF_REPOMD_NATIVE_TRANSACTION_ITEM_V2,
+    item_count: u32,
+    root_dir: ?[*:0]const u8,
+    out_plan: ?*?*c.TDNF_REPOMD_NATIVE_TRANSACTION_PLAN,
+) u32 {
+    return transactionPlanSolveV2(
+        raw_items,
+        item_count,
+        root_dir,
+        null,
+        false,
+        out_plan,
+    );
+}
+
+pub export fn TDNFRepoMdNativeTransactionPlanSolveConfig(
+    raw_items: ?[*]const c.TDNF_REPOMD_NATIVE_TRANSACTION_ITEM,
+    item_count: u32,
+    config: ?*const c.tdnf_rpm_config,
+    out_plan: ?*?*c.TDNF_REPOMD_NATIVE_TRANSACTION_PLAN,
+) u32 {
+    return transactionPlanSolveLegacy(
+        raw_items,
+        item_count,
+        null,
+        config,
+        true,
+        out_plan,
+    );
+}
+
+pub export fn TDNFRepoMdNativeTransactionPlanSolveConfigV2(
+    raw_items: ?[*]const c.TDNF_REPOMD_NATIVE_TRANSACTION_ITEM_V2,
+    item_count: u32,
+    config: ?*const c.tdnf_rpm_config,
+    out_plan: ?*?*c.TDNF_REPOMD_NATIVE_TRANSACTION_PLAN,
+) u32 {
+    return transactionPlanSolveV2(
+        raw_items,
+        item_count,
+        null,
+        config,
+        true,
+        out_plan,
+    );
+}
+
+fn verifiedTransactionSolveConfig(
+    raw_items: ?[*]const c.TDNF_REPOMD_NATIVE_TRANSACTION_ITEM_V2,
+    raw_headers: ?[*]const ?[*]const u8,
+    raw_header_lengths: ?[*]const usize,
+    raw_package_sizes: ?[*]const u64,
+    item_count: u32,
+    config: ?*const c.tdnf_rpm_config,
+    out_plan: ?*?*c.TDNF_REPOMD_NATIVE_TRANSACTION_PLAN,
+) callconv(.c) u32 {
+    clearError();
+    const plan_out = out_plan orelse
+        return invalidParameter("null verified transaction plan output", .{});
+    plan_out.* = null;
+    if (config == null) {
+        return invalidParameter("null rpm config", .{});
+    }
+    const items = if (raw_items) |ptr|
+        ptr[0..item_count]
+    else if (item_count == 0)
+        &[_]c.TDNF_REPOMD_NATIVE_TRANSACTION_ITEM_V2{}
+    else
+        return invalidParameter("null verified transaction input", .{});
+    const headers = if (raw_headers) |ptr|
+        ptr[0..item_count]
+    else if (item_count == 0)
+        &[_]?[*]const u8{}
+    else
+        return invalidParameter("null verified transaction headers", .{});
+    const header_lengths = if (raw_header_lengths) |ptr|
+        ptr[0..item_count]
+    else if (item_count == 0)
+        &[_]usize{}
+    else
+        return invalidParameter("null verified transaction header lengths", .{});
+    const package_sizes = if (raw_package_sizes) |ptr|
+        ptr[0..item_count]
+    else if (item_count == 0)
+        &[_]u64{}
+    else
+        return invalidParameter("null verified transaction package sizes", .{});
+    return buildOwnedPlan(
+        .{ .verified = .{
+            .items = items,
+            .headers = headers,
+            .header_lengths = header_lengths,
+            .package_sizes = package_sizes,
+        } },
+        null,
+        config,
+        plan_out,
+    );
+}
+
+comptime {
+    @export(&verifiedTransactionSolveConfig, .{
+        .name = "tdnf_repomd_native_verified_transaction_solve_config",
+        .visibility = .hidden,
+    });
+}
+
+fn transactionSolveLegacy(
+    raw_items: ?[*]const c.TDNF_REPOMD_NATIVE_TRANSACTION_ITEM,
+    item_count: u32,
+    root_dir: ?[*:0]const u8,
+    config: ?*const c.tdnf_rpm_config,
+    config_required: bool,
+    out_order_lines: ?*[*c][*c]u8,
+    out_order_count: ?*u32,
+    out_problem_lines: ?*[*c][*c]u8,
+    out_problem_count: ?*u32,
+) u32 {
+    return transactionSolveTyped(
+        c.TDNF_REPOMD_NATIVE_TRANSACTION_ITEM,
+        raw_items,
+        item_count,
+        root_dir,
+        config,
+        config_required,
+        out_order_lines,
+        out_order_count,
+        out_problem_lines,
+        out_problem_count,
+    );
+}
+
+fn transactionSolveV2(
+    raw_items: ?[*]const c.TDNF_REPOMD_NATIVE_TRANSACTION_ITEM_V2,
+    item_count: u32,
+    root_dir: ?[*:0]const u8,
+    config: ?*const c.tdnf_rpm_config,
+    config_required: bool,
+    out_order_lines: ?*[*c][*c]u8,
+    out_order_count: ?*u32,
+    out_problem_lines: ?*[*c][*c]u8,
+    out_problem_count: ?*u32,
+) u32 {
+    return transactionSolveTyped(
+        c.TDNF_REPOMD_NATIVE_TRANSACTION_ITEM_V2,
+        raw_items,
+        item_count,
+        root_dir,
+        config,
+        config_required,
+        out_order_lines,
+        out_order_count,
+        out_problem_lines,
+        out_problem_count,
+    );
+}
+
+fn transactionSolveTyped(
+    comptime Item: type,
+    raw_items: ?[*]const Item,
+    item_count: u32,
+    root_dir: ?[*:0]const u8,
+    config: ?*const c.tdnf_rpm_config,
+    config_required: bool,
+    out_order_lines: ?*[*c][*c]u8,
+    out_order_count: ?*u32,
+    out_problem_lines: ?*[*c][*c]u8,
+    out_problem_count: ?*u32,
+) u32 {
     clearError();
     if (out_order_lines) |out| out.* = null;
     if (out_order_count) |out| out.* = 0;
     if (out_problem_lines) |out| out.* = null;
     if (out_problem_count) |out| out.* = 0;
-
     const order_out = out_order_lines orelse return invalidParameter("null order output", .{});
     const order_count_out = out_order_count orelse return invalidParameter("null order count output", .{});
     const problem_out = out_problem_lines orelse return invalidParameter("null problem output", .{});
     const problem_count_out = out_problem_count orelse return invalidParameter("null problem count output", .{});
-
+    if (config_required and config == null) {
+        return invalidParameter("null rpm config", .{});
+    }
     const items = if (raw_items) |ptr|
         ptr[0..item_count]
     else if (item_count == 0)
-        &[_]c.TDNF_REPOMD_NATIVE_TRANSACTION_ITEM{}
+        &[_]Item{}
     else
         return invalidParameter("null transaction input", .{});
+    const normalized_items: RawTransactionItems =
+        if (Item == c.TDNF_REPOMD_NATIVE_TRANSACTION_ITEM)
+            .{ .legacy_paths = items }
+        else
+            .{ .paths_v2 = items };
 
     var arena_state = std.heap.ArenaAllocator.init(std.heap.c_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const installed_repo = loadInstalledRepositoryModel(arena, root_dir) catch |err| {
+    const result = solveTransaction(
+        arena,
+        normalized_items,
+        root_dir,
+        config,
+    ) catch |err| {
         return mapTransactionError(err);
     };
 
-    var tx = parseTransaction(arena, items, installed_repo) catch |err| {
-        return mapTransactionError(err);
-    };
-
-    const final_build = buildFinalRepository(arena, installed_repo, &tx) catch |err| {
-        return mapTransactionError(err);
-    };
-
-    var installed_index = query_index.RepositoryIndex.init(arena, &installed_repo) catch {
+    const problem_lines = formatProblemLines(arena, result.problems) catch {
         return mapTransactionError(error.OutOfMemory);
     };
-    var final_index = query_index.RepositoryIndex.init(arena, &final_build.repository) catch {
-        return mapTransactionError(error.OutOfMemory);
-    };
-
-    var problems = ProblemCollector.init(arena);
-    collectNativeProblems(arena, &problems, &tx, installed_repo, final_build, &installed_index, &final_index) catch |err| {
-        return mapTransactionError(err);
-    };
-
-    const order = buildNativeOrder(arena, tx.added.items, tx.erased.items) catch |err| {
-        return mapTransactionError(err);
-    };
-
-    const order_lines = buildIndexLines(arena, order) catch |err| {
-        return mapTransactionError(err);
-    };
-    const problem_lines = problems.messages.toOwnedSlice() catch {
-        return mapTransactionError(error.OutOfMemory);
-    };
-
-    order_out.* = (tryBuildCStringArray(order_lines) catch |err| {
+    const problem_array = (tryBuildCStringArray(problem_lines) catch |err| {
         return mapTransactionError(err);
     }) orelse null;
-    order_count_out.* = @intCast(order_lines.len);
 
-    problem_out.* = (tryBuildCStringArray(problem_lines) catch |err| {
+    const order_lines = buildIndexLines(arena, result.order) catch |err| {
+        freeCStringArray(problem_array);
+        return mapTransactionError(err);
+    };
+    const order_array = (tryBuildCStringArray(order_lines) catch |err| {
+        freeCStringArray(problem_array);
         return mapTransactionError(err);
     }) orelse null;
+    order_out.* = order_array;
+    order_count_out.* = @intCast(result.order.len);
+
+    problem_out.* = problem_array;
     problem_count_out.* = @intCast(problem_lines.len);
     return 0;
+}
+
+fn transactionPlanSolveLegacy(
+    raw_items: ?[*]const c.TDNF_REPOMD_NATIVE_TRANSACTION_ITEM,
+    item_count: u32,
+    root_dir: ?[*:0]const u8,
+    config: ?*const c.tdnf_rpm_config,
+    config_required: bool,
+    out_plan: ?*?*c.TDNF_REPOMD_NATIVE_TRANSACTION_PLAN,
+) u32 {
+    return transactionPlanSolveTyped(
+        c.TDNF_REPOMD_NATIVE_TRANSACTION_ITEM,
+        raw_items,
+        item_count,
+        root_dir,
+        config,
+        config_required,
+        out_plan,
+    );
+}
+
+fn transactionPlanSolveV2(
+    raw_items: ?[*]const c.TDNF_REPOMD_NATIVE_TRANSACTION_ITEM_V2,
+    item_count: u32,
+    root_dir: ?[*:0]const u8,
+    config: ?*const c.tdnf_rpm_config,
+    config_required: bool,
+    out_plan: ?*?*c.TDNF_REPOMD_NATIVE_TRANSACTION_PLAN,
+) u32 {
+    return transactionPlanSolveTyped(
+        c.TDNF_REPOMD_NATIVE_TRANSACTION_ITEM_V2,
+        raw_items,
+        item_count,
+        root_dir,
+        config,
+        config_required,
+        out_plan,
+    );
+}
+
+fn transactionPlanSolveTyped(
+    comptime Item: type,
+    raw_items: ?[*]const Item,
+    item_count: u32,
+    root_dir: ?[*:0]const u8,
+    config: ?*const c.tdnf_rpm_config,
+    config_required: bool,
+    out_plan: ?*?*c.TDNF_REPOMD_NATIVE_TRANSACTION_PLAN,
+) u32 {
+    clearError();
+    const plan_out = out_plan orelse
+        return invalidParameter("null transaction plan output", .{});
+    plan_out.* = null;
+    if (config_required and config == null) {
+        return invalidParameter("null rpm config", .{});
+    }
+    const items = if (raw_items) |ptr|
+        ptr[0..item_count]
+    else if (item_count == 0)
+        &[_]Item{}
+    else
+        return invalidParameter("null transaction input", .{});
+    const normalized_items: RawTransactionItems =
+        if (Item == c.TDNF_REPOMD_NATIVE_TRANSACTION_ITEM)
+            .{ .legacy_paths = items }
+        else
+            .{ .paths_v2 = items };
+    return buildOwnedPlan(normalized_items, root_dir, config, plan_out);
+}
+
+const SolveResult = struct {
+    order: []const usize,
+    problems: []const NativeProblem,
+    priors: []const std.array_list.Managed(u32),
+};
+
+fn solveTransaction(
+    arena: std.mem.Allocator,
+    raw_items: RawTransactionItems,
+    root_dir: ?[*:0]const u8,
+    config: ?*const c.tdnf_rpm_config,
+) TransactionError!SolveResult {
+    const items = try normalizeTransactionItems(arena, raw_items);
+    const installed = try loadInstalledRepositoryModel(arena, root_dir, config);
+    var tx = try parseTransaction(arena, items, installed);
+    const final_build = try buildFinalRepository(arena, installed.repository, &tx);
+
+    var installed_index = query_index.RepositoryIndex.init(
+        arena,
+        &installed.repository,
+    ) catch return error.OutOfMemory;
+    var final_index = query_index.RepositoryIndex.init(
+        arena,
+        &final_build.repository,
+    ) catch return error.OutOfMemory;
+    var problems = ProblemCollector.init(arena);
+    try collectNativeProblems(
+        arena,
+        &problems,
+        &tx,
+        installed.repository,
+        final_build,
+        &installed_index,
+        &final_index,
+        config,
+    );
+    try collectMultiplicityProblems(arena, &problems, &tx);
+
+    const order = try buildNativeOrder(arena, tx.added.items, tx.erased.items);
+    try validateOrderPermutation(arena, order, items.len);
+
+    return .{
+        .order = order,
+        .problems = try problems.problems.toOwnedSlice(),
+        .priors = tx.priors,
+    };
+}
+
+fn buildOwnedPlan(
+    raw_items: RawTransactionItems,
+    root_dir: ?[*:0]const u8,
+    config: ?*const c.tdnf_rpm_config,
+    out_plan: *?*c.TDNF_REPOMD_NATIVE_TRANSACTION_PLAN,
+) u32 {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const result = solveTransaction(arena, raw_items, root_dir, config) catch |err| {
+        return mapTransactionError(err);
+    };
+    const plan = createOwnedPlan(result) catch |err| {
+        return mapTransactionError(err);
+    };
+    out_plan.* = plan;
+    return 0;
+}
+
+fn createOwnedPlan(
+    result: SolveResult,
+) TransactionError!*c.TDNF_REPOMD_NATIVE_TRANSACTION_PLAN {
+    const raw_plan = c.calloc(
+        1,
+        @sizeOf(c.TDNF_REPOMD_NATIVE_TRANSACTION_PLAN),
+    ) orelse return error.OutOfMemory;
+    const plan: *c.TDNF_REPOMD_NATIVE_TRANSACTION_PLAN =
+        @ptrCast(@alignCast(raw_plan));
+    errdefer freeOwnedPlan(plan);
+
+    plan.dwItemCount = std.math.cast(u32, result.order.len) orelse
+        return error.InvalidParameter;
+    plan.pdwOrderIndices = (tryBuildIndexArray(result.order) catch |err|
+        return mapPlanBuildError(err)) orelse null;
+
+    if (result.priors.len != result.order.len) {
+        return error.InvalidParameter;
+    }
+    if (result.priors.len != 0) {
+        const raw_items = c.calloc(
+            result.priors.len,
+            @sizeOf(c.TDNF_REPOMD_NATIVE_TRANSACTION_PLAN_ITEM),
+        ) orelse return error.OutOfMemory;
+        plan.pItems = @ptrCast(@alignCast(raw_items));
+    }
+
+    var prior_count: usize = 0;
+    for (result.priors) |prior| {
+        prior_count = std.math.add(usize, prior_count, prior.items.len) catch
+            return error.OutOfMemory;
+    }
+    plan.dwPriorHnumCount = std.math.cast(u32, prior_count) orelse
+        return error.InvalidParameter;
+    if (prior_count != 0) {
+        const raw_priors = c.calloc(prior_count, @sizeOf(u32)) orelse
+            return error.OutOfMemory;
+        plan.pdwPriorHnums = @ptrCast(@alignCast(raw_priors));
+    }
+
+    var prior_offset: usize = 0;
+    for (result.priors, 0..) |prior, index| {
+        plan.pItems[index].dwPriorOffset = @intCast(prior_offset);
+        plan.pItems[index].dwPriorCount = @intCast(prior.items.len);
+        for (prior.items) |hnum| {
+            plan.pdwPriorHnums[prior_offset] = hnum;
+            prior_offset += 1;
+        }
+    }
+
+    plan.dwProblemCount = std.math.cast(u32, result.problems.len) orelse
+        return error.InvalidParameter;
+    if (result.problems.len != 0) {
+        const raw_problems = c.calloc(
+            result.problems.len,
+            @sizeOf(c.TDNF_REPOMD_NATIVE_TRANSACTION_PROBLEM),
+        ) orelse return error.OutOfMemory;
+        plan.pProblems = @ptrCast(@alignCast(raw_problems));
+    }
+    for (result.problems, 0..) |problem, index| {
+        const out = &plan.pProblems[index];
+        out.nType = @intFromEnum(problem.kind);
+        out.dwInputIndex = std.math.cast(u32, problem.input_index) orelse
+            std.math.maxInt(u32);
+        out.pszPackage = try dupCString(problem.package);
+        if (problem.related_package) |related| {
+            out.pszRelatedPackage = try dupCString(related);
+        }
+        out.pszSubject = try dupCString(problem.subject);
+        out.dwCount = problem.count;
+    }
+    return plan;
+}
+
+fn mapPlanBuildError(err: anyerror) TransactionError {
+    return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.InvalidParameter,
+    };
+}
+
+pub export fn TDNFRepoMdNativeTransactionPlanFree(
+    plan: ?*c.TDNF_REPOMD_NATIVE_TRANSACTION_PLAN,
+) void {
+    freeOwnedPlan(plan);
+}
+
+fn freeOwnedPlan(plan_raw: ?*c.TDNF_REPOMD_NATIVE_TRANSACTION_PLAN) void {
+    const plan = plan_raw orelse return;
+    if (plan.pProblems != null) {
+        for (plan.pProblems[0..plan.dwProblemCount]) |problem| {
+            if (problem.pszPackage != null) c.free(@constCast(problem.pszPackage));
+            if (problem.pszRelatedPackage != null) c.free(@constCast(problem.pszRelatedPackage));
+            if (problem.pszSubject != null) c.free(@constCast(problem.pszSubject));
+        }
+        c.free(plan.pProblems);
+    }
+    if (plan.pdwPriorHnums != null) c.free(plan.pdwPriorHnums);
+    if (plan.pItems != null) c.free(plan.pItems);
+    if (plan.pdwOrderIndices != null) c.free(plan.pdwOrderIndices);
+    c.free(plan);
 }
 
 fn invalidParameter(comptime fmt: []const u8, args: anytype) u32 {
@@ -413,15 +975,26 @@ fn mapTransactionError(err: anyerror) u32 {
 fn loadInstalledRepositoryModel(
     arena: std.mem.Allocator,
     root_dir: ?[*:0]const u8,
-) TransactionError!model.RepositoryModel {
+    config: ?*const c.tdnf_rpm_config,
+) TransactionError!InstalledRepository {
     var builder = RepositoryBuilder.init(arena);
-    const iter = c.tdnf_rpmdb_iter_open(root_dir) orelse return error.RpmDbOpenFailed;
+    var hnums = std.array_list.Managed(u32).init(arena);
+    const iter = if (config) |rpm_config|
+        c.tdnf_rpmdb_iter_open_config(rpm_config)
+    else
+        c.tdnf_rpmdb_iter_open(root_dir) orelse return error.RpmDbOpenFailed;
     defer c.tdnf_rpmdb_iter_close(iter);
 
     while (true) {
         var blob_ptr: ?[*]const u8 = null;
         var blob_len: usize = 0;
-        const rc = c.tdnf_rpmdb_iter_next_header_blob(iter, &blob_ptr, &blob_len);
+        var hnum: u32 = 0;
+        const rc = c.tdnf_rpmdb_iter_next_header_blob_hnum(
+            iter,
+            &hnum,
+            &blob_ptr,
+            &blob_len,
+        );
         if (rc == 0) {
             break;
         }
@@ -453,22 +1026,112 @@ fn loadInstalledRepositoryModel(
             .relations = built.relations,
             .files = built.files,
         });
+        try hnums.append(hnum);
     }
 
-    return try builder.finish();
+    return .{
+        .repository = try builder.finish(),
+        .hnums = try hnums.toOwnedSlice(),
+    };
+}
+
+fn normalizeTransactionItems(
+    allocator: std.mem.Allocator,
+    raw_items: RawTransactionItems,
+) TransactionError![]TransactionInput {
+    const item_count = switch (raw_items) {
+        .legacy_paths => |items| items.len,
+        .paths_v2 => |items| items.len,
+        .verified => |items| items.items.len,
+    };
+    const inputs = try allocator.alloc(TransactionInput, item_count);
+
+    switch (raw_items) {
+        .legacy_paths => |items| {
+            for (items, inputs) |item, *input| {
+                input.* = .{
+                    .operation = item.dwOperation,
+                    .path = if (item.pszPath) |value| std.mem.span(value) else null,
+                    .name = if (item.pszName) |value| std.mem.span(value) else null,
+                    .evr = if (item.pszEVR) |value| std.mem.span(value) else null,
+                    .arch = if (item.pszArch) |value| std.mem.span(value) else null,
+                    .rpmdb_hnum = 0,
+                };
+            }
+        },
+        .paths_v2 => |items| {
+            for (items, inputs) |item, *input| {
+                input.* = .{
+                    .operation = item.dwOperation,
+                    .path = if (item.pszPath) |value| std.mem.span(value) else null,
+                    .name = if (item.pszName) |value| std.mem.span(value) else null,
+                    .evr = if (item.pszEVR) |value| std.mem.span(value) else null,
+                    .arch = if (item.pszArch) |value| std.mem.span(value) else null,
+                    .rpmdb_hnum = item.dwRpmDbHnum,
+                };
+            }
+        },
+        .verified => |items| {
+            for (items.items, inputs, 0..) |item, *input, index| {
+                const header_length = items.header_lengths[index];
+                const needs_header =
+                    item.dwOperation == c.TDNF_REPOMD_NATIVE_TRANSACTION_OP_INSTALL or
+                    item.dwOperation == c.TDNF_REPOMD_NATIVE_TRANSACTION_OP_REINSTALL or
+                    item.dwOperation == c.TDNF_REPOMD_NATIVE_TRANSACTION_OP_UPGRADE;
+                if (needs_header and header_length == 0) {
+                    setError(
+                        "verified transaction item {d} has no header bytes",
+                        .{index},
+                    );
+                    return error.InvalidParameter;
+                }
+                const header_blob = if (header_length == 0)
+                    null
+                else if (items.headers[index]) |value|
+                    value[0..header_length]
+                else {
+                    setError(
+                        "verified transaction item {d} has a header length " ++ "but no header bytes",
+                        .{index},
+                    );
+                    return error.InvalidParameter;
+                };
+                input.* = .{
+                    .operation = item.dwOperation,
+                    .path = if (item.pszPath) |value| std.mem.span(value) else null,
+                    .name = if (item.pszName) |value| std.mem.span(value) else null,
+                    .evr = if (item.pszEVR) |value| std.mem.span(value) else null,
+                    .arch = if (item.pszArch) |value| std.mem.span(value) else null,
+                    .rpmdb_hnum = item.dwRpmDbHnum,
+                    .header_blob = header_blob,
+                    .package_size = items.package_sizes[index],
+                };
+            }
+        },
+    }
+    return inputs;
 }
 
 fn parseTransaction(
     arena: std.mem.Allocator,
-    items: []const c.TDNF_REPOMD_NATIVE_TRANSACTION_ITEM,
-    installed_repo: model.RepositoryModel,
+    items: []const TransactionInput,
+    installed: InstalledRepository,
 ) TransactionError!ParsedTransaction {
-    var tx = try ParsedTransaction.init(arena, installed_repo.packages.len);
+    const installed_repo = installed.repository;
+    if (installed.hnums.len != installed_repo.packages.len) {
+        setError("installed rpmdb hnum/package count mismatch", .{});
+        return error.InvalidParameter;
+    }
+    var tx = try ParsedTransaction.init(
+        arena,
+        installed_repo.packages.len,
+        items.len,
+    );
     @memset(tx.erase_mask, false);
     @memset(tx.replace_mask, false);
 
     for (items, 0..) |item, input_index| {
-        const op = switch (item.dwOperation) {
+        const op = switch (item.operation) {
             c.TDNF_REPOMD_NATIVE_TRANSACTION_OP_INSTALL => TransactionOperation.install,
             c.TDNF_REPOMD_NATIVE_TRANSACTION_OP_REINSTALL => TransactionOperation.reinstall,
             c.TDNF_REPOMD_NATIVE_TRANSACTION_OP_ERASE => TransactionOperation.erase,
@@ -477,29 +1140,53 @@ fn parseTransaction(
         };
         switch (op) {
             .install, .reinstall, .upgrade => {
-                const path = item.pszPath orelse {
-                    setError("transaction item {d} missing rpm path", .{input_index});
-                    return error.InvalidParameter;
-                };
-                const path_text = std.mem.span(path);
-                const path_z = std.heap.c_allocator.dupeZ(u8, path_text) catch return error.OutOfMemory;
-                defer std.heap.c_allocator.free(path_z);
-
-                var rpm = rpm_pkgfile.RpmFile.open(std.heap.c_allocator, path_z) catch |err| {
-                    setError("failed to open rpm {s}: {t}", .{ path_text, err });
-                    return switch (err) {
-                        error.OutOfMemory => error.OutOfMemory,
-                        error.OpenFailed, error.StatFailed, error.ReadFailed => error.FileSystemIo,
-                        error.BadLeadMagic, error.HeaderParseFailed => error.InvalidRpmHeader,
-                        error.UnsupportedCompressor => error.UnsupportedCompressor,
-                        error.DecompressFailed => error.DecompressFailed,
+                const path_text = item.path orelse "";
+                const built = if (item.header_blob) |blob| blk: {
+                    const hdr = rpm_header.Header.parseWithRegion(
+                        blob,
+                        .immutable,
+                        true,
+                    ) catch {
+                        setError(
+                            "verified transaction item {d} has an invalid " ++ "rpm header",
+                            .{input_index},
+                        );
+                        return error.InvalidRpmHeader;
                     };
-                };
-                defer rpm.close(std.heap.c_allocator);
+                    break :blk rpmpkg.buildFromHeader(arena, hdr, .{
+                        .location = .{ .href = path_text },
+                        .package_size = item.package_size,
+                    }) catch |err| return switch (err) {
+                        error.OutOfMemory => error.OutOfMemory,
+                        else => error.InvalidRpmHeader,
+                    };
+                } else blk: {
+                    if (item.path == null) {
+                        setError("transaction item {d} missing rpm path", .{input_index});
+                        return error.InvalidParameter;
+                    }
+                    const path_z = std.heap.c_allocator.dupeZ(u8, path_text) catch
+                        return error.OutOfMemory;
+                    defer std.heap.c_allocator.free(path_z);
 
-                const built = rpmpkg.buildFromRpmFile(arena, &rpm, path_text) catch |err| return switch (err) {
-                    error.OutOfMemory => error.OutOfMemory,
-                    else => error.InvalidRpmHeader,
+                    var rpm = rpm_pkgfile.RpmFile.open(
+                        std.heap.c_allocator,
+                        path_z,
+                    ) catch |err| {
+                        setError("failed to open rpm {s}: {t}", .{ path_text, err });
+                        return switch (err) {
+                            error.OutOfMemory => error.OutOfMemory,
+                            error.OpenFailed, error.StatFailed, error.ReadFailed => error.FileSystemIo,
+                            error.BadLeadMagic, error.HeaderParseFailed => error.InvalidRpmHeader,
+                            error.UnsupportedCompressor => error.UnsupportedCompressor,
+                            error.DecompressFailed => error.DecompressFailed,
+                        };
+                    };
+                    defer rpm.close(std.heap.c_allocator);
+                    break :blk rpmpkg.buildFromRpmFile(arena, &rpm, path_text) catch |err| return switch (err) {
+                        error.OutOfMemory => error.OutOfMemory,
+                        else => error.InvalidRpmHeader,
+                    };
                 };
                 try tx.added.append(.{
                     .input_index = input_index,
@@ -513,10 +1200,16 @@ fn parseTransaction(
             },
             .erase => {
                 const query = try parseEraseQuery(item, input_index);
-                const match_index = findInstalledEraseMatch(installed_repo, query) orelse {
+                const match_index = findInstalledEraseMatch(
+                    installed,
+                    query,
+                    item.rpmdb_hnum,
+                    tx.erase_mask,
+                ) orelse {
                     setError(
-                        "failed to match erase target {s}-{s}.{s} in installed rpmdb",
+                        "failed to match erase target hnum {d} " ++ "{s}-{s}.{s} in installed rpmdb",
                         .{
+                            item.rpmdb_hnum,
                             query.name,
                             formatEvrForError(query.evr),
                             query.arch orelse "",
@@ -534,40 +1227,36 @@ fn parseTransaction(
         }
     }
 
-    // Two-pass replacement detection:
-    //   pass 1: exact NEVRA match (reinstall or install-of-already-installed)
-    //   pass 2: name+arch match against an `upgrade` op — the solver has
-    //           already decided this addition supersedes the installed
-    //           instance, so mark the installed row as replaced so it
-    //           drops out of the "final" repository view. This is what
-    //           lets the file-conflict check ignore paths that the OLD
-    //           version legitimately shares with (or hands off to) the
-    //           NEW version. Plain `install` op is NOT enough — the
-    //           tdnf-multi multi-install case shares name+arch but must
-    //           coexist, and the solver emits `install` for it.
-    for (installed_repo.packages, 0..) |pkg, installed_index| {
-        if (tx.erase_mask[installed_index]) {
+    // Select exact prior Packages rows for every replacement operation.
+    // Reinstalls supersede every duplicate exact NEVRA+arch row. Upgrades
+    // select name+arch only, so a normal multilib transaction gets one
+    // independent prior per architecture. Multiple same-arch upgrade priors
+    // are retained in the plan and reported before execution can start.
+    for (tx.added.items) |added| {
+        if (added.op != .reinstall and added.op != .upgrade) {
             continue;
         }
-        for (tx.added.items) |added| {
-            if (sameNevra(pkg, added.view.pkg)) {
-                tx.replace_mask[installed_index] = true;
-                break;
-            }
-        }
-    }
-    for (installed_repo.packages, 0..) |pkg, installed_index| {
-        if (tx.erase_mask[installed_index] or tx.replace_mask[installed_index]) {
-            continue;
-        }
-        for (tx.added.items) |added| {
-            if (added.op != .upgrade) {
+        for (installed_repo.packages, 0..) |pkg, installed_index| {
+            if (tx.erase_mask[installed_index]) {
                 continue;
             }
-            if (sameNameArch(pkg, added.view.pkg)) {
-                tx.replace_mask[installed_index] = true;
-                break;
+            const selected = switch (added.op) {
+                .reinstall => sameNevra(pkg, added.view.pkg),
+                .upgrade => sameNameArch(pkg, added.view.pkg),
+                else => false,
+            };
+            if (!selected) {
+                continue;
             }
+            if (tx.replace_mask[installed_index]) {
+                setError(
+                    "installed hnum {d} is selected by multiple replacement items",
+                    .{installed.hnums[installed_index]},
+                );
+                return error.InvalidParameter;
+            }
+            tx.replace_mask[installed_index] = true;
+            try tx.priors[added.input_index].append(installed.hnums[installed_index]);
         }
     }
 
@@ -620,17 +1309,20 @@ fn collectNativeProblems(
     final_build: FinalBuildResult,
     installed_index: *const query_index.RepositoryIndex,
     final_index: *const query_index.RepositoryIndex,
+    config: ?*const c.tdnf_rpm_config,
 ) TransactionError!void {
     for (tx.added.items, 0..) |added, added_index| {
         const source_final = final_build.added_to_final[added_index];
         try collectAddedPackageProblems(
             arena,
             problems,
+            added.input_index,
             added.view,
             source_final,
             installed_index,
             final_index,
             final_build.added_base,
+            config,
         );
     }
 
@@ -644,18 +1336,28 @@ fn collectNativeProblems(
             .relations = installed_repo.relations,
             .files = installed_repo.files,
         };
-        try collectRemainingPackageProblems(arena, problems, source, source_final, tx, final_index);
+        try collectRemainingPackageProblems(
+            arena,
+            problems,
+            source,
+            source_final,
+            tx,
+            installed_repo,
+            final_index,
+        );
     }
 }
 
 fn collectAddedPackageProblems(
     arena: std.mem.Allocator,
     problems: *ProblemCollector,
+    input_index: usize,
     source: PackageView,
     source_final_index: usize,
     installed_index: *const query_index.RepositoryIndex,
     final_index: *const query_index.RepositoryIndex,
     added_base: usize,
+    config: ?*const c.tdnf_rpm_config,
 ) TransactionError!void {
     for (source.relationEntries(.requires)) |relation| {
         if (shouldSkipFinalRequire(relation)) {
@@ -671,13 +1373,27 @@ fn collectAddedPackageProblems(
             continue;
         }
 
-        const msg = try formatMissingRequireMessage(arena, source, relation, (relation.sense & sense_pretrans) != 0);
-        try problems.add(msg);
+        try problems.add(try makeMissingRequireProblem(
+            arena,
+            input_index,
+            source,
+            relation,
+            (relation.sense & sense_pretrans) != 0,
+        ));
     }
 
-    try collectConflictStyleProblems(arena, problems, source, source_final_index, final_index, .conflicts);
-    try collectConflictStyleProblems(arena, problems, source, source_final_index, final_index, .obsoletes);
-    try collectFileConflictProblems(arena, problems, source, source_final_index, final_index, added_base);
+    try collectConflictStyleProblems(arena, problems, input_index, source, source_final_index, final_index, .conflicts);
+    try collectConflictStyleProblems(arena, problems, input_index, source, source_final_index, final_index, .obsoletes);
+    try collectFileConflictProblems(
+        arena,
+        problems,
+        input_index,
+        source,
+        source_final_index,
+        final_index,
+        added_base,
+        config,
+    );
 }
 
 fn collectRemainingPackageProblems(
@@ -686,32 +1402,68 @@ fn collectRemainingPackageProblems(
     source: PackageView,
     source_final_index: usize,
     tx: *const ParsedTransaction,
+    installed_repo: model.RepositoryModel,
     final_index: *const query_index.RepositoryIndex,
 ) TransactionError!void {
     for (source.relationEntries(.requires)) |relation| {
         if (shouldSkipFinalRequire(relation)) {
             continue;
         }
-        if (!relationMatchesAnyTransactionPackage(relation, tx.erased.items)) {
+
+        if (!relationMatchesRemovedOrReplacedPackage(
+            relation,
+            installed_repo,
+            tx,
+        )) {
             continue;
         }
 
-        const matches = try collectMatchingPackageIndices(arena, final_index, relation, null);
+        const matches = try collectMatchingPackageIndices(
+            arena,
+            final_index,
+            relation,
+            null,
+        );
         if (matches.len != 0) {
             continue;
         }
 
-        const msg = try formatMissingRequireMessage(arena, source, relation, false);
-        try problems.add(msg);
+        try problems.add(try makeMissingRequireProblem(
+            arena,
+            std.math.maxInt(u32),
+            source,
+            relation,
+            false,
+        ));
     }
 
     try collectTransitionConflictProblems(arena, problems, source, source_final_index, tx.added.items, .conflicts);
     try collectTransitionConflictProblems(arena, problems, source, source_final_index, tx.added.items, .obsoletes);
 }
 
+fn relationMatchesRemovedOrReplacedPackage(
+    relation: model.Relation,
+    installed_repo: model.RepositoryModel,
+    tx: *const ParsedTransaction,
+) bool {
+    for (installed_repo.packages, 0..) |_, index| {
+        if (!tx.erase_mask[index] and !tx.replace_mask[index]) {
+            continue;
+        }
+        if (relationMatchesPackage(
+            relation,
+            installedPackageView(installed_repo, index),
+        )) {
+            return true;
+        }
+    }
+    return false;
+}
+
 fn collectConflictStyleProblems(
     arena: std.mem.Allocator,
     problems: *ProblemCollector,
+    input_index: usize,
     source: PackageView,
     source_final_index: usize,
     final_index: *const query_index.RepositoryIndex,
@@ -728,8 +1480,13 @@ fn collectConflictStyleProblems(
             if (sameNevra(source.pkg, candidate.pkg)) {
                 continue;
             }
-            const msg = try formatConflictStyleMessage(arena, source, candidate, kind);
-            try problems.add(msg);
+            try problems.add(try makeConflictStyleProblem(
+                arena,
+                input_index,
+                source,
+                candidate,
+                kind,
+            ));
         }
     }
 }
@@ -749,8 +1506,13 @@ fn collectTransitionConflictProblems(
             if (!relationMatchesPackage(relation, added.view)) {
                 continue;
             }
-            const msg = try formatConflictStyleMessage(arena, source, added.view, kind);
-            try problems.add(msg);
+            try problems.add(try makeConflictStyleProblem(
+                arena,
+                added.input_index,
+                source,
+                added.view,
+                kind,
+            ));
         }
     }
 }
@@ -758,13 +1520,60 @@ fn collectTransitionConflictProblems(
 fn collectFileConflictProblems(
     arena: std.mem.Allocator,
     problems: *ProblemCollector,
+    input_index: usize,
     source: PackageView,
     source_final_index: usize,
     final_index: *const query_index.RepositoryIndex,
     added_base: usize,
+    config: ?*const c.tdnf_rpm_config,
 ) TransactionError!void {
     for (source.fileEntries()) |source_file| {
         if (source_file.kind == .dir) {
+            continue;
+        }
+
+        if (config != null) {
+            const source_identity = try canonicalPathForTransaction(
+                arena,
+                config,
+                source_file.path,
+            );
+            for (final_index.repository.packages, 0..) |pkg, candidate_index| {
+                if (candidate_index == source_final_index or
+                    (candidate_index >= added_base and
+                        candidate_index < source_final_index))
+                {
+                    continue;
+                }
+                const candidate = PackageView{
+                    .pkg = pkg,
+                    .relations = final_index.repository.relations,
+                    .files = final_index.repository.files,
+                };
+                if (sameNevra(source.pkg, candidate.pkg)) continue;
+                for (candidate.fileEntries()) |candidate_file| {
+                    const candidate_identity = try canonicalPathForTransaction(
+                        arena,
+                        config,
+                        candidate_file.path,
+                    );
+                    if (!std.mem.eql(
+                        u8,
+                        source_identity,
+                        candidate_identity,
+                    ) or !fileEntriesConflict(source_file, candidate_file)) {
+                        continue;
+                    }
+                    try problems.add(try makeFileConflictProblem(
+                        arena,
+                        input_index,
+                        source,
+                        candidate,
+                        source_file.path,
+                    ));
+                    break;
+                }
+            }
             continue;
         }
 
@@ -790,10 +1599,36 @@ fn collectFileConflictProblems(
                 continue;
             }
 
-            const msg = try formatFileConflictMessage(arena, source, candidate, source_file.path);
-            try problems.add(msg);
+            try problems.add(try makeFileConflictProblem(
+                arena,
+                input_index,
+                source,
+                candidate,
+                source_file.path,
+            ));
         }
     }
+}
+
+fn canonicalPathForTransaction(
+    arena: std.mem.Allocator,
+    config: ?*const c.tdnf_rpm_config,
+    path: []const u8,
+) TransactionError![]const u8 {
+    const cfg = config orelse return path;
+    const path_z = try arena.dupeZ(u8, path);
+    var output: [4096]u8 = undefined;
+    if (c.tdnf_rpm_canonical_path_config(
+        cfg,
+        path_z.ptr,
+        &output,
+        output.len,
+    ) != 0) {
+        setError("canonical transaction path failed: {s}", .{path});
+        return error.InvalidParameter;
+    }
+    return arena.dupe(u8, std.mem.sliceTo(&output, 0)) catch
+        return error.OutOfMemory;
 }
 
 fn buildNativeOrder(
@@ -1021,18 +1856,6 @@ fn collectMatchingPackageIndices(
     return try results.toOwnedSlice();
 }
 
-fn relationMatchesAnyTransactionPackage(
-    relation: model.Relation,
-    items: []const TransactionPackage,
-) bool {
-    for (items) |item| {
-        if (relationMatchesPackage(relation, item.view)) {
-            return true;
-        }
-    }
-    return false;
-}
-
 fn relationMatchesPackage(
     relation: model.Relation,
     candidate: PackageView,
@@ -1097,64 +1920,128 @@ fn isUnorderedReq(sense: u32) bool {
     return (sense & unordered_only_mask) != 0 and (sense & force_order_only_mask) == 0;
 }
 
-fn formatMissingRequireMessage(
+fn makeMissingRequireProblem(
     arena: std.mem.Allocator,
+    input_index: usize,
     source: PackageView,
     relation: model.Relation,
     pretrans_hint: bool,
-) TransactionError![]const u8 {
+) TransactionError!NativeProblem {
     const source_nevra = try pkgquery.nevraString(arena, source.pkg);
     const relation_text = try pkgquery.formatRelation(arena, relation);
-    if (pretrans_hint) {
-        return try std.fmt.allocPrint(
-            arena,
-            "nothing provides {s} needed by {s}. Detected rpm pre-transaction dependency errors. Install {s} first to resolve this failure.",
-            .{ relation_text, source_nevra, relation_text },
-        );
-    }
-    return try std.fmt.allocPrint(
-        arena,
-        "nothing provides {s} needed by {s}",
-        .{ relation_text, source_nevra },
-    );
-}
-
-fn formatConflictStyleMessage(
-    arena: std.mem.Allocator,
-    source: PackageView,
-    candidate: PackageView,
-    kind: model.DependencyKind,
-) TransactionError![]const u8 {
-    const source_nevra = try pkgquery.nevraString(arena, source.pkg);
-    const candidate_nevra = try pkgquery.nevraString(arena, candidate.pkg);
-    return switch (kind) {
-        .conflicts => std.fmt.allocPrint(
-            arena,
-            "package {s} conflicts with {s}",
-            .{ source_nevra, candidate_nevra },
-        ),
-        .obsoletes => std.fmt.allocPrint(
-            arena,
-            "package {s} obsoletes {s}",
-            .{ source_nevra, candidate_nevra },
-        ),
-        else => unreachable,
+    return .{
+        .kind = if (pretrans_hint) .pretrans else .dependency,
+        .input_index = input_index,
+        .package = source_nevra,
+        .subject = relation_text,
     };
 }
 
-fn formatFileConflictMessage(
+fn makeConflictStyleProblem(
     arena: std.mem.Allocator,
+    input_index: usize,
+    source: PackageView,
+    candidate: PackageView,
+    kind: model.DependencyKind,
+) TransactionError!NativeProblem {
+    const source_nevra = try pkgquery.nevraString(arena, source.pkg);
+    const candidate_nevra = try pkgquery.nevraString(arena, candidate.pkg);
+    return .{
+        .kind = switch (kind) {
+            .conflicts => .conflict,
+            .obsoletes => .obsoletes,
+            else => unreachable,
+        },
+        .input_index = input_index,
+        .package = source_nevra,
+        .related_package = candidate_nevra,
+        .subject = "",
+    };
+}
+
+fn makeFileConflictProblem(
+    arena: std.mem.Allocator,
+    input_index: usize,
     source: PackageView,
     candidate: PackageView,
     path: []const u8,
-) TransactionError![]const u8 {
-    const source_nevra = try pkgquery.nevraString(arena, source.pkg);
-    const candidate_nevra = try pkgquery.nevraString(arena, candidate.pkg);
-    return try std.fmt.allocPrint(
-        arena,
-        "file {s} from install of {s} conflicts with file from package {s}",
-        .{ path, source_nevra, candidate_nevra },
-    );
+) TransactionError!NativeProblem {
+    return .{
+        .kind = .file_conflict,
+        .input_index = input_index,
+        .package = try pkgquery.nevraString(arena, source.pkg),
+        .related_package = try pkgquery.nevraString(arena, candidate.pkg),
+        .subject = path,
+    };
+}
+
+fn formatProblemLines(
+    arena: std.mem.Allocator,
+    problems: []const NativeProblem,
+) TransactionError![][]const u8 {
+    const lines = try arena.alloc([]const u8, problems.len);
+    for (problems, lines) |problem, *line| {
+        line.* = switch (problem.kind) {
+            .dependency => try std.fmt.allocPrint(
+                arena,
+                "nothing provides {s} needed by {s}",
+                .{ problem.subject, problem.package },
+            ),
+            .pretrans => try std.fmt.allocPrint(
+                arena,
+                "nothing provides {s} needed by {s}. Detected rpm pre-transaction dependency errors. Install {s} first to resolve this failure.",
+                .{ problem.subject, problem.package, problem.subject },
+            ),
+            .conflict => try std.fmt.allocPrint(
+                arena,
+                "package {s} conflicts with {s}",
+                .{ problem.package, problem.related_package orelse "" },
+            ),
+            .obsoletes => try std.fmt.allocPrint(
+                arena,
+                "package {s} obsoletes {s}",
+                .{ problem.package, problem.related_package orelse "" },
+            ),
+            .file_conflict => try std.fmt.allocPrint(
+                arena,
+                "file {s} from install of {s} conflicts with file from package {s}",
+                .{
+                    problem.subject,
+                    problem.package,
+                    problem.related_package orelse "",
+                },
+            ),
+            .unsupported_multiple => try std.fmt.allocPrint(
+                arena,
+                "package {s} has {d} installed {s} instances selected for one upgrade; remove extra instances or configure the package as installonly",
+                .{ problem.package, problem.count, problem.subject },
+            ),
+        };
+    }
+    return lines;
+}
+
+fn collectMultiplicityProblems(
+    arena: std.mem.Allocator,
+    problems: *ProblemCollector,
+    tx: *const ParsedTransaction,
+) TransactionError!void {
+    for (tx.added.items) |added| {
+        if (added.op != .upgrade) {
+            continue;
+        }
+        const priors = tx.priors[added.input_index].items;
+        if (priors.len <= 1) {
+            continue;
+        }
+        try problems.add(.{
+            .kind = .unsupported_multiple,
+            .input_index = added.input_index,
+            .package = try pkgquery.nevraString(arena, added.view.pkg),
+            .subject = added.view.pkg.nevra.name,
+            .count = @intCast(priors.len),
+        });
+    }
 }
 
 fn buildIndexLines(arena: std.mem.Allocator, indexes: []const usize) TransactionError![][]const u8 {
@@ -1163,6 +2050,62 @@ fn buildIndexLines(arena: std.mem.Allocator, indexes: []const usize) Transaction
         out[index] = try std.fmt.allocPrint(arena, "{d}", .{value});
     }
     return out;
+}
+
+fn validateOrderPermutation(
+    arena: std.mem.Allocator,
+    indexes: []const usize,
+    item_count: usize,
+) TransactionError!void {
+    if (indexes.len != item_count) {
+        setError(
+            "native transaction order has {d} entries for {d} inputs",
+            .{ indexes.len, item_count },
+        );
+        return error.InvalidParameter;
+    }
+
+    const seen = try arena.alloc(bool, item_count);
+    @memset(seen, false);
+    for (indexes) |index| {
+        if (index >= item_count) {
+            setError(
+                "native transaction order index {d} is out of range",
+                .{index},
+            );
+            return error.InvalidParameter;
+        }
+        if (seen[index]) {
+            setError(
+                "native transaction order repeats input index {d}",
+                .{index},
+            );
+            return error.InvalidParameter;
+        }
+        seen[index] = true;
+    }
+}
+
+fn tryBuildIndexArray(indexes: []const usize) !?[*c]u32 {
+    if (indexes.len == 0) return null;
+    const raw = c.calloc(indexes.len, @sizeOf(u32)) orelse
+        return error.OutOfMemory;
+    const out: [*c]u32 = @ptrCast(@alignCast(raw));
+    errdefer c.free(raw);
+    for (indexes, 0..) |value, index| {
+        out[index] = std.math.cast(u32, value) orelse
+            return error.InvalidParameter;
+    }
+    return out;
+}
+
+fn freeCStringArray(items: ?[*c][*c]u8) void {
+    const array = items orelse return;
+    var index: usize = 0;
+    while (array[index] != null) : (index += 1) {
+        c.free(@ptrCast(array[index]));
+    }
+    c.free(@ptrCast(array));
 }
 
 fn tryBuildCStringArray(items: []const []const u8) !?[*c][*c]u8 {
@@ -1191,21 +2134,21 @@ fn dupCString(text: []const u8) ![*:0]u8 {
 }
 
 fn parseEraseQuery(
-    item: c.TDNF_REPOMD_NATIVE_TRANSACTION_ITEM,
+    item: TransactionInput,
     input_index: usize,
 ) TransactionError!EraseQuery {
-    const name = item.pszName orelse {
+    const name = item.name orelse {
         setError("transaction erase item {d} missing name", .{input_index});
         return error.InvalidParameter;
     };
-    const evr_text = item.pszEVR orelse {
+    const evr_text = item.evr orelse {
         setError("transaction erase item {d} missing evr", .{input_index});
         return error.InvalidParameter;
     };
     return .{
-        .name = std.mem.span(name),
-        .evr = splitEvr(std.mem.span(evr_text)),
-        .arch = if (item.pszArch != null) std.mem.span(item.pszArch) else null,
+        .name = name,
+        .evr = splitEvr(evr_text),
+        .arch = item.arch,
     };
 }
 
@@ -1246,8 +2189,20 @@ fn splitEvr(evr: []const u8) EvrParts {
     };
 }
 
-fn findInstalledEraseMatch(repo: model.RepositoryModel, query: EraseQuery) ?usize {
+fn findInstalledEraseMatch(
+    installed: InstalledRepository,
+    query: EraseQuery,
+    wanted_hnum: u32,
+    selected: []const bool,
+) ?usize {
+    const repo = installed.repository;
     for (repo.packages, 0..) |pkg, index| {
+        if (selected[index]) {
+            continue;
+        }
+        if (wanted_hnum != 0 and installed.hnums[index] != wanted_hnum) {
+            continue;
+        }
         if (!std.mem.eql(u8, pkg.nevra.name, query.name)) {
             continue;
         }
@@ -1316,6 +2271,341 @@ fn formatEvrForError(parts: EvrParts) []const u8 {
     return "(unknown)";
 }
 
+test "verified transaction input never reopens diagnostic path" {
+    const header_blob = try rpmpkg.makeMinimalTransactionHeaderForTest(
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(header_blob);
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const raw_items = [_]c.TDNF_REPOMD_NATIVE_TRANSACTION_ITEM_V2{.{
+        .dwOperation = c.TDNF_REPOMD_NATIVE_TRANSACTION_OP_INSTALL,
+        .pszPath = "/path/replaced-after-verification.rpm",
+        .pszName = "verified-package",
+        .pszEVR = "1.0-1",
+        .pszArch = "noarch",
+        .dwRpmDbHnum = 0,
+    }};
+    const headers = [_]?[*]const u8{header_blob.ptr};
+    const header_lengths = [_]usize{header_blob.len};
+    const package_sizes = [_]u64{1234};
+    const inputs = try normalizeTransactionItems(
+        arena_state.allocator(),
+        .{ .verified = .{
+            .items = &raw_items,
+            .headers = &headers,
+            .header_lengths = &header_lengths,
+            .package_sizes = &package_sizes,
+        } },
+    );
+
+    const tx = try parseTransaction(
+        arena_state.allocator(),
+        inputs,
+        .{ .repository = .{}, .hnums = &.{} },
+    );
+    try std.testing.expectEqual(@as(usize, 1), tx.added.items.len);
+    try std.testing.expectEqualStrings(
+        "verified-package",
+        tx.added.items[0].view.pkg.nevra.name,
+    );
+    try std.testing.expectEqualStrings(
+        inputs[0].path.?,
+        tx.added.items[0].view.pkg.location.href,
+    );
+}
+
+test "duplicate NEVRA erases map and validate by exact rpmdb hnum" {
+    const testing = std.testing;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const relations = [_]model.Relation{
+        .{ .name = "duplicate-provider" },
+        .{ .name = "duplicate-provider" },
+    };
+    const provider = model.Package{
+        .pkg_id = "duplicate-provider",
+        .nevra = .{
+            .name = "duplicate-provider",
+            .version = "1.0",
+            .release = "1",
+            .arch = "noarch",
+        },
+        .checksum = .{ .kind = "sha256", .value = "provider" },
+        .location = .{ .href = "installed" },
+        .provides = .{ .start = 0, .len = 1 },
+    };
+    const consumer = model.Package{
+        .pkg_id = "remaining-consumer",
+        .nevra = .{
+            .name = "remaining-consumer",
+            .version = "1.0",
+            .release = "1",
+            .arch = "noarch",
+        },
+        .checksum = .{ .kind = "sha256", .value = "consumer" },
+        .location = .{ .href = "installed" },
+        .requires = .{ .start = 1, .len = 1 },
+    };
+    const installed_packages = [_]model.Package{
+        provider,
+        provider,
+        consumer,
+    };
+    const installed_hnums = [_]u32{ 41, 73, 89 };
+    const installed = InstalledRepository{
+        .repository = .{
+            .packages = @constCast(&installed_packages),
+            .relations = @constCast(&relations),
+        },
+        .hnums = &installed_hnums,
+    };
+
+    const second_only = [_]TransactionInput{.{
+        .operation = c.TDNF_REPOMD_NATIVE_TRANSACTION_OP_ERASE,
+        .path = null,
+        .name = "duplicate-provider",
+        .evr = "1.0-1",
+        .arch = "noarch",
+        .rpmdb_hnum = 73,
+    }};
+    const second_tx = try parseTransaction(arena, &second_only, installed);
+    try testing.expect(!second_tx.erase_mask[0]);
+    try testing.expect(second_tx.erase_mask[1]);
+    try testing.expect(!second_tx.erase_mask[2]);
+
+    const both = [_]TransactionInput{
+        .{
+            .operation = c.TDNF_REPOMD_NATIVE_TRANSACTION_OP_ERASE,
+            .path = null,
+            .name = "duplicate-provider",
+            .evr = "1.0-1",
+            .arch = "noarch",
+            .rpmdb_hnum = 73,
+        },
+        .{
+            .operation = c.TDNF_REPOMD_NATIVE_TRANSACTION_OP_ERASE,
+            .path = null,
+            .name = "duplicate-provider",
+            .evr = "1.0-1",
+            .arch = "noarch",
+            .rpmdb_hnum = 41,
+        },
+    };
+    var tx = try parseTransaction(arena, &both, installed);
+    try testing.expect(tx.erase_mask[0]);
+    try testing.expect(tx.erase_mask[1]);
+    try testing.expect(!tx.erase_mask[2]);
+
+    const final_build = try buildFinalRepository(
+        arena,
+        installed.repository,
+        &tx,
+    );
+    var installed_index = try query_index.RepositoryIndex.init(
+        arena,
+        &installed.repository,
+    );
+    var final_index = try query_index.RepositoryIndex.init(
+        arena,
+        &final_build.repository,
+    );
+    var problems = ProblemCollector.init(arena);
+    try collectNativeProblems(
+        arena,
+        &problems,
+        &tx,
+        installed.repository,
+        final_build,
+        &installed_index,
+        &final_index,
+        null,
+    );
+    try testing.expectEqual(@as(usize, 1), problems.problems.items.len);
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        problems.problems.items[0].subject,
+        1,
+        "duplicate-provider",
+    ));
+}
+
+test "install ignores unrelated pre-existing unsatisfied requirement" {
+    const testing = std.testing;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const missing_capability = "pre-existing-missing-capability";
+    const relations = [_]model.Relation{
+        .{ .name = missing_capability },
+    };
+    const retained_consumer = model.Package{
+        .pkg_id = "retained-consumer",
+        .nevra = .{
+            .name = "retained-consumer",
+            .version = "1.0",
+            .release = "1",
+            .arch = "noarch",
+        },
+        .checksum = .{ .kind = "sha256", .value = "consumer" },
+        .location = .{ .href = "installed" },
+        .requires = .{ .start = 0, .len = 1 },
+    };
+    const unrelated_package = model.Package{
+        .pkg_id = "unrelated-package",
+        .nevra = .{
+            .name = "unrelated-package",
+            .version = "1.0",
+            .release = "1",
+            .arch = "noarch",
+        },
+        .checksum = .{ .kind = "sha256", .value = "unrelated" },
+        .location = .{ .href = "unrelated-package-1.0-1.noarch.rpm" },
+    };
+    const installed_packages = [_]model.Package{retained_consumer};
+    const installed_repo = model.RepositoryModel{
+        .packages = @constCast(&installed_packages),
+        .relations = @constCast(&relations),
+    };
+
+    var tx = try ParsedTransaction.init(arena, installed_packages.len, 1);
+    @memset(tx.erase_mask, false);
+    @memset(tx.replace_mask, false);
+    try tx.added.append(.{
+        .input_index = 0,
+        .op = .install,
+        .view = .{
+            .pkg = unrelated_package,
+            .relations = &.{},
+            .files = &.{},
+        },
+    });
+
+    const final_build = try buildFinalRepository(arena, installed_repo, &tx);
+    var installed_index = try query_index.RepositoryIndex.init(
+        arena,
+        &installed_repo,
+    );
+    var final_index = try query_index.RepositoryIndex.init(
+        arena,
+        &final_build.repository,
+    );
+    var problems = ProblemCollector.init(arena);
+    try collectNativeProblems(
+        arena,
+        &problems,
+        &tx,
+        installed_repo,
+        final_build,
+        &installed_index,
+        &final_index,
+        null,
+    );
+
+    try testing.expectEqual(@as(usize, 0), problems.problems.items.len);
+}
+
+test "upgrade reports retained consumer requirement dropped by replacement" {
+    const testing = std.testing;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const capability = "phase7-capability-x";
+    const relations = [_]model.Relation{
+        .{ .name = capability },
+        .{ .name = capability },
+    };
+    const old_provider = model.Package{
+        .pkg_id = "phase7-provider-old",
+        .nevra = .{
+            .name = "phase7-provider",
+            .version = "1.0",
+            .release = "1",
+            .arch = "noarch",
+        },
+        .checksum = .{ .kind = "sha256", .value = "old-provider" },
+        .location = .{ .href = "installed" },
+        .provides = .{ .start = 0, .len = 1 },
+    };
+    const consumer = model.Package{
+        .pkg_id = "phase7-consumer",
+        .nevra = .{
+            .name = "phase7-consumer",
+            .version = "1.0",
+            .release = "1",
+            .arch = "noarch",
+        },
+        .checksum = .{ .kind = "sha256", .value = "consumer" },
+        .location = .{ .href = "installed" },
+        .requires = .{ .start = 1, .len = 1 },
+    };
+    const new_provider = model.Package{
+        .pkg_id = "phase7-provider-new",
+        .nevra = .{
+            .name = "phase7-provider",
+            .version = "2.0",
+            .release = "1",
+            .arch = "noarch",
+        },
+        .checksum = .{ .kind = "sha256", .value = "new-provider" },
+        .location = .{ .href = "phase7-provider-2.0-1.noarch.rpm" },
+    };
+    const installed_packages = [_]model.Package{ old_provider, consumer };
+    const installed_repo = model.RepositoryModel{
+        .packages = @constCast(&installed_packages),
+        .relations = @constCast(&relations),
+    };
+
+    var tx = try ParsedTransaction.init(arena, installed_packages.len, 1);
+    @memset(tx.erase_mask, false);
+    @memset(tx.replace_mask, false);
+    tx.replace_mask[0] = true;
+    try tx.added.append(.{
+        .input_index = 0,
+        .op = .upgrade,
+        .view = .{
+            .pkg = new_provider,
+            .relations = &.{},
+            .files = &.{},
+        },
+    });
+
+    const final_build = try buildFinalRepository(arena, installed_repo, &tx);
+    var installed_index = try query_index.RepositoryIndex.init(
+        arena,
+        &installed_repo,
+    );
+    var final_index = try query_index.RepositoryIndex.init(
+        arena,
+        &final_build.repository,
+    );
+    var problems = ProblemCollector.init(arena);
+    try collectNativeProblems(
+        arena,
+        &problems,
+        &tx,
+        installed_repo,
+        final_build,
+        &installed_index,
+        &final_index,
+        null,
+    );
+
+    try testing.expectEqual(@as(usize, 1), problems.problems.items.len);
+    try testing.expectEqual(ProblemKind.dependency, problems.problems.items[0].kind);
+    try testing.expectEqualStrings(capability, problems.problems.items[0].subject);
+    try testing.expect(std.mem.startsWith(
+        u8,
+        problems.problems.items[0].package,
+        "phase7-consumer-",
+    ));
+}
+
 test "native transaction order puts providers before install prereqs and consumers before erase prereqs" {
     const testing = std.testing;
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
@@ -1366,6 +2656,50 @@ test "native transaction order puts providers before install prereqs and consume
     try testing.expectEqual(@as(usize, 3), order[3]);
 }
 
+test "typed order preserves a complete mixed binary-item permutation" {
+    const testing = std.testing;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const pkg = model.Package{
+        .pkg_id = "mixed",
+        .nevra = .{
+            .name = "mixed",
+            .version = "1.0",
+            .release = "1",
+            .arch = "noarch",
+        },
+        .checksum = .{ .kind = "sha256", .value = "mixed" },
+        .location = .{ .href = "mixed.rpm" },
+    };
+    const view = PackageView{
+        .pkg = pkg,
+        .relations = &.{},
+        .files = &.{},
+    };
+    const added = [_]TransactionPackage{
+        .{ .input_index = 2, .op = .install, .view = view },
+        .{ .input_index = 0, .op = .install, .view = view },
+    };
+    const erased = [_]TransactionPackage{
+        .{ .input_index = 1, .op = .erase, .view = view },
+    };
+
+    const order = try buildNativeOrder(arena, &added, &erased);
+    try validateOrderPermutation(arena, order, 3);
+    try testing.expectEqualSlices(usize, &.{ 0, 2, 1 }, order);
+
+    try testing.expectError(
+        error.InvalidParameter,
+        validateOrderPermutation(arena, &.{ 0, 0, 1 }, 3),
+    );
+    try testing.expectError(
+        error.InvalidParameter,
+        validateOrderPermutation(arena, &.{ 0, 1, 3 }, 3),
+    );
+}
+
 test "native transaction reports unmet pretrans requirements with guidance" {
     const testing = std.testing;
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
@@ -1398,14 +2732,18 @@ test "native transaction reports unmet pretrans requirements with guidance" {
     try collectAddedPackageProblems(
         arena,
         &problems,
+        0,
         .{ .pkg = source_pkg, .relations = &source_rel, .files = &[_]model.FileEntry{} },
         0,
         &installed_index,
         &final_index,
         0,
+        null,
     );
-    try testing.expectEqual(@as(usize, 1), problems.messages.items.len);
-    try testing.expect(std.mem.containsAtLeast(u8, problems.messages.items[0], 1, "Detected rpm pre-transaction dependency errors."));
+    try testing.expectEqual(@as(usize, 1), problems.problems.items.len);
+    try testing.expectEqual(ProblemKind.pretrans, problems.problems.items[0].kind);
+    const lines = try formatProblemLines(arena, problems.problems.items);
+    try testing.expect(std.mem.containsAtLeast(u8, lines[0], 1, "Detected rpm pre-transaction dependency errors."));
 }
 
 test "native transaction reports duplicate file ownership conflicts" {
@@ -1444,17 +2782,87 @@ test "native transaction reports duplicate file ownership conflicts" {
     try collectAddedPackageProblems(
         arena,
         &problems,
+        0,
         .{ .pkg = pkg0, .relations = &[_]model.Relation{}, .files = &shared_files },
         0,
         &installed_index,
         &final_index,
         0,
+        null,
     );
-    try testing.expectEqual(@as(usize, 1), problems.messages.items.len);
+    try testing.expectEqual(@as(usize, 1), problems.problems.items.len);
+    const lines = try formatProblemLines(arena, problems.problems.items);
     try testing.expect(std.mem.containsAtLeast(
         u8,
-        problems.messages.items[0],
+        lines[0],
         1,
         "file /usr/lib/conflict/shared from install of conflict0-1.0-1.noarch conflicts with file from package conflict1-1.0-1.noarch",
     ));
+}
+
+test "native transaction detects conflicts across trusted root aliases" {
+    const testing = std.testing;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const config = c.tdnf_rpm_config_create("/") orelse
+        return error.TestUnexpectedResult;
+    defer c.tdnf_rpm_config_destroy(config);
+    var canonical_buf: [4096]u8 = undefined;
+    if (c.tdnf_rpm_canonical_path_config(
+        config,
+        "/lib/alias-conflict",
+        &canonical_buf,
+        canonical_buf.len,
+    ) != 0) {
+        return error.TestUnexpectedResult;
+    }
+    if (!std.mem.eql(
+        u8,
+        std.mem.sliceTo(&canonical_buf, 0),
+        "/usr/lib/alias-conflict",
+    )) {
+        return error.SkipZigTest;
+    }
+
+    const files = [_]model.FileEntry{
+        .{ .path = "/lib/alias-conflict", .kind = .plain },
+        .{ .path = "/usr/lib/alias-conflict", .kind = .plain },
+    };
+    const pkg0 = model.Package{
+        .pkg_id = "alias-conflict0",
+        .nevra = .{ .name = "alias-conflict0", .version = "1", .release = "1", .arch = "noarch" },
+        .checksum = .{ .kind = "sha256", .value = "0" },
+        .location = .{ .href = "alias-conflict0.rpm" },
+        .files = .{ .start = 0, .len = 1 },
+    };
+    const pkg1 = model.Package{
+        .pkg_id = "alias-conflict1",
+        .nevra = .{ .name = "alias-conflict1", .version = "1", .release = "1", .arch = "noarch" },
+        .checksum = .{ .kind = "sha256", .value = "1" },
+        .location = .{ .href = "alias-conflict1.rpm" },
+        .files = .{ .start = 1, .len = 1 },
+    };
+    const repo = model.RepositoryModel{
+        .packages = @constCast(&[_]model.Package{ pkg0, pkg1 }),
+        .files = @constCast(&files),
+    };
+    var installed_index = try query_index.RepositoryIndex.init(
+        arena,
+        &model.RepositoryModel{},
+    );
+    var final_index = try query_index.RepositoryIndex.init(arena, &repo);
+    var problems = ProblemCollector.init(arena);
+    try collectAddedPackageProblems(
+        arena,
+        &problems,
+        0,
+        .{ .pkg = pkg0, .relations = &.{}, .files = &files },
+        0,
+        &installed_index,
+        &final_index,
+        0,
+        config,
+    );
+    try testing.expectEqual(@as(usize, 1), problems.problems.items.len);
 }

@@ -5,10 +5,10 @@
 // of the License are located in the COPYING file of this distribution.
 
 const std = @import("std");
+const libc = std.c;
 
-const c = @cImport({
-    @cInclude("stdio.h");
-});
+extern var stdout: *libc.FILE;
+extern var stderr: *libc.FILE;
 
 const LOG_INFO: c_int = 0;
 const LOG_ERR: c_int = 1;
@@ -24,7 +24,7 @@ fn resetGlobalStateForTest() void {
     gbDnfCheckUpdateCompat = false;
 }
 
-fn tdnfLogGetStream(nLogLevel: c_int) ?*c.FILE {
+fn tdnfLogGetStream(nLogLevel: c_int) ?*libc.FILE {
     switch (nLogLevel) {
         LOG_INFO, LOG_CRIT => {
             if (gbJson) {
@@ -33,10 +33,10 @@ fn tdnfLogGetStream(nLogLevel: c_int) ?*c.FILE {
             if (nLogLevel == LOG_INFO and gbQuiet) {
                 return null;
             }
-            return c.stdout;
+            return stdout;
         },
         LOG_ERR => {
-            return c.stderr;
+            return stderr;
         },
         else => {
             return null;
@@ -66,7 +66,7 @@ export fn GlobalGetDnfCheckUpdateCompat() bool {
     return gbDnfCheckUpdateCompat;
 }
 
-export fn TDNFLogGetStream(nLogLevel: c_int) ?*c.FILE {
+export fn TDNFLogGetStream(nLogLevel: c_int) ?*libc.FILE {
     return tdnfLogGetStream(nLogLevel);
 }
 
@@ -74,14 +74,14 @@ test "GlobalSetQuiet only suppresses info logs" {
     resetGlobalStateForTest();
     defer resetGlobalStateForTest();
 
-    try std.testing.expect(tdnfLogGetStream(LOG_INFO) == c.stdout);
-    try std.testing.expect(tdnfLogGetStream(LOG_CRIT) == c.stdout);
-    try std.testing.expect(tdnfLogGetStream(LOG_ERR) == c.stderr);
+    try std.testing.expect(tdnfLogGetStream(LOG_INFO) == stdout);
+    try std.testing.expect(tdnfLogGetStream(LOG_CRIT) == stdout);
+    try std.testing.expect(tdnfLogGetStream(LOG_ERR) == stderr);
 
     GlobalSetQuiet(1);
     try std.testing.expect(tdnfLogGetStream(LOG_INFO) == null);
-    try std.testing.expect(tdnfLogGetStream(LOG_CRIT) == c.stdout);
-    try std.testing.expect(tdnfLogGetStream(LOG_ERR) == c.stderr);
+    try std.testing.expect(tdnfLogGetStream(LOG_CRIT) == stdout);
+    try std.testing.expect(tdnfLogGetStream(LOG_ERR) == stderr);
 
     GlobalSetQuiet(0);
     try std.testing.expect(tdnfLogGetStream(LOG_INFO) == null);
@@ -94,7 +94,7 @@ test "GlobalSetJson suppresses stdout logs and is one way" {
     GlobalSetJson(1);
     try std.testing.expect(tdnfLogGetStream(LOG_INFO) == null);
     try std.testing.expect(tdnfLogGetStream(LOG_CRIT) == null);
-    try std.testing.expect(tdnfLogGetStream(LOG_ERR) == c.stderr);
+    try std.testing.expect(tdnfLogGetStream(LOG_ERR) == stderr);
 
     GlobalSetJson(0);
     try std.testing.expect(tdnfLogGetStream(LOG_INFO) == null);
@@ -123,6 +123,6 @@ test "log setters ignore non positive values and unknown levels are suppressed" 
 
     GlobalSetQuiet(-1);
     GlobalSetJson(0);
-    try std.testing.expect(tdnfLogGetStream(LOG_INFO) == c.stdout);
+    try std.testing.expect(tdnfLogGetStream(LOG_INFO) == stdout);
     try std.testing.expect(tdnfLogGetStream(99) == null);
 }

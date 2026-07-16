@@ -287,19 +287,46 @@ def test_reposync_gpgcheck(utils):
     reponame = TESTREPO
     workdir = WORKDIR
     os.makedirs(workdir, exist_ok=True)
+    keypath = os.path.join(
+        utils.config['repo_path'], reponame, 'keys', 'pubkey.asc')
+    original_keys = utils._run("rpm -qa 'gpg-pubkey*'")['stdout']
+    utils.edit_config({'gpgkey': 'file://{}'.format(keypath)}, repo=reponame)
 
-    ret = utils.run(['tdnf',
+    try:
+        ret = utils.run(['tdnf', '-y',
+                         '--disablerepo=*', '--enablerepo={}'.format(reponame),
+                         '--gpgcheck',
+                         'reposync'],
+                        cwd=workdir)
+        assert ret['retval'] == 0
+        synced_dir = os.path.join(workdir, reponame)
+        assert os.path.isdir(synced_dir)
+
+        check_synced_repo(utils, reponame, synced_dir)
+
+        shutil.rmtree(synced_dir)
+    finally:
+        current_keys = utils._run("rpm -qa 'gpg-pubkey*'")['stdout']
+        for key in set(current_keys) - set(original_keys):
+            ret = utils._run('rpm -ev {}'.format(key))
+            assert ret['retval'] == 0
+
+
+def test_reposync_gpgcheck_rejection_does_not_create_keep_marker(utils):
+    reponame = 'photon-test-unsigned'
+
+    ret = utils.run(['tdnf', '-y',
                      '--disablerepo=*', '--enablerepo={}'.format(reponame),
-                     '--gpgcheck',
+                     '--gpgcheck', '--delete',
                      'reposync'],
-                    cwd=workdir)
+                    cwd=WORKDIR)
     assert ret['retval'] == 0
-    synced_dir = os.path.join(workdir, reponame)
+
+    synced_dir = os.path.join(WORKDIR, reponame)
     assert os.path.isdir(synced_dir)
-
-    check_synced_repo(utils, reponame, synced_dir)
-
-    shutil.rmtree(synced_dir)
+    for root, _, files in os.walk(synced_dir):
+        assert not [name for name in files
+                    if name.endswith(('.rpm', '.reposync-keep'))], root
 
 
 # reposync with --urls option (print only)

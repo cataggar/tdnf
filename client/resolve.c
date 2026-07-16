@@ -294,8 +294,8 @@ TDNFGetAutoInstalledOrphans(
         goto cleanup;
     }
 
-    dwError = TDNFRepoMdNativeAutoInstalledOrphanLines(
-                  TDNFNativeQueryInstallRoot(pTdnf),
+    dwError = TDNFRepoMdNativeAutoInstalledOrphanLinesConfig(
+                  pTdnf->pRpmConfig,
                   ppszAutoRefs,
                   &ppszOrphanRefs,
                   &dwOrphanCount);
@@ -572,10 +572,10 @@ TDNFResolveBuildDependencies(
                           &dwGoalRefCount);
             BAIL_ON_TDNF_ERROR(dwError);
 
-            dwError = TDNFRepoMdNativeRequiresForPackageRefs(
+            dwError = TDNFRepoMdNativeRequiresForPackageRefsConfig(
                           pRepos,
                           dwRepoCount,
-                          TDNFNativeQueryInstallRoot(pTdnf),
+                          pTdnf->pRpmConfig,
                           ppszGoalRefs,
                           &ppszGoalDeps,
                           &dwGoalDepCount);
@@ -585,10 +585,10 @@ TDNFResolveBuildDependencies(
     queue_empty(queueGoal);
 
     if (ppszPackageNameSpecs[0]) {
-        dwError = TDNFRepoMdNativeList(
+        dwError = TDNFRepoMdNativeListConfig(
                       pRepos,
                       dwRepoCount,
-                      TDNFNativeQueryInstallRoot(pTdnf),
+                      pTdnf->pRpmConfig,
                       SCOPE_SOURCE,
                       ppszPackageNameSpecs,
                       DETAIL_LIST,
@@ -603,10 +603,10 @@ TDNFResolveBuildDependencies(
                       &dwPkgRefCount);
         BAIL_ON_TDNF_ERROR(dwError);
 
-        dwError = TDNFRepoMdNativeRequiresForPackageRefs(
+        dwError = TDNFRepoMdNativeRequiresForPackageRefsConfig(
                       pRepos,
                       dwRepoCount,
-                      TDNFNativeQueryInstallRoot(pTdnf),
+                      pTdnf->pRpmConfig,
                       ppszPkgRefs,
                       &ppszPkgDeps,
                       &dwPkgDepCount);

@@ -32,14 +32,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            librpm-dev \
-            libsolv-dev \
-            libexpat1-dev \
-            libsqlite3-dev \
+            binutils \
+            createrepo-c \
+            gcc \
+            gnupg \
             libgpgme-dev \
-            libpopt-dev \
             liblua5.4-dev \
             pkg-config \
+            python3-openssl \
+            python3-pytest \
+            python3-requests \
+            rpm \
             flake8
 
       - name: Install Zig 0.16.0

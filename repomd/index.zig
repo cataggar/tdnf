@@ -1033,7 +1033,7 @@ fn expectAdvisoryIds(expected: []const []const u8, actual: []const []const u8) !
     }
 }
 
-test "rpm version comparison matches key rpmvercmp edge cases" {
+test "rpm version comparison matches key ordering edge cases" {
     const testing = std.testing;
 
     try testing.expectEqual(@as(i32, 0), compareEvr(0, "1", "1", null, "1", "1"));

@@ -23,6 +23,7 @@ uint32_t
 SolvReadInstalledRpmsNative(
     Repo* pRepo,
     const char *pszRootDir,
+    const tdnf_rpm_config *pRpmConfig,
     int dwFlags
     )
 {
@@ -34,7 +35,20 @@ SolvReadInstalledRpmsNative(
         BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
     }
 
-    dwError = TDNFRepoMdNativeLoadInstalledSolvRepo(pRepo, pszRootDir, dwFlags);
+    if(pRpmConfig)
+    {
+        dwError = TDNFRepoMdNativeLoadInstalledSolvRepoConfig(
+                      pRepo,
+                      pRpmConfig,
+                      dwFlags);
+    }
+    else
+    {
+        dwError = TDNFRepoMdNativeLoadInstalledSolvRepo(
+                      pRepo,
+                      pszRootDir,
+                      dwFlags);
+    }
     BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
 
 cleanup:

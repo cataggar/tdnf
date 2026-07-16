@@ -24,6 +24,7 @@ typedef struct _TDNF_
     PSolvSack pSack;
     PTDNF_CMD_ARGS pArgs;
     PTDNF_CONF pConf;
+    tdnf_rpm_config *pRpmConfig;
     PTDNF_REPO_DATA pRepos;
     Repo *pSolvCmdLineRepo;
     PTDNF_PLUGIN pPlugins;
@@ -52,8 +53,9 @@ typedef enum
 typedef struct _TDNF_RPM_TS_ITEM
 {
     TDNF_RPM_TS_ITEM_TYPE nType;
-    Header pHeader;
-    uint32_t dwDbOffset;
+    tdnf_rpm_file *pRpmFile;
+    uint32_t dwRpmDbHnum;
+    int nPackageKind;
     char *pszPath;
     char *pszName;
     char *pszEVR;
@@ -64,15 +66,12 @@ typedef struct _TDNF_RPM_TS_ITEM
 typedef struct _TDNF_RPM_TS_
 {
     int                     nQuiet;
-    rpmts                   pTS;
-    rpmtransFlags           nTransFlags;
-    FD_t                    pFD;
+    TDNF_RPMTRANS_FLAGS     nTransFlags;
     PTDNF_CACHED_RPM_LIST   pCachedRpmsArray;
     uint32_t                dwTransactionItemCount;
     PTDNF_RPM_TS_ITEM       pTransactionItems;
     PTDNF_RPM_TS_ITEM       pTransactionItemsTail;
-    char                    **ppszNativeProblems;
-    uint32_t                dwNativeProblemCount;
+    TDNF_REPOMD_NATIVE_TRANSACTION_PLAN *pNativePlan;
 } TDNFRPMTS, *PTDNFRPMTS;
 
 typedef struct _TDNF_REPO_METADATA

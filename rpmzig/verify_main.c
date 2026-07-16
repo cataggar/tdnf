@@ -21,13 +21,46 @@
  *   4 — internal error or unexpected status
  */
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "rpmdb.h"
 #include "verify.h"
 
-#define MAX_KEYS 128
+typedef struct key_list
+{
+    unsigned char **blobs;
+    size_t *lens;
+    unsigned char *is_rpmdb;
+    size_t count;
+    size_t capacity;
+} key_list;
+
+static int reserve_keys(key_list *keys, size_t needed)
+{
+    size_t capacity = keys->capacity ? keys->capacity : 16;
+    unsigned char **blobs = NULL;
+    size_t *lens = NULL;
+    unsigned char *is_rpmdb = NULL;
+
+    if (needed <= keys->capacity) return 0;
+    while (capacity < needed) {
+        if (capacity > (SIZE_MAX / 2)) return -1;
+        capacity *= 2;
+    }
+    blobs = realloc(keys->blobs, capacity * sizeof(*blobs));
+    if (!blobs) return -1;
+    keys->blobs = blobs;
+    lens = realloc(keys->lens, capacity * sizeof(*lens));
+    if (!lens) return -1;
+    keys->lens = lens;
+    is_rpmdb = realloc(keys->is_rpmdb, capacity * sizeof(*is_rpmdb));
+    if (!is_rpmdb) return -1;
+    keys->is_rpmdb = is_rpmdb;
+    keys->capacity = capacity;
+    return 0;
+}
 
 static int slurp(const char *path, unsigned char **out, size_t *out_len)
 {
@@ -71,14 +104,7 @@ int main(int argc, char **argv)
 {
     tdnf_rpm_file *fh = NULL;
     const char *path = NULL;
-    const char *key_paths[MAX_KEYS] = { 0 };
-    unsigned char *key_blobs[MAX_KEYS] = { 0 };
-    /* parallel array: 1 = blob was allocated by tdnf_rpmdb_pubkeys_*
-     * (free with tdnf_rpmdb_string_free); 0 = allocated by slurp()
-     * (free with free()). */
-    int key_is_rpmdb[MAX_KEYS] = { 0 };
-    size_t key_lens[MAX_KEYS] = { 0 };
-    size_t key_count = 0;
+    key_list keys = { 0 };
     int use_rpmdb = 0;
     const char *rpmdb_root = "/";
     int status = 0;
@@ -96,11 +122,15 @@ int main(int argc, char **argv)
     path = argv[1];
     for (i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--key") == 0 && i + 1 < argc) {
-            if (key_count >= MAX_KEYS) {
-                fprintf(stderr, "too many --key (max %d)\n", MAX_KEYS);
-                return 4;
+            if (reserve_keys(&keys, keys.count + 1) != 0) {
+                goto out;
             }
-            key_paths[key_count++] = argv[++i];
+            if (slurp(argv[++i], &keys.blobs[keys.count],
+                      &keys.lens[keys.count]) != 0) {
+                goto out;
+            }
+            keys.is_rpmdb[keys.count] = 0;
+            keys.count++;
         } else if (strcmp(argv[i], "--rpmdb") == 0) {
             use_rpmdb = 1;
             if (i + 1 < argc && argv[i + 1][0] != '-') {
@@ -122,13 +152,6 @@ int main(int argc, char **argv)
     printf("Signature: %s\n", tdnf_rpm_file_signature_kind(fh));
     fflush(stdout);
 
-    for (i = 0; i < (int)key_count; i++) {
-        if (slurp(key_paths[i], &key_blobs[i], &key_lens[i]) != 0) {
-            exit_code = 4;
-            goto out;
-        }
-    }
-
     if (use_rpmdb) {
         size_t loaded = 0;
         it = tdnf_rpmdb_pubkeys_open(rpmdb_root);
@@ -139,7 +162,7 @@ int main(int argc, char **argv)
             exit_code = 4;
             goto out;
         }
-        while (key_count < MAX_KEYS) {
+        while (1) {
             char *kbuf = NULL;
             size_t klen = 0;
             int n = tdnf_rpmdb_pubkeys_next(it, &kbuf, &klen, NULL);
@@ -150,17 +173,21 @@ int main(int argc, char **argv)
                 exit_code = 4;
                 goto out;
             }
-            key_blobs[key_count] = (unsigned char *)kbuf;
-            key_lens[key_count] = klen;
-            key_is_rpmdb[key_count] = 1;
-            key_count++;
+            if (reserve_keys(&keys, keys.count + 1) != 0) {
+                tdnf_rpmdb_string_free(kbuf);
+                goto out;
+            }
+            keys.blobs[keys.count] = (unsigned char *)kbuf;
+            keys.lens[keys.count] = klen;
+            keys.is_rpmdb[keys.count] = 1;
+            keys.count++;
             loaded++;
         }
         printf("RpmDB:     %zu key(s) under %s\n", loaded, rpmdb_root);
     }
 
     (void)tdnf_rpmzig_verify_pure(fh,
-        (const void *const *)key_blobs, key_lens, key_count, &status);
+        (const void *const *)keys.blobs, keys.lens, keys.count, &status);
 
     switch (status) {
         case TDNF_RPMZIG_STATUS_OK:
@@ -188,13 +215,16 @@ int main(int argc, char **argv)
 
 out:
     if (it) tdnf_rpmdb_pubkeys_close(it);
-    for (i = 0; i < (int)key_count; i++) {
-        if (key_is_rpmdb[i]) {
-            tdnf_rpmdb_string_free((char *)key_blobs[i]);
+    for (i = 0; i < (int)keys.count; i++) {
+        if (keys.is_rpmdb[i]) {
+            tdnf_rpmdb_string_free((char *)keys.blobs[i]);
         } else {
-            free(key_blobs[i]);
+            free(keys.blobs[i]);
         }
     }
+    free(keys.blobs);
+    free(keys.lens);
+    free(keys.is_rpmdb);
     tdnf_rpm_file_close(fh);
     return exit_code;
 }

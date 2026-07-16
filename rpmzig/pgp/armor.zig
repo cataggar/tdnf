@@ -12,6 +12,7 @@
 //! wire it into libtdnf's package-signature verify path.
 
 const std = @import("std");
+const packet = @import("packet.zig");
 
 /// Errors produced by `decode` / `decodeAny`.
 pub const ArmorError = error{
@@ -27,6 +28,9 @@ pub const ArmorError = error{
     InvalidBase64,
     /// Input ended mid-line before the BEGIN line was terminated.
     Truncated,
+    /// BEGIN/END labels did not describe complete public-key blocks,
+    /// or non-whitespace data appeared between concatenated blocks.
+    BadFraming,
     /// Allocator failed.
     OutOfMemory,
 };
@@ -40,6 +44,20 @@ pub const DecodedKey = struct {
     pub fn deinit(self: *DecodedKey) void {
         self.allocator.free(self.bytes);
         self.bytes = &.{};
+    }
+};
+
+/// Owned decoded blocks from concatenated public-key armor. Each block stays
+/// separate so callers that need certificate boundaries can validate them
+/// independently before combining any data.
+pub const DecodedBlocks = struct {
+    blocks: []DecodedKey,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *DecodedBlocks) void {
+        for (self.blocks) |*block| block.deinit();
+        self.allocator.free(self.blocks);
+        self.blocks = &.{};
     }
 };
 
@@ -102,6 +120,9 @@ pub fn decode(allocator: std.mem.Allocator, armored: []const u8) ArmorError!Deco
     while (crc_end < footer_idx and armored[crc_end] != '\n' and armored[crc_end] != '\r') : (crc_end += 1) {}
     const crc_b64 = armored[crc_start + 1 .. crc_end];
     if (crc_b64.len != 4) return error.BadCrc;
+    for (armored[crc_end..footer_idx]) |ch| {
+        if (!std.ascii.isWhitespace(ch)) return error.BadFraming;
+    }
 
     var crc_bytes: [3]u8 = undefined;
     std.base64.standard.Decoder.decode(&crc_bytes, crc_b64) catch return error.BadCrc;
@@ -131,18 +152,88 @@ pub fn decode(allocator: std.mem.Allocator, armored: []const u8) ArmorError!Deco
     return DecodedKey{ .bytes = out, .allocator = allocator };
 }
 
+/// Decode one or more concatenated ASCII-armored public-key blocks.
+///
+/// Unlike `decode`, this validates the exact public-key BEGIN/END
+/// labels and rejects non-whitespace between blocks. Each block's
+/// CRC-24 is checked before any decoded bytes are returned.
+pub fn decodeAll(allocator: std.mem.Allocator, armored: []const u8) ArmorError!DecodedKey {
+    var blocks = try decodeBlocks(allocator, armored);
+    defer blocks.deinit();
+
+    var decoded = std.array_list.Managed(u8).init(allocator);
+    errdefer decoded.deinit();
+    for (blocks.blocks) |block| try decoded.appendSlice(block.bytes);
+
+    return .{
+        .bytes = try decoded.toOwnedSlice(),
+        .allocator = allocator,
+    };
+}
+
+/// Decode one or more public-key armor blocks without erasing their
+/// boundaries. This is used by certificate import, where every armor block
+/// must independently begin with a primary key packet.
+pub fn decodeBlocks(
+    allocator: std.mem.Allocator,
+    armored: []const u8,
+) ArmorError!DecodedBlocks {
+    const begin_line = "-----BEGIN PGP PUBLIC KEY BLOCK-----";
+    const end_line = "-----END PGP PUBLIC KEY BLOCK-----";
+
+    var blocks = std.array_list.Managed(DecodedKey).init(allocator);
+    errdefer {
+        for (blocks.items) |*block| block.deinit();
+        blocks.deinit();
+    }
+
+    var pos: usize = 0;
+    while (true) {
+        while (pos < armored.len and std.ascii.isWhitespace(armored[pos])) : (pos += 1) {}
+        if (pos == armored.len) break;
+        if (!std.mem.startsWith(u8, armored[pos..], begin_line)) return error.BadFraming;
+
+        const begin_end = lineEnd(armored, pos) orelse return error.Truncated;
+        if (!std.mem.eql(u8, trimCr(armored[pos..begin_end]), begin_line))
+            return error.BadFraming;
+
+        const end_start = findExactLine(armored, begin_end + 1, end_line) orelse
+            return error.NoFooter;
+        const end_end = lineEndOrEof(armored, end_start);
+        if (!std.mem.eql(u8, trimCr(armored[end_start..end_end]), end_line))
+            return error.BadFraming;
+        var block = try decode(allocator, armored[pos..end_end]);
+        errdefer block.deinit();
+        var packets = packet.iterate(block.bytes);
+        const first = packets.next() catch return error.BadFraming;
+        if (first == null or first.?.tag != .public_key)
+            return error.BadFraming;
+        try blocks.append(block);
+
+        pos = end_end;
+        if (pos < armored.len and armored[pos] == '\r') pos += 1;
+        if (pos < armored.len and armored[pos] == '\n') pos += 1;
+    }
+    if (blocks.items.len == 0) return error.NoHeader;
+
+    return .{
+        .blocks = try blocks.toOwnedSlice(),
+        .allocator = allocator,
+    };
+}
+
 /// Convenience wrapper that accepts either ASCII armor or a raw
 /// binary OpenPGP packet stream. Detects armor by looking for
 /// `-----BEGIN PGP` as the first non-whitespace token; otherwise
 /// returns a freshly-allocated copy of the input so callers always
 /// own the returned buffer.
 pub fn decodeAny(allocator: std.mem.Allocator, blob: []const u8) ArmorError!DecodedKey {
-    if (looksLikeArmor(blob)) return decode(allocator, blob);
+    if (looksLikeArmor(blob)) return decodeAll(allocator, blob);
     const copy = try allocator.dupe(u8, blob);
     return DecodedKey{ .bytes = copy, .allocator = allocator };
 }
 
-fn looksLikeArmor(blob: []const u8) bool {
+pub fn looksLikeArmor(blob: []const u8) bool {
     var idx: usize = 0;
     while (idx < blob.len) : (idx += 1) {
         switch (blob[idx]) {
@@ -151,6 +242,32 @@ fn looksLikeArmor(blob: []const u8) bool {
         }
     }
     return false;
+}
+
+fn lineEnd(input: []const u8, start: usize) ?usize {
+    return std.mem.indexOfScalarPos(u8, input, start, '\n');
+}
+
+fn lineEndOrEof(input: []const u8, start: usize) usize {
+    return lineEnd(input, start) orelse input.len;
+}
+
+fn trimCr(line: []const u8) []const u8 {
+    return if (line.len != 0 and line[line.len - 1] == '\r')
+        line[0 .. line.len - 1]
+    else
+        line;
+}
+
+fn findExactLine(input: []const u8, start: usize, wanted: []const u8) ?usize {
+    var pos = start;
+    while (pos < input.len) {
+        const end = lineEndOrEof(input, pos);
+        if (std.mem.eql(u8, trimCr(input[pos..end]), wanted)) return pos;
+        if (end == input.len) return null;
+        pos = end + 1;
+    }
+    return null;
 }
 
 // -------------------------------------------------------------------
@@ -231,4 +348,50 @@ test "decodeAny on armored input matches decode" {
 
 test "decode rejects input with no BEGIN line" {
     try testing.expectError(error.NoHeader, decode(testing.allocator, "just some bytes\n"));
+}
+
+test "decodeAll accepts concatenated CRLF blocks" {
+    var input = std.array_list.Managed(u8).init(testing.allocator);
+    defer input.deinit();
+    for (0..2) |_| {
+        for (microsoft_key) |ch| {
+            if (ch == '\n') try input.append('\r');
+            try input.append(ch);
+        }
+    }
+
+    var keys = try decodeAll(testing.allocator, input.items);
+    defer keys.deinit();
+    var one = try decode(testing.allocator, microsoft_key);
+    defer one.deinit();
+    try testing.expectEqual(one.bytes.len * 2, keys.bytes.len);
+    try testing.expectEqualSlices(u8, one.bytes, keys.bytes[0..one.bytes.len]);
+    try testing.expectEqualSlices(u8, one.bytes, keys.bytes[one.bytes.len..]);
+}
+
+test "decodeAll rejects mismatched framing" {
+    var copy = try testing.allocator.dupe(u8, microsoft_key);
+    defer testing.allocator.free(copy);
+    const end = std.mem.indexOf(u8, copy, "-----END PGP PUBLIC KEY BLOCK-----") orelse
+        return error.TestUnexpectedResult;
+    copy[end + "-----END PGP ".len] = 'X';
+    try testing.expectError(error.NoFooter, decodeAll(testing.allocator, copy));
+}
+
+test "decodeAll rejects data between CRC and footer" {
+    const footer = std.mem.indexOf(
+        u8,
+        microsoft_key,
+        "-----END PGP PUBLIC KEY BLOCK-----",
+    ) orelse return error.TestUnexpectedResult;
+    var input = std.array_list.Managed(u8).init(testing.allocator);
+    defer input.deinit();
+    try input.appendSlice(microsoft_key[0..footer]);
+    try input.appendSlice("junk\n");
+    try input.appendSlice(microsoft_key[footer..]);
+
+    try testing.expectError(
+        error.BadFraming,
+        decodeAll(testing.allocator, input.items),
+    );
 }

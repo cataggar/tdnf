@@ -8,6 +8,8 @@ const api = @import("api.zig");
 const allocator = std.heap.c_allocator;
 
 const MockRpmdb = struct {
+    pub const Source = ?[*:0]const u8;
+
     var cookie_value: ?[:0]u8 = null;
     var packages: std.ArrayList([:0]u8) = .empty;
 

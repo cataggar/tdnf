@@ -530,13 +530,15 @@ SolvReadRpmsFromDirectory(
 uint32_t
 SolvReadInstalledRpms(
     Repo* pRepo,
-    const char *pszCacheFileName
+    const char *pszCacheFileName,
+    const tdnf_rpm_config *pRpmConfig
 );
 
 uint32_t
 SolvReadInstalledRpmsNative(
     Repo* pRepo,
     const char *pszRootDir,
+    const tdnf_rpm_config *pRpmConfig,
     int dwFlags
     );
 

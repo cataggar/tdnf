@@ -59,7 +59,7 @@ def setup_test(utils):
 
     if not utils.config.get('installed', False):
         build_dir = utils.config['build_dir']
-        test_dir = build_dir + '/pytests'
+        test_dir = utils.config['test_path']
         bin_dir = utils.config['bin_dir']
         tdnf_bin = os.path.join(bin_dir, 'tdnf')
         lib_dir = build_dir + '/lib'
@@ -74,7 +74,8 @@ def setup_test(utils):
 
         path += [bin_dir, test_dir, lib_dir, tdnf_bin]
         run_bash_cmd(['chmod', '755'] + path, 0, bash_cmd=True)
-        os.system('chmod 644 ' + build_dir + '/lib/*')
+        for entry in os.scandir(lib_dir):
+            os.chmod(entry.path, 0o755 if entry.is_dir() else 0o644)
 
     utils.run(['tdnf', 'makecache'])
 

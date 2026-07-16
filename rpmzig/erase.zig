@@ -3,8 +3,9 @@ const Allocator = std.mem.Allocator;
 const header = @import("rpm_header");
 const install_engine = @import("install.zig");
 const txn_config = @import("txn_config.zig");
-
-const RPMTRANS_FLAG_JUSTDB: u32 = 1 << 3;
+const rpmtrans = @cImport({
+    @cInclude("tdnfrpmtrans.h");
+});
 
 const sysc = @cImport({
     @cInclude("errno.h");
@@ -16,6 +17,7 @@ pub const KeepPathFn = *const fn (ctx: ?*anyopaque, path: []const u8) i32;
 
 pub const Options = struct {
     install_root: []const u8,
+    config: ?*const txn_config.TxnConfig = null,
     trans_flags: u32 = 0,
     keep_path_fn: ?KeepPathFn = null,
     keep_path_ctx: ?*anyopaque = null,
@@ -28,30 +30,50 @@ pub const Context = struct {
     hdr: header.Header,
     options: Options,
     config: txn_config.TxnConfig,
+    root: install_engine.RootDir,
     last_path: ?[]const u8 = null,
+    last_path_storage: [std.fs.max_path_bytes]u8 = undefined,
 
     pub fn init(
         allocator: Allocator,
         hdr: header.Header,
         options: Options,
-    ) (Allocator.Error || txn_config.InitError)!Context {
-        var cfg = try txn_config.TxnConfig.init(allocator, options.install_root);
+    ) install_engine.Error!Context {
+        var cfg = if (options.config) |config|
+            try config.clone(allocator)
+        else
+            try txn_config.TxnConfig.init(allocator, options.install_root);
         errdefer cfg.deinit();
+        var root = try install_engine.RootDir.init(
+            allocator,
+            cfg.installRoot(),
+            null,
+            null,
+        );
+        errdefer root.deinit();
 
         return .{
             .allocator = allocator,
             .hdr = hdr,
             .options = options,
             .config = cfg,
+            .root = root,
         };
     }
 
     pub fn deinit(self: *Context) void {
+        self.root.deinit();
         self.config.deinit();
     }
 
+    fn setLastPath(self: *Context, path: []const u8) void {
+        const len = @min(path.len, self.last_path_storage.len);
+        @memcpy(self.last_path_storage[0..len], path[0..len]);
+        self.last_path = self.last_path_storage[0..len];
+    }
+
     pub fn erase(self: *Context) Error!void {
-        if ((self.options.trans_flags & RPMTRANS_FLAG_JUSTDB) != 0) {
+        if ((self.options.trans_flags & rpmtrans.TDNF_RPMTRANS_FLAG_JUSTDB) != 0) {
             return;
         }
 
@@ -62,7 +84,7 @@ pub const Context = struct {
         defer explicit_dirs.deinit(self.allocator);
 
         for (manifest.files) |file| {
-            self.last_path = file.path;
+            self.setLastPath(file.path);
 
             if (install_engine.isGhost(file.flags)) {
                 continue;
@@ -73,36 +95,22 @@ pub const Context = struct {
                 continue;
             }
 
-            const target_path = try install_engine.joinInstallRootAndPathOwned(
-                self.allocator,
-                self.config.installRoot(),
-                file.path,
-            );
-            defer self.allocator.free(target_path);
-
             if (try self.shouldKeepPath(file.path)) {
                 continue;
             }
 
-            try self.eraseNonDirectory(file, target_path);
+            try self.eraseNonDirectory(file);
         }
 
         sortDirectoriesDeepestFirst(explicit_dirs.items);
         for (explicit_dirs.items) |file| {
-            self.last_path = file.path;
-
-            const target_path = try install_engine.joinInstallRootAndPathOwned(
-                self.allocator,
-                self.config.installRoot(),
-                file.path,
-            );
-            defer self.allocator.free(target_path);
+            self.setLastPath(file.path);
 
             if (try self.shouldKeepPath(file.path)) {
                 continue;
             }
 
-            try removeDirectoryIfEmpty(self.allocator, target_path);
+            try self.root.removeEmptyDirectory(file.path);
         }
     }
 
@@ -116,57 +124,36 @@ pub const Context = struct {
     fn eraseNonDirectory(
         self: *Context,
         file: install_engine.HeaderFile,
-        target_path: []const u8,
     ) Error!void {
-        if (!install_engine.pathExists(self.allocator, target_path)) {
+        const st = (try self.root.stat(file.path)) orelse return;
+        if ((st.st_mode & sysc.S_IFMT) == sysc.S_IFDIR) {
             return;
         }
 
-        if (install_engine.isConfig(file.flags) and file.digest != null and try isRegularPath(self.allocator, target_path)) {
-            const matches = try install_engine.fileDigestMatches(
-                self.allocator,
-                target_path,
+        if (install_engine.isConfig(file.flags) and
+            file.digest != null and
+            (st.st_mode & sysc.S_IFMT) == sysc.S_IFREG)
+        {
+            const matches = try self.root.fileDigestMatches(
+                file.path,
                 file.digest_algo,
                 file.digest.?,
             );
             if (!matches) {
-                const rpmsave_path = try std.fmt.allocPrint(self.allocator, "{s}.rpmsave", .{target_path});
+                const rpmsave_path = try std.fmt.allocPrint(
+                    self.allocator,
+                    "{s}.rpmsave",
+                    .{file.path},
+                );
                 defer self.allocator.free(rpmsave_path);
-                try install_engine.renameExistingPath(self.allocator, target_path, rpmsave_path);
+                try self.root.rename(file.path, rpmsave_path);
                 return;
             }
         }
 
-        try install_engine.removeExistingPath(self.allocator, target_path);
+        try self.root.remove(file.path);
     }
 };
-
-fn isRegularPath(allocator: Allocator, path: []const u8) Allocator.Error!bool {
-    const path_z = try allocator.dupeZ(u8, path);
-    defer allocator.free(path_z);
-
-    var st: sysc.struct_stat = undefined;
-    if (sysc.lstat(path_z.ptr, &st) != 0) {
-        return false;
-    }
-
-    return (st.st_mode & sysc.S_IFMT) == sysc.S_IFREG;
-}
-
-fn removeDirectoryIfEmpty(allocator: Allocator, path: []const u8) Error!void {
-    const path_z = try allocator.dupeZ(u8, path);
-    defer allocator.free(path_z);
-
-    const rc = sysc.rmdir(path_z.ptr);
-    if (rc == 0) {
-        return;
-    }
-
-    return switch (std.c.errno(rc)) {
-        .NOENT, .NOTEMPTY => {},
-        else => error.SyscallFailed,
-    };
-}
 
 fn sortDirectoriesDeepestFirst(dirs: []install_engine.HeaderFile) void {
     var i: usize = 1;

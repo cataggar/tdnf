@@ -25,22 +25,7 @@ extern fn TDNFStrIsValidRepoName(str: ?[*:0]const u8) c_int;
 
 const LOG_ERR: c_int = 1;
 const LOG_CRIT: c_int = 2;
-
-const RpmVerbosity = struct {
-    name: [*:0]const u8,
-    value: c_int,
-};
-
-const rpm_verbosity_types = [_]RpmVerbosity{
-    .{ .name = "emergency", .value = c.TDNF_RPMLOG_EMERG },
-    .{ .name = "alert", .value = c.TDNF_RPMLOG_ALERT },
-    .{ .name = "critical", .value = c.TDNF_RPMLOG_CRIT },
-    .{ .name = "error", .value = c.TDNF_RPMLOG_ERR },
-    .{ .name = "warning", .value = c.TDNF_RPMLOG_WARNING },
-    .{ .name = "notice", .value = c.TDNF_RPMLOG_NOTICE },
-    .{ .name = "info", .value = c.TDNF_RPMLOG_INFO },
-    .{ .name = "debug", .value = c.TDNF_RPMLOG_DEBUG },
-};
+const LEGACY_VERBOSITY_INFO: c_int = 6;
 
 var option_state: c.TDNF_CMD_ARGS = std.mem.zeroes(c.TDNF_CMD_ARGS);
 
@@ -533,16 +518,9 @@ pub export fn ParseRpmVerbosity(
     pnRpmVerbosity: ?*c_int,
 ) u32 {
     const out = pnRpmVerbosity orelse return c.ERROR_TDNF_INVALID_PARAMETER;
-    const verbosity = pszRpmVerbosity orelse return c.ERROR_TDNF_INVALID_PARAMETER;
+    _ = pszRpmVerbosity orelse return c.ERROR_TDNF_INVALID_PARAMETER;
 
-    for (rpm_verbosity_types) |entry| {
-        if (c.strcasecmp(entry.name, verbosity) == 0) {
-            out.* = entry.value;
-            return 0;
-        }
-    }
-
-    out.* = c.TDNF_RPMLOG_INFO;
+    out.* = LEGACY_VERBOSITY_INFO;
     return 0;
 }
 
@@ -565,14 +543,14 @@ pub export fn HandleOptionsError(
     return dwError;
 }
 
-test "ParseRpmVerbosity preserves verbosity mappings" {
+test "ParseRpmVerbosity is a compatibility no-op" {
     var nVerbosity: c_int = -1;
 
     try std.testing.expectEqual(@as(u32, 0), ParseRpmVerbosity("DeBuG", &nVerbosity));
-    try std.testing.expectEqual(@as(c_int, c.TDNF_RPMLOG_DEBUG), nVerbosity);
+    try std.testing.expectEqual(LEGACY_VERBOSITY_INFO, nVerbosity);
 
     try std.testing.expectEqual(@as(u32, 0), ParseRpmVerbosity("unknown", &nVerbosity));
-    try std.testing.expectEqual(@as(c_int, c.TDNF_RPMLOG_INFO), nVerbosity);
+    try std.testing.expectEqual(LEGACY_VERBOSITY_INFO, nVerbosity);
 }
 
 test "ParseOption preserves repo-scoped setopt handling" {

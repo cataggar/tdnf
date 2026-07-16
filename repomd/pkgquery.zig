@@ -1193,6 +1193,15 @@ fn buildHeaderBlob(
     defer index.deinit();
 
     for (entries) |entry| {
+        const alignment: usize = switch (entry) {
+            .int16_array => 2,
+            .int32, .int32_array => 4,
+            .int64 => 8,
+            else => 1,
+        };
+        while (data.items.len % alignment != 0) {
+            try data.append(0);
+        }
         const offset: u32 = @intCast(data.items.len);
         var tag: u32 = 0;
         var typ: TestEntryType = .string;

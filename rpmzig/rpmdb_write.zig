@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const sqlite = @import("sqlite");
 const header = @import("rpm_header");
+const install_engine = @import("install.zig");
 const pkgfile = @import("rpm_pkgfile");
 const txn_config = @import("txn_config.zig");
 
@@ -66,6 +67,7 @@ const ERASE_ONLY_MASK: u32 = notPre(
 
 pub const Error = error{
     InvalidFileStates,
+    InvalidHeaderField,
     InvalidHeaderBlob,
     InvalidRichDependency,
     InvalidSigTagCount,
@@ -79,6 +81,8 @@ pub const Error = error{
     SqliteOpenFailed,
     SqlitePrepareFailed,
     SqliteStepFailed,
+    SyscallFailed,
+    UnsafePath,
     UnsupportedBackend,
 };
 
@@ -150,28 +154,132 @@ const secondary_tables = [_]SecondaryTable{
 
 pub const Writer = struct {
     db: ?*c.sqlite3,
+    dir_fd: c_int,
+    root: install_engine.RootDir,
 
     pub fn openRoot(root: []const u8) Error!Writer {
-        var config = txn_config.TxnConfig.init(std.heap.c_allocator, root) catch |err| {
-            return switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
-                error.InvalidInstallRoot => error.PathTooLong,
-            };
-        };
-        defer config.deinit();
-        return openConfig(&config);
+        var pinned_root = install_engine.RootDir.initCreating(
+            std.heap.c_allocator,
+            root,
+        ) catch return error.UnsafePath;
+        errdefer pinned_root.deinit();
+        const dir_fd = (pinned_root.openDirectory(
+            txn_config.DEFAULT_DBPATH,
+            true,
+        ) catch return error.UnsafePath) orelse
+            return error.SyscallFailed;
+        return openAtDirFd(
+            pinned_root,
+            dir_fd,
+            txn_config.DEFAULT_RPMDB_BASENAME,
+        );
     }
 
     pub fn openConfig(config: *const txn_config.TxnConfig) Error!Writer {
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const db_path = config.resolveRpmDbSqlitePath(&buf) catch return error.PathTooLong;
-        return openAtPath(db_path);
+        const expanded = config.expandMacroAlloc(
+            std.heap.c_allocator,
+            .dbpath,
+        ) catch return error.PathTooLong;
+        defer std.heap.c_allocator.free(expanded);
+        const db_dir = if (expanded.len != 0 and expanded[0] == '/')
+            expanded
+        else
+            try std.fmt.allocPrint(
+                std.heap.c_allocator,
+                "/{s}",
+                .{expanded},
+            );
+        defer if (db_dir.ptr != expanded.ptr)
+            std.heap.c_allocator.free(db_dir);
+        const trimmed_dir = std.mem.trimEnd(u8, db_dir, "/");
+        const normalized_dir = if (trimmed_dir.len == 0)
+            "/"
+        else
+            trimmed_dir;
+        var root = install_engine.RootDir.init(
+            std.heap.c_allocator,
+            config.installRoot(),
+            null,
+            null,
+        ) catch return error.UnsafePath;
+        errdefer root.deinit();
+        const dir_fd = (root.openDirectory(normalized_dir, true) catch
+            return error.UnsafePath) orelse return error.SyscallFailed;
+        return openAtDirFd(
+            root,
+            dir_fd,
+            txn_config.DEFAULT_RPMDB_BASENAME,
+        );
     }
 
     pub fn openAtPath(db_path: []const u8) Error!Writer {
-        try ensureCompatibleBackend(db_path);
-        try ensureParentDirectory(db_path);
+        const slash_index = std.mem.lastIndexOfScalar(u8, db_path, '/');
+        const slash = slash_index orelse 0;
+        const absolute = db_path.len != 0 and db_path[0] == '/';
+        const dir_path = if (slash_index == null or slash == 0)
+            "/"
+        else if (absolute)
+            db_path[0..slash]
+        else
+            try std.fmt.allocPrint(
+                std.heap.c_allocator,
+                "/{s}",
+                .{db_path[0..slash]},
+            );
+        defer if (!absolute and slash_index != null and slash != 0)
+            std.heap.c_allocator.free(dir_path);
+        const basename = if (slash_index != null)
+            db_path[slash + 1 ..]
+        else
+            db_path;
+        if (basename.len == 0 or
+            std.mem.indexOfScalar(u8, basename, '/') != null)
+        {
+            return error.UnsafePath;
+        }
+        var root = if (absolute)
+            install_engine.RootDir.init(
+                std.heap.c_allocator,
+                "/",
+                null,
+                null,
+            ) catch return error.UnsafePath
+        else blk: {
+            const cwd_fd = std.c.open(".", .{
+                .ACCMODE = .RDONLY,
+                .DIRECTORY = true,
+                .CLOEXEC = true,
+                .NOFOLLOW = true,
+            });
+            if (cwd_fd < 0) return error.SyscallFailed;
+            break :blk install_engine.RootDir.initFromOwnedFd(
+                std.heap.c_allocator,
+                cwd_fd,
+                null,
+                null,
+            ) catch return error.UnsafePath;
+        };
+        errdefer root.deinit();
+        const dir_fd = (root.openDirectory(dir_path, true) catch
+            return error.UnsafePath) orelse return error.SyscallFailed;
+        return openAtDirFd(root, dir_fd, basename);
+    }
 
+    fn openAtDirFd(
+        root: install_engine.RootDir,
+        dir_fd: c_int,
+        basename: []const u8,
+    ) Error!Writer {
+        var owned_root = root;
+        errdefer owned_root.deinit();
+        errdefer _ = sysc.close(dir_fd);
+        try ensureCompatibleBackendFd(dir_fd, basename);
+        const db_path = try std.fmt.allocPrint(
+            std.heap.c_allocator,
+            "/proc/self/fd/{d}/{s}",
+            .{ dir_fd, basename },
+        );
+        defer std.heap.c_allocator.free(db_path);
         const db_path_z = try std.heap.c_allocator.dupeZ(u8, db_path);
         defer std.heap.c_allocator.free(db_path_z);
 
@@ -192,7 +300,11 @@ pub const Writer = struct {
             return error.SqliteBusyTimeoutFailed;
         }
 
-        var writer = Writer{ .db = db };
+        var writer = Writer{
+            .db = db,
+            .dir_fd = dir_fd,
+            .root = owned_root,
+        };
         try writer.execSql("PRAGMA secure_delete = OFF");
         try writer.execSql("PRAGMA journal_mode = WAL");
         try writer.execSql("PRAGMA wal_autocheckpoint = 10000");
@@ -205,6 +317,11 @@ pub const Writer = struct {
             _ = c.sqlite3_close(self.db);
             self.db = null;
         }
+        if (self.dir_fd >= 0) {
+            _ = sysc.close(self.dir_fd);
+            self.dir_fd = -1;
+        }
+        self.root.deinit();
     }
 
     pub fn installRpmPath(self: *Writer, path: [:0]const u8, options: InstallOptions) Error!u32 {
@@ -252,6 +369,38 @@ pub const Writer = struct {
         try self.deletePackage(hnum);
         try self.deleteSecondaryRows(hnum);
         try self.commit();
+    }
+
+    /// Start an explicit transaction for a composed rpmdb mutation.
+    pub fn beginTransaction(self: *Writer) Error!void {
+        try self.begin();
+    }
+
+    pub fn commitTransaction(self: *Writer) Error!void {
+        try self.commit();
+    }
+
+    pub fn rollbackTransaction(self: *Writer) Error!void {
+        try self.rollback();
+    }
+
+    /// Insert a pre-encoded installed header and all secondary indexes.
+    /// The caller must hold an explicit transaction.
+    pub fn insertHeaderInTransaction(
+        self: *Writer,
+        blob: []const u8,
+    ) Error!u32 {
+        const hdr = header.Header.parse(blob) catch return error.InvalidHeaderBlob;
+        const hnum = try self.insertPackage(blob);
+        try self.populateSecondaryTables(hdr, hnum);
+        return hnum;
+    }
+
+    /// Remove an installed header and all its secondary index rows.
+    /// The caller must hold an explicit transaction.
+    pub fn eraseHeaderInTransaction(self: *Writer, hnum: u32) Error!void {
+        try self.deleteSecondaryRows(hnum);
+        try self.deletePackage(hnum);
     }
 
     pub fn findHnumByNevra(self: *Writer, allocator: std.mem.Allocator, wanted_nevra: []const u8) Error!?u32 {
@@ -335,15 +484,15 @@ pub const Writer = struct {
             return false;
         }
 
-        const parts = splitAbsolutePath(path);
+        const wanted = self.root.canonicalPathOwned(path) catch
+            return error.UnsafePath;
+        defer std.heap.c_allocator.free(wanted);
         var stmt = try Statement.init(
             self.db,
-            "SELECT DISTINCT p.blob FROM 'Packages' p " ++ "JOIN 'Basenames' b ON b.hnum = p.hnum " ++ "WHERE b.key=? AND p.hnum<>? " ++ "AND EXISTS (SELECT 1 FROM 'Dirnames' d WHERE d.hnum = p.hnum AND d.key=?)",
+            "SELECT blob FROM 'Packages' WHERE hnum<>?",
         );
         defer stmt.deinit();
-        try stmt.bindText(1, parts.basename);
-        try stmt.bindU32(2, current_hnum);
-        try stmt.bindText(3, parts.dirname);
+        try stmt.bindU32(1, current_hnum);
 
         while (true) {
             const rc = c.sqlite3_step(stmt.raw);
@@ -356,7 +505,7 @@ pub const Writer = struct {
 
             const blob = @as([*]const u8, @ptrCast(blob_ptr))[0..blob_len];
             const hdr = header.Header.parse(blob) catch return error.InvalidHeaderBlob;
-            if (headerOwnsExactPath(hdr, path)) {
+            if (try headerOwnsCanonicalPath(&self.root, hdr, wanted)) {
                 return true;
             }
         }
@@ -601,6 +750,162 @@ pub const Writer = struct {
     }
 };
 
+test "config resolves recursively expanded dbpath for Writer" {
+    const allocator = std.testing.allocator;
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    switch (std.os.linux.errno(std.os.linux.getcwd(cwd_buf[0..].ptr, cwd_buf.len))) {
+        .SUCCESS => {},
+        else => return error.PathTooLong,
+    }
+    const cwd_len = std.mem.findScalar(u8, &cwd_buf, 0) orelse return error.PathTooLong;
+    const cwd = cwd_buf[0..cwd_len];
+    var config = try txn_config.TxnConfig.init(allocator, cwd);
+    defer config.deinit();
+    _ = try config.applyRpmDefine("_native_test_root .rpmdb-write-config-test");
+    _ = try config.applyRpmDefine("_dbpath %{_native_test_root}/db");
+
+    var db_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try config.resolveRpmDbSqlitePath(&db_path_buf);
+    var expected_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        try std.fmt.bufPrint(
+            &expected_buf,
+            "{s}/.rpmdb-write-config-test/db/rpmdb.sqlite",
+            .{cwd},
+        ),
+        db_path,
+    );
+}
+
+test "rpmdb writer confines database and sidecars beneath pinned root" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "root");
+    try tmp.dir.createDirPath(std.testing.io, "outside");
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    switch (std.os.linux.errno(std.os.linux.getcwd(
+        cwd_buf[0..].ptr,
+        cwd_buf.len,
+    ))) {
+        .SUCCESS => {},
+        else => return error.PathTooLong,
+    }
+    const cwd_len = std.mem.findScalar(u8, &cwd_buf, 0) orelse
+        return error.PathTooLong;
+    const cwd = cwd_buf[0..cwd_len];
+    const tmp_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/.zig-cache/tmp/{s}",
+        .{ cwd, tmp.sub_path },
+    );
+    defer allocator.free(tmp_path);
+    const root_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/root",
+        .{tmp_path},
+    );
+    defer allocator.free(root_path);
+    const outside_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/outside",
+        .{tmp_path},
+    );
+    defer allocator.free(outside_path);
+    const var_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/var",
+        .{root_path},
+    );
+    defer allocator.free(var_path);
+    const var_z = try allocator.dupeZ(u8, var_path);
+    defer allocator.free(var_z);
+    const outside_z = try allocator.dupeZ(u8, outside_path);
+    defer allocator.free(outside_z);
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        sysc.symlink(outside_z.ptr, var_z.ptr),
+    );
+
+    var config = try txn_config.TxnConfig.init(allocator, root_path);
+    defer config.deinit();
+    try std.testing.expectError(
+        error.UnsafePath,
+        Writer.openConfig(&config),
+    );
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.access(std.testing.io, "outside/rpmdb.sqlite", .{}),
+    );
+
+    try tmp.dir.deleteFile(std.testing.io, "root/var");
+    try tmp.dir.createDirPath(std.testing.io, "root/var/lib/rpm");
+    var writer = try Writer.openConfig(&config);
+    const db_dir = try std.fmt.allocPrint(
+        allocator,
+        "{s}/var/lib/rpm",
+        .{root_path},
+    );
+    defer allocator.free(db_dir);
+    const parked_db_dir = try std.fmt.allocPrint(
+        allocator,
+        "{s}/parked-rpm",
+        .{root_path},
+    );
+    defer allocator.free(parked_db_dir);
+    const db_dir_z = try allocator.dupeZ(u8, db_dir);
+    defer allocator.free(db_dir_z);
+    const parked_db_dir_z = try allocator.dupeZ(u8, parked_db_dir);
+    defer allocator.free(parked_db_dir_z);
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        std.c.rename(db_dir_z.ptr, parked_db_dir_z.ptr),
+    );
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        std.c.symlink(outside_z.ptr, db_dir_z.ptr),
+    );
+    try writer.beginTransaction();
+    try writer.commitTransaction();
+    writer.close();
+    try tmp.dir.access(
+        std.testing.io,
+        "root/parked-rpm/rpmdb.sqlite",
+        .{},
+    );
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.access(std.testing.io, "outside/rpmdb.sqlite-wal", .{}),
+    );
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.access(std.testing.io, "outside/rpmdb.sqlite-shm", .{}),
+    );
+    try tmp.dir.deleteFile(std.testing.io, "root/var/lib/rpm");
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        std.c.rename(parked_db_dir_z.ptr, db_dir_z.ptr),
+    );
+
+    if (sysc.geteuid() != 0) {
+        tmp.dir.deleteFile(
+            std.testing.io,
+            "root/var/lib/rpm/rpmdb.sqlite",
+        ) catch {};
+        try std.testing.expectEqual(
+            @as(c_int, 0),
+            sysc.chmod(db_dir_z.ptr, 0o555),
+        );
+        defer _ = sysc.chmod(db_dir_z.ptr, 0o755);
+        if (Writer.openConfig(&config)) |opened| {
+            var unexpected = opened;
+            unexpected.close();
+            return error.TestUnexpectedResult;
+        } else |_| {}
+    }
+}
+
 pub fn buildInstalledHeaderBlob(
     allocator: std.mem.Allocator,
     rpm: *const pkgfile.RpmFile,
@@ -613,7 +918,7 @@ pub fn buildInstalledHeaderBlob(
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var drips = std.array_list.Managed(Drip).init(allocator);
+    var drips = std.array_list.Managed(HeaderField).init(allocator);
     defer drips.deinit();
 
     try collectTranslatedSignatureDrips(&drips, rpm.main, rpm.sig);
@@ -644,10 +949,12 @@ pub fn buildInstalledHeaderBlob(
     try drips.append(try makeU32Drip(arena, RPMTAG_INSTALLTID, options.install_tid));
 
     sortDripsByTag(drips.items);
-    return appendDripsToHeader(allocator, rpm.main.bytes, drips.items);
+    return appendHeaderFields(allocator, rpm.main.bytes, drips.items);
 }
 
-const Drip = struct {
+/// Pre-encoded RPM header field. Integer bytes use big-endian storage;
+/// string and string-array bytes include their terminating NULs.
+pub const HeaderField = struct {
     tag: u32,
     typ: header.TypeId,
     count: u32,
@@ -655,7 +962,7 @@ const Drip = struct {
 };
 
 fn collectTranslatedSignatureDrips(
-    drips: *std.array_list.Managed(Drip),
+    drips: *std.array_list.Managed(HeaderField),
     main: header.Header,
     sig: header.Header,
 ) Error!void {
@@ -692,35 +999,28 @@ fn fileCountFromHeader(hdr: header.Header) usize {
     return 0;
 }
 
-const SplitPath = struct {
-    dirname: []const u8,
-    basename: []const u8,
-};
-
-fn splitAbsolutePath(path: []const u8) SplitPath {
-    std.debug.assert(path.len > 1 and path[0] == '/');
-    const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse unreachable;
-    std.debug.assert(slash < path.len - 1);
-    return .{
-        .dirname = path[0 .. slash + 1],
-        .basename = path[slash + 1 ..],
-    };
-}
-
-fn headerOwnsExactPath(hdr: header.Header, path: []const u8) bool {
-    const parts = splitAbsolutePath(path);
+fn headerOwnsCanonicalPath(
+    root: *const install_engine.RootDir,
+    hdr: header.Header,
+    wanted: []const u8,
+) Error!bool {
     const count = hdr.stringArrayCount(.basenames);
 
     var i: usize = 0;
     while (i < count) : (i += 1) {
         const basename = hdr.stringArrayItem(.basenames, i) orelse continue;
-        if (!std.mem.eql(u8, basename, parts.basename)) {
-            continue;
-        }
-
         const dir_index = hdr.u32ArrayItem(.dirindexes, i) orelse continue;
         const dirname = hdr.stringArrayItem(.dirnames, dir_index) orelse continue;
-        if (std.mem.eql(u8, dirname, parts.dirname)) {
+        const logical = try std.fmt.allocPrint(
+            std.heap.c_allocator,
+            "{s}{s}",
+            .{ dirname, basename },
+        );
+        defer std.heap.c_allocator.free(logical);
+        const canonical = root.canonicalPathOwned(logical) catch
+            return error.UnsafePath;
+        defer std.heap.c_allocator.free(canonical);
+        if (std.mem.eql(u8, canonical, wanted)) {
             return true;
         }
     }
@@ -728,10 +1028,100 @@ fn headerOwnsExactPath(hdr: header.Header, path: []const u8) bool {
     return false;
 }
 
-fn appendDripsToHeader(
+/// Encode a complete RPM immutable main-header region.
+///
+/// `fields` excludes RPMTAG_HEADERIMMUTABLE; this function emits that
+/// marker first and writes its matching negative-offset trailer after all
+/// immutable data. The result can be stored in Packages or prefixed with
+/// the standalone header magic for SHA digest calculation.
+pub fn encodeImmutableHeader(
+    allocator: std.mem.Allocator,
+    fields: []const HeaderField,
+) Error![]u8 {
+    const region_tag: u32 = 63;
+    const index_count = std.math.add(usize, fields.len, 1) catch
+        return error.InvalidHeaderField;
+    const index_count_u32 = std.math.cast(u32, index_count) orelse
+        return error.InvalidHeaderField;
+    const index_span = std.math.mul(usize, index_count, 16) catch
+        return error.InvalidHeaderField;
+    const signed_span = std.math.cast(i32, index_span) orelse
+        return error.InvalidHeaderField;
+
+    var data_len: usize = 0;
+    for (fields) |field| {
+        if (field.tag == region_tag or field.count == 0)
+            return error.InvalidHeaderField;
+        data_len = std.math.add(
+            usize,
+            data_len,
+            alignDiffForType(field.typ, data_len),
+        ) catch return error.InvalidHeaderField;
+        data_len = std.math.add(usize, data_len, field.bytes.len) catch
+            return error.InvalidHeaderField;
+    }
+    const trailer_offset = data_len;
+    data_len = std.math.add(usize, data_len, 16) catch
+        return error.InvalidHeaderField;
+    const data_len_u32 = std.math.cast(u32, data_len) orelse
+        return error.InvalidHeaderField;
+    const total_len = std.math.add(usize, 8 + index_span, data_len) catch
+        return error.InvalidHeaderField;
+
+    const out = try allocator.alloc(u8, total_len);
+    errdefer allocator.free(out);
+    @memset(out, 0);
+    writeU32BE(out, 0, index_count_u32);
+    writeU32BE(out, 4, data_len_u32);
+
+    writeEntry(
+        out,
+        8,
+        region_tag,
+        @intFromEnum(header.TypeId.bin),
+        @intCast(trailer_offset),
+        16,
+    );
+
+    const data_off = 8 + index_span;
+    var cursor: usize = 0;
+    for (fields, 0..) |field, index| {
+        cursor += alignDiffForType(field.typ, cursor);
+        writeEntry(
+            out,
+            8 + (index + 1) * 16,
+            field.tag,
+            @intFromEnum(field.typ),
+            @intCast(cursor),
+            field.count,
+        );
+        @memcpy(
+            out[data_off + cursor .. data_off + cursor + field.bytes.len],
+            field.bytes,
+        );
+        cursor += field.bytes.len;
+    }
+    if (cursor != trailer_offset) return error.InvalidHeaderField;
+
+    writeEntry(
+        out,
+        data_off + trailer_offset,
+        region_tag,
+        @intFromEnum(header.TypeId.bin),
+        @bitCast(-signed_span),
+        16,
+    );
+
+    _ = header.Header.parseWithRegion(out, .immutable, true) catch
+        return error.InvalidHeaderBlob;
+    return out;
+}
+
+/// Append mutable fields after an existing immutable header region.
+pub fn appendHeaderFields(
     allocator: std.mem.Allocator,
     base_blob: []const u8,
-    drips: []const Drip,
+    drips: []const HeaderField,
 ) Error![]u8 {
     const base = header.Header.parse(base_blob) catch return error.InvalidHeaderBlob;
     const new_index_count = base.index_count + @as(u32, @intCast(drips.len));
@@ -774,7 +1164,7 @@ fn appendDripsToHeader(
     return out;
 }
 
-fn computeExtendedDataLength(base_data_size: u32, drips: []const Drip) usize {
+fn computeExtendedDataLength(base_data_size: u32, drips: []const HeaderField) usize {
     var data_len: usize = base_data_size;
     for (drips) |drip| {
         data_len += alignDiffForType(drip.typ, data_len);
@@ -794,7 +1184,7 @@ fn alignDiffForType(typ: header.TypeId, offset: usize) usize {
     return if (rem == 0) 0 else alignment - rem;
 }
 
-fn makeU32Drip(allocator: std.mem.Allocator, tag: u32, value: u32) Error!Drip {
+fn makeU32Drip(allocator: std.mem.Allocator, tag: u32, value: u32) Error!HeaderField {
     const bytes = try allocator.alloc(u8, 4);
     writeU32BE(bytes, 0, value);
     return .{
@@ -819,7 +1209,7 @@ fn writeU32BE(buf: []u8, off: usize, value: u32) void {
     buf[off + 3] = @intCast(value & 0xff);
 }
 
-fn sortDripsByTag(drips: []Drip) void {
+fn sortDripsByTag(drips: []HeaderField) void {
     var i: usize = 1;
     while (i < drips.len) : (i += 1) {
         var j = i;
@@ -1151,42 +1541,33 @@ fn byteSliceLess(a: []const u8, b: []const u8) bool {
     return a.len < b.len;
 }
 
-fn ensureCompatibleBackend(db_path: []const u8) Error!void {
-    const dir_path = std.fs.path.dirname(db_path) orelse return error.PathTooLong;
-    const db_path_z = try std.heap.c_allocator.dupeZ(u8, db_path);
-    defer std.heap.c_allocator.free(db_path_z);
-    if (sysc.access(db_path_z.ptr, sysc.F_OK) == 0) return;
-
+fn ensureCompatibleBackendFd(
+    dir_fd: c_int,
+    basename: []const u8,
+) Error!void {
+    const basename_z = try std.heap.c_allocator.dupeZ(u8, basename);
+    defer std.heap.c_allocator.free(basename_z);
+    var st: sysc.struct_stat = undefined;
+    const db_rc = sysc.fstatat(
+        dir_fd,
+        basename_z.ptr,
+        &st,
+        0x100,
+    );
+    if (db_rc == 0) {
+        if ((st.st_mode & sysc.S_IFMT) != sysc.S_IFREG) {
+            return error.UnsafePath;
+        }
+        return;
+    }
+    if (std.c.errno(db_rc) != .NOENT) return error.SyscallFailed;
     const markers = [_][]const u8{ "Packages", "Packages.db", "Packages.db-wal", "Packages.db-shm" };
     for (markers) |marker| {
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const marker_path = std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ dir_path, marker }) catch return error.PathTooLong;
-        if (sysc.access(marker_path.ptr, sysc.F_OK) == 0) return error.UnsupportedBackend;
-    }
-}
-
-fn ensureParentDirectory(path: []const u8) Error!void {
-    const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return error.PathTooLong;
-    if (slash == 0) return;
-    const dir_path = path[0..slash];
-    const owned = try std.heap.c_allocator.dupeZ(u8, dir_path);
-    defer std.heap.c_allocator.free(owned);
-
-    var i: usize = 1;
-    while (i < owned.len) : (i += 1) {
-        if (owned[i] != '/') continue;
-        const saved = owned[i];
-        owned[i] = 0;
-        const rc = sysc.mkdir(owned.ptr, 0o755);
-        if (std.c.errno(rc) != .SUCCESS and std.c.errno(rc) != .EXIST) {
-            owned[i] = saved;
-            return error.PathTooLong;
+        const marker_z = try std.heap.c_allocator.dupeZ(u8, marker);
+        defer std.heap.c_allocator.free(marker_z);
+        if (sysc.fstatat(dir_fd, marker_z.ptr, &st, 0x100) == 0) {
+            return error.UnsupportedBackend;
         }
-        owned[i] = saved;
-    }
-    const rc = sysc.mkdir(owned.ptr, 0o755);
-    if (std.c.errno(rc) != .SUCCESS and std.c.errno(rc) != .EXIST) {
-        return error.PathTooLong;
     }
 }
 
@@ -1281,7 +1662,7 @@ const TestHeaderEntry = union(enum) {
     },
 };
 
-test "appendDripsToHeader appends aligned drips" {
+test "appendHeaderFields appends aligned fields" {
     const base = try buildHeaderBlobForTest(std.testing.allocator, &.{
         .{ .string = .{ .tag = @intFromEnum(header.TagId.name), .value = "pkg" } },
         .{ .string = .{ .tag = @intFromEnum(header.TagId.version), .value = "1" } },
@@ -1290,7 +1671,7 @@ test "appendDripsToHeader appends aligned drips" {
 
     var int_bytes: [4]u8 = undefined;
     writeU32BE(&int_bytes, 0, 42);
-    const out = try appendDripsToHeader(std.testing.allocator, base, &.{
+    const out = try appendHeaderFields(std.testing.allocator, base, &.{
         .{ .tag = @intFromEnum(header.TagId.install_time), .typ = .int32, .count = 1, .bytes = &int_bytes },
     });
     defer std.testing.allocator.free(out);
@@ -1299,6 +1680,30 @@ test "appendDripsToHeader appends aligned drips" {
     try std.testing.expectEqual(@as(u32, 3), parsed.index_count);
     try std.testing.expectEqual(@as(?u32, 42), parsed.getU32(.install_time));
     try std.testing.expectEqualStrings("pkg", parsed.getString(.name).?);
+}
+
+test "encodeImmutableHeader emits a complete reusable region" {
+    const name = "gpg-pubkey\x00";
+    const version = "12345678\x00";
+    const out = try encodeImmutableHeader(std.testing.allocator, &.{
+        .{
+            .tag = @intFromEnum(header.TagId.name),
+            .typ = .string,
+            .count = 1,
+            .bytes = name,
+        },
+        .{
+            .tag = @intFromEnum(header.TagId.version),
+            .typ = .string,
+            .count = 1,
+            .bytes = version,
+        },
+    });
+    defer std.testing.allocator.free(out);
+
+    const parsed = try header.Header.parseWithRegion(out, .immutable, true);
+    try std.testing.expectEqualStrings("gpg-pubkey", parsed.getString(.name).?);
+    try std.testing.expectEqualStrings("12345678", parsed.getString(.version).?);
 }
 
 test "rich dependency extraction matches rpmdb negation semantics" {

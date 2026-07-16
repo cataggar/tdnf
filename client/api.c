@@ -11,12 +11,11 @@
 
 uid_t gEuid;
 
-static int gInitialized;
 static int instanceLockFd = -1;
 
 static void TdnfExitHandler(void);
 static void IsTdnfAlreadyRunning(void);
-static uint32_t TDNFApplyRpmDefine(const char *pszValue);
+static uint32_t TDNFApplyRpmDefine(PTDNF pTdnf, const char *pszValue);
 
 static void TdnfExitHandler(void)
 {
@@ -44,27 +43,11 @@ static void IsTdnfAlreadyRunning(void)
 
 uint32_t TDNFInit(void)
 {
-    uint32_t dwError = 0;
-
-    if (!gInitialized)
-    {
-        dwError = rpmReadConfigFiles(NULL, NULL);
-        BAIL_ON_TDNF_ERROR(dwError);
-
-        gInitialized = 1;
-    }
-
-error:
-    return dwError;
+    return 0;
 }
 
 void TDNFUninit(void)
 {
-    if (gInitialized)
-    {
-        rpmFreeRpmrc();
-        gInitialized = 0;
-    }
 }
 
 //Check all available packages
@@ -522,10 +505,10 @@ TDNFListInternal(
     dwError = TDNFNativeQueryBuildRepoInputs(pTdnf, &pRepos, &dwRepoCount);
     BAIL_ON_TDNF_ERROR(dwError);
 
-    dwError = TDNFRepoMdNativeList(
+    dwError = TDNFRepoMdNativeListConfig(
                   pRepos,
                   dwRepoCount,
-                  TDNFNativeQueryInstallRoot(pTdnf),
+                  pTdnf->pRpmConfig,
                   nScope,
                   ppszPackageNameSpecs,
                   nDetail,
@@ -587,6 +570,14 @@ TDNFOpenHandle(
     BAIL_ON_TDNF_ERROR(dwError);
 
     pTdnf->pArgs = pArgs;
+    pTdnf->pRpmConfig = tdnf_rpm_config_create(pArgs->pszInstallRoot);
+    if (!pTdnf->pRpmConfig)
+    {
+        pr_err("Failed to initialize native rpm configuration: %s\n",
+               tdnf_rpm_config_last_error());
+        dwError = ERROR_TDNF_RPMRC_FAIL;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
 
     /* if using --installroot, we prefer the tdnf.conf from the
     installroot unless a tdnf.conf location is explicitely set */
@@ -631,18 +622,18 @@ TDNFOpenHandle(
                   TDNF_CONF_GROUP);
     BAIL_ON_TDNF_ERROR(dwError);
 
+    for (cn = pTdnf->pArgs->cn_setopts->first_child; cn; cn = cn->next) {
+        /* set macros from command line */
+        if (strcmp(cn->name, "rpmdefine") == 0) {
+            dwError = TDNFApplyRpmDefine(pTdnf, cn->value);
+            BAIL_ON_TDNF_ERROR(dwError);
+        }
+    }
+
     dwError = TDNFConfigExpandVars(pTdnf);
     BAIL_ON_TDNF_ERROR(dwError);
 
     GlobalSetDnfCheckUpdateCompat(pTdnf->pConf->nCheckUpdateCompat);
-
-    for (cn = pTdnf->pArgs->cn_setopts->first_child; cn; cn = cn->next) {
-        /* set macros from command line */
-        if (strcmp(cn->name, "rpmdefine") == 0) {
-            dwError = TDNFApplyRpmDefine(cn->value);
-            BAIL_ON_TDNF_ERROR(dwError);
-        }
-    }
 
     dwError = TDNFLoadPlugins(pTdnf);
     BAIL_ON_TDNF_ERROR(dwError);
@@ -656,7 +647,10 @@ TDNFOpenHandle(
 
     if(!pArgs->nAllDeps)
     {
-        dwError = SolvReadInstalledRpms(pSack->pPool->installed, pTdnf->pConf->pszCacheDir);
+        dwError = SolvReadInstalledRpms(
+                      pSack->pPool->installed,
+                      pTdnf->pConf->pszCacheDir,
+                      pTdnf->pRpmConfig);
         BAIL_ON_TDNF_LIBSOLV_ERROR(dwError);
     }
 
@@ -700,43 +694,27 @@ error:
 
 static uint32_t
 TDNFApplyRpmDefine(
+    PTDNF pTdnf,
     const char *pszValue
     )
 {
     uint32_t dwError = 0;
-    char *pszNormalized = NULL;
-    const char *pszEquals = NULL;
-    const char *pszMacroValue = pszValue;
-    const char *pszSpace = NULL;
-    const char *pszTab = NULL;
 
-    if (IsNullOrEmptyString(pszValue))
+    if (!pTdnf || !pTdnf->pRpmConfig || IsNullOrEmptyString(pszValue))
     {
         dwError = ERROR_TDNF_INVALID_PARAMETER;
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    pszEquals = strchr(pszValue, '=');
-    pszSpace = strchr(pszValue, ' ');
-    pszTab = strchr(pszValue, '\t');
-
-    if (pszEquals && !pszSpace && !pszTab)
+    if (tdnf_rpm_config_apply_define(pTdnf->pRpmConfig, pszValue) != 0)
     {
-        dwError = TDNFAllocateStringPrintf(
-                      &pszNormalized,
-                      "%.*s %s",
-                      (int)(pszEquals - pszValue),
-                      pszValue,
-                      pszEquals + 1);
+        pr_err("Invalid rpmdefine '%s': %s\n",
+               pszValue, tdnf_rpm_config_last_error());
+        dwError = ERROR_TDNF_RPMRC_FAIL;
         BAIL_ON_TDNF_ERROR(dwError);
-
-        pszMacroValue = pszNormalized;
     }
 
-    rpmDefineMacro(NULL, pszMacroValue, 0);
-
 cleanup:
-    TDNF_SAFE_FREE_MEMORY(pszNormalized);
     return dwError;
 
 error:
@@ -780,7 +758,8 @@ TDNFAddCmdLinePackages(
             continue;
         }
 
-        if (fnmatch("*.src.rpm", pszPkgName, 0) == 0) {
+        if (fnmatch("*.src.rpm", pszPkgName, 0) == 0 ||
+            fnmatch("*.nosrc.rpm", pszPkgName, 0) == 0) {
             if (!pCmdArgs->nSource && !pCmdArgs->nBuildDeps) {
                 pr_err("package '%s' appears to be a source rpm - use --source to install, or --builddeps to install its build depenfdencies\n", pszPkgName);
                 dwError = ERROR_TDNF_INVALID_PARAMETER;
@@ -894,10 +873,10 @@ TDNFProvides(
     dwError = TDNFNativeQueryBuildRepoInputs(pTdnf, &pRepos, &dwRepoCount);
     BAIL_ON_TDNF_ERROR(dwError);
 
-    dwError = TDNFRepoMdNativeProvides(
+    dwError = TDNFRepoMdNativeProvidesConfig(
                   pRepos,
                   dwRepoCount,
-                  TDNFNativeQueryInstallRoot(pTdnf),
+                  pTdnf->pRpmConfig,
                   pszSpec,
                   &pPkgInfo);
     BAIL_ON_TDNF_ERROR(dwError);
@@ -1067,9 +1046,9 @@ TDNFRepoSync(
     char *pszDir = NULL;
     char *pszFilePath = NULL;
     char *pszKeepFile = NULL;
+    tdnf_rpm_file *pRpmFile = NULL;
     uint32_t dwCount = 0;
     uint32_t dwRepoCount = 0;
-    TDNFRPMTS ts = {0};
 
     if(!pTdnf || !pTdnf->pSack || !pReposyncArgs)
     {
@@ -1130,16 +1109,6 @@ TDNFRepoSync(
     dwError = TDNFPopulatePkgInfoForRepoSync(pTdnf->pSack, pPkgList, &pPkgInfos);
     BAIL_ON_TDNF_ERROR(dwError);
 
-    if (pReposyncArgs->nGPGCheck)
-    {
-        ts.pTS = rpmtsCreate();
-        if(!ts.pTS)
-        {
-            dwError = ERROR_TDNF_RPMTS_CREATE_FAILED;
-            BAIL_ON_TDNF_ERROR(dwError);
-        }
-    }
-
     if (pReposyncArgs->pszDownloadPath == NULL)
     {
         pszRootPath = getcwd(NULL, 0);
@@ -1187,6 +1156,7 @@ TDNFRepoSync(
         if (!pReposyncArgs->nPrintUrlsOnly)
         {
             PTDNF_REPO_DATA pPkgRepo = NULL;
+            int nKeepPackage = 1;
 
             if (!pReposyncArgs->nNoRepoPath)
             {
@@ -1218,23 +1188,43 @@ TDNFRepoSync(
                delete the package */
             if (pReposyncArgs->nGPGCheck)
             {
-                dwError = TDNFGPGCheckPackage(&ts, pTdnf, pPkgRepo, pszFilePath, NULL);
-                if (dwError != RPMRC_NOTTRUSTED && dwError != RPMRC_NOKEY)
+                TDNF_REPO_DATA stRepoForCheck = *pPkgRepo;
+                int nPolicyRejected = 0;
+
+                /*
+                 * reposync --gpgcheck is an explicit request, independent of
+                 * the repository's normal install gpgcheck setting.
+                 */
+                stRepoForCheck.nGPGCheck = 1;
+                dwError = TDNFGPGCheckPackageEx(
+                              pTdnf,
+                              &stRepoForCheck,
+                              pszFilePath,
+                              &pRpmFile,
+                              &nPolicyRejected);
+                tdnf_rpm_file_close(pRpmFile);
+                pRpmFile = NULL;
+                if(nPolicyRejected)
                 {
-                    BAIL_ON_TDNF_ERROR(dwError);
+                    pr_crit("checking package %s failed: %d, deleting\n",
+                            pszFilePath, dwError);
+                    if(remove(pszFilePath) < 0)
+                    {
+                        dwError = errno;
+                        pr_crit("unable to remove %s: %s\n",
+                                pszFilePath, strerror(dwError));
+                        BAIL_ON_TDNF_SYSTEM_ERROR(dwError);
+                    }
+                    nKeepPackage = 0;
+                    dwError = 0;
                 }
                 else if (dwError)
                 {
-                    pr_crit("checking package %s failed: %d, deleting\n", pszFilePath, dwError);
-                    if(remove(pszFilePath) < 0)
-                    {
-                        pr_crit("unable to remove %s: %s\n", pszFilePath, strerror(errno));
-                    }
+                    BAIL_ON_TDNF_ERROR(dwError);
                 }
             }
 
-            /* dwError==0 means TDNFGPGCheckPackage() succeeded or wasn't called */
-            if (pReposyncArgs->nDelete && dwError == 0)
+            if (pReposyncArgs->nDelete && nKeepPackage)
             {
                 /* if "delete" option is given, create a marker file to protect
                    what we just downloaded. Later all *.rpm files that do not
@@ -1354,11 +1344,7 @@ cleanup:
     {
         SolvFreePackageList(pPkgList);
     }
-    if(ts.pTS)
-    {
-        rpmtsCloseDB(ts.pTS);
-        rpmtsFree(ts.pTS);
-    }
+    tdnf_rpm_file_close(pRpmFile);
     TDNF_SAFE_FREE_MEMORY(pszDir);
     TDNF_SAFE_FREE_MEMORY(pszRepoDir);
     TDNF_SAFE_FREE_MEMORY(pszRootPath);
@@ -1424,10 +1410,10 @@ TDNFRepoQuery(
     dwError = TDNFNativeQueryBuildRepoInputs(pTdnf, &pRepos, &dwRepoCount);
     BAIL_ON_TDNF_ERROR(dwError);
 
-    dwError = TDNFRepoMdNativeRepoQuery(
+    dwError = TDNFRepoMdNativeRepoQueryConfig(
                   pRepos,
                   dwRepoCount,
-                  TDNFNativeQueryInstallRoot(pTdnf),
+                  pTdnf->pRpmConfig,
                   pRepoqueryArgs,
                   &pPkgInfo,
                   &dwCount);
@@ -1652,10 +1638,10 @@ TDNFSearchCommand(
     dwError = TDNFNativeQueryBuildRepoInputs(pTdnf, &pRepos, &dwRepoCount);
     BAIL_ON_TDNF_ERROR(dwError);
 
-    dwError = TDNFRepoMdNativeSearch(
+    dwError = TDNFRepoMdNativeSearchConfig(
                   pRepos,
                   dwRepoCount,
-                  TDNFNativeQueryInstallRoot(pTdnf),
+                  pTdnf->pRpmConfig,
                   pCmdArgs->ppszCmds,
                   nStartArgIndex,
                   pCmdArgs->nCmdCount,
@@ -1729,10 +1715,10 @@ TDNFUpdateInfo(
     dwError = TDNFNativeQueryBuildRepoInputs(pTdnf, &pRepos, &dwRepoCount);
     BAIL_ON_TDNF_ERROR(dwError);
 
-    dwError = TDNFRepoMdNativeUpdateInfoLines(
+    dwError = TDNFRepoMdNativeUpdateInfoLinesConfig(
                   pRepos,
                   dwRepoCount,
-                  TDNFNativeQueryInstallRoot(pTdnf),
+                  pTdnf->pRpmConfig,
                   ppszPackageNameSpecs,
                   dwSecurity,
                   pszSeverity,
@@ -1783,7 +1769,6 @@ TDNFHistoryResolve(
     struct history_delta *hd = NULL;
     struct history_flags_delta *hfd = NULL;
     struct history_nevra_map *hnm = NULL;
-    rpmts ts = NULL;
     Queue qInstall = {0};
     Queue qErase = {0};
     PTDNF_REPOMD_NATIVE_REPO_INPUT pRepos = NULL;
@@ -1828,30 +1813,11 @@ TDNFHistoryResolve(
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    ts = rpmtsCreate();
-    if(!ts)
-    {
-        dwError = ERROR_TDNF_RPMTS_CREATE_FAILED;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    if (rpmtsOpenDB(ts, O_RDONLY))
-    {
-        dwError = ERROR_TDNF_RPMTS_OPENDB_FAILED;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    if(rpmtsSetRootDir(ts, pTdnf->pArgs->pszInstallRoot))
-    {
-        dwError = ERROR_TDNF_RPMTS_BAD_ROOT_DIR;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
     dwError = TDNFGetHistoryCtx(pTdnf, &ctx,
                                 pHistoryArgs->nCommand != HISTORY_CMD_INIT);
     BAIL_ON_TDNF_ERROR(dwError);
 
-    rc = history_sync(ctx, pTdnf->pArgs->pszInstallRoot);
+    rc = history_sync_config(ctx, pTdnf->pRpmConfig);
     if (rc != 0)
     {
         dwError = ERROR_TDNF_HISTORY_ERROR;
@@ -1919,10 +1885,10 @@ TDNFHistoryResolve(
 
             queue_init(&qResult);
 
-            dwError = TDNFRepoMdNativeFindNevraMatches(
+            dwError = TDNFRepoMdNativeFindNevraMatchesConfig(
                           pRepos,
                           dwRepoCount,
-                          TDNFNativeQueryInstallRoot(pTdnf),
+                          pTdnf->pRpmConfig,
                           pszPkgName,
                           SOLV_NEVRA_UNINSTALLED,
                           &ppszMatches,
@@ -1952,10 +1918,10 @@ TDNFHistoryResolve(
                 ppszMatches = NULL;
                 dwMatchCount = 0;
 
-                dwError = TDNFRepoMdNativeFindNevraMatches(
+                dwError = TDNFRepoMdNativeFindNevraMatchesConfig(
                               pRepos,
                               dwRepoCount,
-                              TDNFNativeQueryInstallRoot(pTdnf),
+                              pTdnf->pRpmConfig,
                               pszPkgName,
                               SOLV_NEVRA_INSTALLED,
                               &ppszMatches,
@@ -1998,10 +1964,10 @@ TDNFHistoryResolve(
             if (strncmp(pszPkgName, "gpg-pubkey-", 11) == 0)
                 continue;
 
-            dwError = TDNFRepoMdNativeFindNevraMatches(
+            dwError = TDNFRepoMdNativeFindNevraMatchesConfig(
                           pRepos,
                           dwRepoCount,
-                          TDNFNativeQueryInstallRoot(pTdnf),
+                          pTdnf->pRpmConfig,
                           pszPkgName,
                           SOLV_NEVRA_INSTALLED,
                           &ppszMatches,
@@ -2069,10 +2035,6 @@ cleanup:
     queue_free(&queueGoal);
     queue_free(&qInstall);
     queue_free(&qErase);
-    if (ts) {
-        rpmtsCloseDB(ts);
-        rpmtsFree(ts);
-    }
     return dwError;
 
 error:
@@ -2432,6 +2394,7 @@ TDNFCloseHandle(
         {
             SolvFreeSack(pTdnf->pSack);
         }
+        tdnf_rpm_config_destroy(pTdnf->pRpmConfig);
         TDNFFreePlugins(pTdnf->pPlugins);
         TDNFFreeMemory(pTdnf);
     }

@@ -38,6 +38,8 @@ pub const Error = error{
     Truncated,
     BadMagic,
     BadHexField,
+    BadName,
+    SizeOverflow,
 };
 
 pub const Entry = struct {
@@ -70,7 +72,9 @@ pub const Walker = struct {
     /// Advance to the next entry. Returns null when the TRAILER!!!
     /// marker is hit.
     pub fn next(self: *Walker) Error!?Entry {
-        if (self.pos + HEADER_SIZE > self.buf.len) return error.Truncated;
+        const header_end = std.math.add(usize, self.pos, HEADER_SIZE) catch
+            return error.SizeOverflow;
+        if (header_end > self.buf.len) return error.Truncated;
         const h = self.buf[self.pos..][0..HEADER_SIZE];
         if (!std.mem.eql(u8, h[0..6], MAGIC)) return error.BadMagic;
 
@@ -86,20 +90,38 @@ pub const Walker = struct {
         const rdevmajor = try parseHex(h[78..86]);
         const rdevminor = try parseHex(h[86..94]);
         const namesize = try parseHex(h[94..102]);
+        if (namesize == 0) return error.BadName;
 
-        const name_start = self.pos + HEADER_SIZE;
-        const name_end = name_start + namesize;
+        const name_start = header_end;
+        const name_end = std.math.add(usize, name_start, namesize) catch
+            return error.SizeOverflow;
         if (name_end > self.buf.len) return error.Truncated;
+        if (self.buf[name_end - 1] != 0) return error.BadName;
         // Strip the trailing NUL from `namesize` for the returned slice.
         const name_slice = self.buf[name_start .. name_end - 1];
 
         // Advance past name + pad-to-4 boundary measured from header start.
-        const after_name = roundUp4(name_end - self.pos) + self.pos;
+        const after_name_relative = roundUp4Checked(name_end - self.pos) orelse
+            return error.SizeOverflow;
+        const after_name = std.math.add(
+            usize,
+            self.pos,
+            after_name_relative,
+        ) catch return error.SizeOverflow;
+        if (after_name > self.buf.len) return error.Truncated;
         // Then past data + pad-to-4.
-        const data_end = after_name + filesize;
+        const data_end = std.math.add(usize, after_name, filesize) catch
+            return error.SizeOverflow;
         if (data_end > self.buf.len) return error.Truncated;
         const data_slice = self.buf[after_name..data_end];
-        const after_data = roundUp4(data_end - self.pos) + self.pos;
+        const after_data_relative = roundUp4Checked(data_end - self.pos) orelse
+            return error.SizeOverflow;
+        const after_data = std.math.add(
+            usize,
+            self.pos,
+            after_data_relative,
+        ) catch return error.SizeOverflow;
+        if (after_data > self.buf.len) return error.Truncated;
         self.pos = after_data;
 
         if (std.mem.eql(u8, name_slice, TRAILER)) return null;
@@ -124,6 +146,11 @@ pub const Walker = struct {
 
 fn roundUp4(x: usize) usize {
     return (x + 3) & ~@as(usize, 3);
+}
+
+fn roundUp4Checked(x: usize) ?usize {
+    const with_padding = std.math.add(usize, x, 3) catch return null;
+    return with_padding & ~@as(usize, 3);
 }
 
 fn parseHex(s: []const u8) Error!u32 {
@@ -156,6 +183,23 @@ test "roundUp4" {
     try std.testing.expectEqual(@as(usize, 8), roundUp4(5));
 }
 
+test "walker rejects zero namesize and missing name terminator" {
+    var buf: [124]u8 = undefined;
+    @memset(&buf, 0);
+    @memcpy(buf[0..6], MAGIC);
+    @memcpy(buf[6..94], "00000000" ** 11);
+    @memcpy(buf[94..102], "00000000");
+    @memcpy(buf[102..110], "00000000");
+    var zero_name = Walker.init(&buf);
+    try std.testing.expectError(error.BadName, zero_name.next());
+
+    @memcpy(buf[94..102], "00000002");
+    buf[110] = 'x';
+    buf[111] = 'y';
+    var unterminated = Walker.init(&buf);
+    try std.testing.expectError(error.BadName, unterminated.next());
+}
+
 test "walker — TRAILER only" {
     // A cpio with just the end-of-archive marker. namesize = 11
     // (10 chars of "TRAILER!!!" + 1 NUL); filesize = 0; mode = 0;
@@ -163,19 +207,19 @@ test "walker — TRAILER only" {
     var buf: [124]u8 = undefined;
     @memset(&buf, 0);
     @memcpy(buf[0..6], "070701");
-    @memcpy(buf[6..14], "00000000");          // ino
-    @memcpy(buf[14..22], "00000000");          // mode
-    @memcpy(buf[22..30], "00000000");          // uid
-    @memcpy(buf[30..38], "00000000");          // gid
-    @memcpy(buf[38..46], "00000001");          // nlink
-    @memcpy(buf[46..54], "00000000");          // mtime
-    @memcpy(buf[54..62], "00000000");          // filesize
-    @memcpy(buf[62..70], "00000000");          // devmajor
-    @memcpy(buf[70..78], "00000000");          // devminor
-    @memcpy(buf[78..86], "00000000");          // rdevmajor
-    @memcpy(buf[86..94], "00000000");          // rdevminor
-    @memcpy(buf[94..102], "0000000b");         // namesize = 11
-    @memcpy(buf[102..110], "00000000");        // check
+    @memcpy(buf[6..14], "00000000"); // ino
+    @memcpy(buf[14..22], "00000000"); // mode
+    @memcpy(buf[22..30], "00000000"); // uid
+    @memcpy(buf[30..38], "00000000"); // gid
+    @memcpy(buf[38..46], "00000001"); // nlink
+    @memcpy(buf[46..54], "00000000"); // mtime
+    @memcpy(buf[54..62], "00000000"); // filesize
+    @memcpy(buf[62..70], "00000000"); // devmajor
+    @memcpy(buf[70..78], "00000000"); // devminor
+    @memcpy(buf[78..86], "00000000"); // rdevmajor
+    @memcpy(buf[86..94], "00000000"); // rdevminor
+    @memcpy(buf[94..102], "0000000b"); // namesize = 11
+    @memcpy(buf[102..110], "00000000"); // check
     @memcpy(buf[110..121], "TRAILER!!!\x00");
     // bytes 121..124 are padding
 

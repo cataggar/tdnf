@@ -255,12 +255,13 @@ const NativeContext = struct {
         raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
         repo_count: u32,
         root_dir: ?[*:0]const u8,
+        config: ?*const c.tdnf_rpm_config,
         load_installed: bool,
         available_options: AvailableLoadOptions,
         installed_options: InstalledLoadOptions,
     ) !void {
         if (load_installed) {
-            try self.datasets.append(try loadInstalledDataset(root_dir, installed_options));
+            try self.datasets.append(try loadInstalledDataset(root_dir, config, installed_options));
         }
 
         const repos = if (raw_repos) |repos|
@@ -325,9 +326,248 @@ pub export fn TDNFRepoMdNativeList(
     out_pkg_info: ?*c.PTDNF_PKG_INFO,
     out_count: ?*u32,
 ) u32 {
+    return nativeList(raw_repos, repo_count, root_dir, null, false, scope_int, specs, detail_int, out_pkg_info, out_count);
+}
+
+pub export fn TDNFRepoMdNativeListConfig(
+    raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
+    repo_count: u32,
+    config: ?*const c.tdnf_rpm_config,
+    scope_int: c_int,
+    specs: [*c][*c]u8,
+    detail_int: c_int,
+    out_pkg_info: ?*c.PTDNF_PKG_INFO,
+    out_count: ?*u32,
+) u32 {
+    return nativeList(raw_repos, repo_count, null, config, true, scope_int, specs, detail_int, out_pkg_info, out_count);
+}
+
+pub export fn TDNFRepoMdNativeSearch(
+    raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
+    repo_count: u32,
+    root_dir: ?[*:0]const u8,
+    search_strings: [*c][*c]u8,
+    start_index: c_int,
+    end_index: c_int,
+    out_pkg_info: ?*c.PTDNF_PKG_INFO,
+    out_count: ?*u32,
+) u32 {
+    return nativeSearch(raw_repos, repo_count, root_dir, null, false, search_strings, start_index, end_index, out_pkg_info, out_count);
+}
+
+pub export fn TDNFRepoMdNativeSearchConfig(
+    raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
+    repo_count: u32,
+    config: ?*const c.tdnf_rpm_config,
+    search_strings: [*c][*c]u8,
+    start_index: c_int,
+    end_index: c_int,
+    out_pkg_info: ?*c.PTDNF_PKG_INFO,
+    out_count: ?*u32,
+) u32 {
+    return nativeSearch(raw_repos, repo_count, null, config, true, search_strings, start_index, end_index, out_pkg_info, out_count);
+}
+
+pub export fn TDNFRepoMdNativeProvides(
+    raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
+    repo_count: u32,
+    root_dir: ?[*:0]const u8,
+    raw_spec: ?[*:0]const u8,
+    out_pkg_info: ?*c.PTDNF_PKG_INFO,
+) u32 {
+    return nativeProvides(raw_repos, repo_count, root_dir, null, false, raw_spec, out_pkg_info);
+}
+
+pub export fn TDNFRepoMdNativeProvidesConfig(
+    raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
+    repo_count: u32,
+    config: ?*const c.tdnf_rpm_config,
+    raw_spec: ?[*:0]const u8,
+    out_pkg_info: ?*c.PTDNF_PKG_INFO,
+) u32 {
+    return nativeProvides(raw_repos, repo_count, null, config, true, raw_spec, out_pkg_info);
+}
+
+pub export fn TDNFRepoMdNativeRepoQuery(
+    raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
+    repo_count: u32,
+    root_dir: ?[*:0]const u8,
+    repoquery_args: ?*const c.TDNF_REPOQUERY_ARGS,
+    out_pkg_info: ?*c.PTDNF_PKG_INFO,
+    out_count: ?*u32,
+) u32 {
+    return nativeRepoQuery(raw_repos, repo_count, root_dir, null, false, repoquery_args, out_pkg_info, out_count);
+}
+
+pub export fn TDNFRepoMdNativeRepoQueryConfig(
+    raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
+    repo_count: u32,
+    config: ?*const c.tdnf_rpm_config,
+    repoquery_args: ?*const c.TDNF_REPOQUERY_ARGS,
+    out_pkg_info: ?*c.PTDNF_PKG_INFO,
+    out_count: ?*u32,
+) u32 {
+    return nativeRepoQuery(raw_repos, repo_count, null, config, true, repoquery_args, out_pkg_info, out_count);
+}
+
+pub export fn TDNFRepoMdNativeFindNevraMatches(
+    raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
+    repo_count: u32,
+    root_dir: ?[*:0]const u8,
+    raw_nevra: ?[*:0]const u8,
+    installed_only: c_int,
+    out_matches: ?*[*c][*c]u8,
+    out_count: ?*u32,
+) u32 {
+    return nativeFindNevraMatches(raw_repos, repo_count, root_dir, null, false, raw_nevra, installed_only, out_matches, out_count);
+}
+
+pub export fn TDNFRepoMdNativeFindNevraMatchesConfig(
+    raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
+    repo_count: u32,
+    config: ?*const c.tdnf_rpm_config,
+    raw_nevra: ?[*:0]const u8,
+    installed_only: c_int,
+    out_matches: ?*[*c][*c]u8,
+    out_count: ?*u32,
+) u32 {
+    return nativeFindNevraMatches(raw_repos, repo_count, null, config, true, raw_nevra, installed_only, out_matches, out_count);
+}
+
+pub export fn TDNFRepoMdNativeUpdateInfoSummaryLines(
+    raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
+    repo_count: u32,
+    root_dir: ?[*:0]const u8,
+    package_specs: [*c][*c]u8,
+    security_only: u32,
+    raw_severity: ?[*:0]const u8,
+    out_lines: ?*[*c][*c]u8,
+    out_count: ?*u32,
+) u32 {
+    return nativeUpdateInfoSummaryLines(raw_repos, repo_count, root_dir, null, false, package_specs, security_only, raw_severity, out_lines, out_count);
+}
+
+pub export fn TDNFRepoMdNativeUpdateInfoSummaryLinesConfig(
+    raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
+    repo_count: u32,
+    config: ?*const c.tdnf_rpm_config,
+    package_specs: [*c][*c]u8,
+    security_only: u32,
+    raw_severity: ?[*:0]const u8,
+    out_lines: ?*[*c][*c]u8,
+    out_count: ?*u32,
+) u32 {
+    return nativeUpdateInfoSummaryLines(raw_repos, repo_count, null, config, true, package_specs, security_only, raw_severity, out_lines, out_count);
+}
+
+pub export fn TDNFRepoMdNativeUpdateInfoLines(
+    raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
+    repo_count: u32,
+    root_dir: ?[*:0]const u8,
+    package_specs: [*c][*c]u8,
+    security_only: u32,
+    raw_severity: ?[*:0]const u8,
+    reboot_required: u32,
+    out_lines: ?*[*c][*c]u8,
+    out_count: ?*u32,
+) u32 {
+    return nativeUpdateInfoLines(raw_repos, repo_count, root_dir, null, false, package_specs, security_only, raw_severity, reboot_required, out_lines, out_count);
+}
+
+pub export fn TDNFRepoMdNativeUpdateInfoLinesConfig(
+    raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
+    repo_count: u32,
+    config: ?*const c.tdnf_rpm_config,
+    package_specs: [*c][*c]u8,
+    security_only: u32,
+    raw_severity: ?[*:0]const u8,
+    reboot_required: u32,
+    out_lines: ?*[*c][*c]u8,
+    out_count: ?*u32,
+) u32 {
+    return nativeUpdateInfoLines(raw_repos, repo_count, null, config, true, package_specs, security_only, raw_severity, reboot_required, out_lines, out_count);
+}
+
+pub export fn TDNFRepoMdNativeMinVersionExcludeLines(
+    raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
+    repo_count: u32,
+    root_dir: ?[*:0]const u8,
+    raw_minversions: [*c][*c]u8,
+    out_lines: ?*[*c][*c]u8,
+    out_count: ?*u32,
+) u32 {
+    return nativeMinVersionExcludeLines(raw_repos, repo_count, root_dir, null, false, raw_minversions, out_lines, out_count);
+}
+
+pub export fn TDNFRepoMdNativeMinVersionExcludeLinesConfig(
+    raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
+    repo_count: u32,
+    config: ?*const c.tdnf_rpm_config,
+    raw_minversions: [*c][*c]u8,
+    out_lines: ?*[*c][*c]u8,
+    out_count: ?*u32,
+) u32 {
+    return nativeMinVersionExcludeLines(raw_repos, repo_count, null, config, true, raw_minversions, out_lines, out_count);
+}
+
+pub export fn TDNFRepoMdNativeRequiresForPackageRefs(
+    raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
+    repo_count: u32,
+    root_dir: ?[*:0]const u8,
+    raw_package_refs: [*c][*c]u8,
+    out_deps: ?*[*c][*c]u8,
+    out_count: ?*u32,
+) u32 {
+    return nativeRequiresForPackageRefs(raw_repos, repo_count, root_dir, null, false, raw_package_refs, out_deps, out_count);
+}
+
+pub export fn TDNFRepoMdNativeRequiresForPackageRefsConfig(
+    raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
+    repo_count: u32,
+    config: ?*const c.tdnf_rpm_config,
+    raw_package_refs: [*c][*c]u8,
+    out_deps: ?*[*c][*c]u8,
+    out_count: ?*u32,
+) u32 {
+    return nativeRequiresForPackageRefs(raw_repos, repo_count, null, config, true, raw_package_refs, out_deps, out_count);
+}
+
+pub export fn TDNFRepoMdNativeAutoInstalledOrphanLines(
+    root_dir: ?[*:0]const u8,
+    raw_auto_installed_refs: [*c][*c]u8,
+    out_lines: ?*[*c][*c]u8,
+    out_count: ?*u32,
+) u32 {
+    return nativeAutoInstalledOrphanLines(root_dir, null, false, raw_auto_installed_refs, out_lines, out_count);
+}
+
+pub export fn TDNFRepoMdNativeAutoInstalledOrphanLinesConfig(
+    config: ?*const c.tdnf_rpm_config,
+    raw_auto_installed_refs: [*c][*c]u8,
+    out_lines: ?*[*c][*c]u8,
+    out_count: ?*u32,
+) u32 {
+    return nativeAutoInstalledOrphanLines(null, config, true, raw_auto_installed_refs, out_lines, out_count);
+}
+
+fn nativeList(
+    raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
+    repo_count: u32,
+    root_dir: ?[*:0]const u8,
+    config: ?*const c.tdnf_rpm_config,
+    config_required: bool,
+    scope_int: c_int,
+    specs: [*c][*c]u8,
+    detail_int: c_int,
+    out_pkg_info: ?*c.PTDNF_PKG_INFO,
+    out_count: ?*u32,
+) u32 {
     clearError();
     if (out_pkg_info) |out| out.* = null;
     if (out_count) |out| out.* = 0;
+    if (config_required and config == null) {
+        return invalidParameter("null rpm config", .{});
+    }
 
     const out_items = out_pkg_info orelse return invalidParameter("null pkginfo output", .{});
     const out_total = out_count orelse return invalidParameter("null count output", .{});
@@ -339,7 +579,7 @@ pub export fn TDNFRepoMdNativeList(
     const need_installed = scopeNeedsInstalled(scope);
     const need_available = scopeNeedsAvailable(scope);
 
-    ctx.load(raw_repos, repo_count, root_dir, need_installed, .{}, .{}) catch |err| {
+    ctx.load(raw_repos, repo_count, root_dir, config, need_installed, .{}, .{}) catch |err| {
         return mapQueryError(err);
     };
     if (!need_available and ctx.availableDatasetSlice().len != 0) {
@@ -368,10 +608,12 @@ pub export fn TDNFRepoMdNativeList(
     return 0;
 }
 
-pub export fn TDNFRepoMdNativeSearch(
+fn nativeSearch(
     raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
     repo_count: u32,
     root_dir: ?[*:0]const u8,
+    config: ?*const c.tdnf_rpm_config,
+    config_required: bool,
     search_strings: [*c][*c]u8,
     start_index: c_int,
     end_index: c_int,
@@ -381,6 +623,9 @@ pub export fn TDNFRepoMdNativeSearch(
     clearError();
     if (out_pkg_info) |out| out.* = null;
     if (out_count) |out| out.* = 0;
+    if (config_required and config == null) {
+        return invalidParameter("null rpm config", .{});
+    }
 
     const out_items = out_pkg_info orelse return invalidParameter("null pkginfo output", .{});
     const out_total = out_count orelse return invalidParameter("null count output", .{});
@@ -399,6 +644,7 @@ pub export fn TDNFRepoMdNativeSearch(
         raw_repos,
         repo_count,
         root_dir,
+        config,
         true,
         .{ .need_updateinfo = true },
         .{},
@@ -423,15 +669,20 @@ pub export fn TDNFRepoMdNativeSearch(
     return 0;
 }
 
-pub export fn TDNFRepoMdNativeProvides(
+fn nativeProvides(
     raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
     repo_count: u32,
     root_dir: ?[*:0]const u8,
+    config: ?*const c.tdnf_rpm_config,
+    config_required: bool,
     raw_spec: ?[*:0]const u8,
     out_pkg_info: ?*c.PTDNF_PKG_INFO,
 ) u32 {
     clearError();
     if (out_pkg_info) |out| out.* = null;
+    if (config_required and config == null) {
+        return invalidParameter("null rpm config", .{});
+    }
 
     const out_items = out_pkg_info orelse return invalidParameter("null provides output", .{});
     const spec = spanRequired(raw_spec, "provides spec") orelse return c.ERROR_TDNF_INVALID_PARAMETER;
@@ -443,6 +694,7 @@ pub export fn TDNFRepoMdNativeProvides(
         raw_repos,
         repo_count,
         root_dir,
+        config,
         true,
         .{ .need_filelists = spec.len != 0 and spec[0] == '/' },
         .{
@@ -468,10 +720,12 @@ pub export fn TDNFRepoMdNativeProvides(
     return 0;
 }
 
-pub export fn TDNFRepoMdNativeRepoQuery(
+fn nativeRepoQuery(
     raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
     repo_count: u32,
     root_dir: ?[*:0]const u8,
+    config: ?*const c.tdnf_rpm_config,
+    config_required: bool,
     repoquery_args: ?*const c.TDNF_REPOQUERY_ARGS,
     out_pkg_info: ?*c.PTDNF_PKG_INFO,
     out_count: ?*u32,
@@ -479,6 +733,9 @@ pub export fn TDNFRepoMdNativeRepoQuery(
     clearError();
     if (out_pkg_info) |out| out.* = null;
     if (out_count) |out| out.* = 0;
+    if (config_required and config == null) {
+        return invalidParameter("null rpm config", .{});
+    }
 
     const args = repoquery_args orelse return invalidParameter("null repoquery args", .{});
     const out_items = out_pkg_info orelse return invalidParameter("null pkginfo output", .{});
@@ -494,6 +751,7 @@ pub export fn TDNFRepoMdNativeRepoQuery(
         raw_repos,
         repo_count,
         root_dir,
+        config,
         repoQueryNeedsInstalled(args, scope),
         available_options,
         installed_options,
@@ -546,6 +804,7 @@ pub export fn TDNFRepoMdNativeUpdateAdvisoryIds(
         raw_repos,
         repo_count,
         null,
+        null,
         false,
         .{ .need_updateinfo = true },
         .{},
@@ -569,10 +828,12 @@ pub export fn TDNFRepoMdNativeUpdateAdvisoryIds(
     return 0;
 }
 
-pub export fn TDNFRepoMdNativeFindNevraMatches(
+fn nativeFindNevraMatches(
     raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
     repo_count: u32,
     root_dir: ?[*:0]const u8,
+    config: ?*const c.tdnf_rpm_config,
+    config_required: bool,
     raw_nevra: ?[*:0]const u8,
     installed_only: c_int,
     out_matches: ?*[*c][*c]u8,
@@ -581,6 +842,9 @@ pub export fn TDNFRepoMdNativeFindNevraMatches(
     clearError();
     if (out_matches) |out| out.* = null;
     if (out_count) |out| out.* = 0;
+    if (config_required and config == null) {
+        return invalidParameter("null rpm config", .{});
+    }
 
     const nevra = spanRequired(raw_nevra, "nevra") orelse return c.ERROR_TDNF_INVALID_PARAMETER;
     const matches_out = out_matches orelse return invalidParameter("null match output", .{});
@@ -593,6 +857,7 @@ pub export fn TDNFRepoMdNativeFindNevraMatches(
         raw_repos,
         repo_count,
         root_dir,
+        config,
         installed_only != 0,
         .{},
         .{},
@@ -639,6 +904,7 @@ pub export fn TDNFRepoMdNativeFindNameEvrMatches(
         raw_repos,
         repo_count,
         null,
+        null,
         false,
         .{},
         .{},
@@ -663,10 +929,12 @@ pub export fn TDNFRepoMdNativeFindNameEvrMatches(
     return 0;
 }
 
-pub export fn TDNFRepoMdNativeUpdateInfoSummaryLines(
+fn nativeUpdateInfoSummaryLines(
     raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
     repo_count: u32,
     root_dir: ?[*:0]const u8,
+    config: ?*const c.tdnf_rpm_config,
+    config_required: bool,
     package_specs: [*c][*c]u8,
     security_only: u32,
     raw_severity: ?[*:0]const u8,
@@ -676,6 +944,9 @@ pub export fn TDNFRepoMdNativeUpdateInfoSummaryLines(
     clearError();
     if (out_lines) |out| out.* = null;
     if (out_count) |out| out.* = 0;
+    if (config_required and config == null) {
+        return invalidParameter("null rpm config", .{});
+    }
 
     const lines_out = out_lines orelse return invalidParameter("null summary output", .{});
     const count_out = out_count orelse return invalidParameter("null summary count output", .{});
@@ -688,6 +959,7 @@ pub export fn TDNFRepoMdNativeUpdateInfoSummaryLines(
         raw_repos,
         repo_count,
         root_dir,
+        config,
         true,
         .{ .need_updateinfo = true },
         .{},
@@ -707,10 +979,12 @@ pub export fn TDNFRepoMdNativeUpdateInfoSummaryLines(
     return 0;
 }
 
-pub export fn TDNFRepoMdNativeUpdateInfoLines(
+fn nativeUpdateInfoLines(
     raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
     repo_count: u32,
     root_dir: ?[*:0]const u8,
+    config: ?*const c.tdnf_rpm_config,
+    config_required: bool,
     package_specs: [*c][*c]u8,
     security_only: u32,
     raw_severity: ?[*:0]const u8,
@@ -721,6 +995,9 @@ pub export fn TDNFRepoMdNativeUpdateInfoLines(
     clearError();
     if (out_lines) |out| out.* = null;
     if (out_count) |out| out.* = 0;
+    if (config_required and config == null) {
+        return invalidParameter("null rpm config", .{});
+    }
 
     const lines_out = out_lines orelse return invalidParameter("null updateinfo output", .{});
     const count_out = out_count orelse return invalidParameter("null updateinfo count output", .{});
@@ -733,6 +1010,7 @@ pub export fn TDNFRepoMdNativeUpdateInfoLines(
         raw_repos,
         repo_count,
         root_dir,
+        config,
         true,
         .{ .need_updateinfo = true },
         .{},
@@ -752,10 +1030,12 @@ pub export fn TDNFRepoMdNativeUpdateInfoLines(
     return 0;
 }
 
-pub export fn TDNFRepoMdNativeMinVersionExcludeLines(
+fn nativeMinVersionExcludeLines(
     raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
     repo_count: u32,
     root_dir: ?[*:0]const u8,
+    config: ?*const c.tdnf_rpm_config,
+    config_required: bool,
     raw_minversions: [*c][*c]u8,
     out_lines: ?*[*c][*c]u8,
     out_count: ?*u32,
@@ -763,6 +1043,9 @@ pub export fn TDNFRepoMdNativeMinVersionExcludeLines(
     clearError();
     if (out_lines) |out| out.* = null;
     if (out_count) |out| out.* = 0;
+    if (config_required and config == null) {
+        return invalidParameter("null rpm config", .{});
+    }
 
     const lines_out = out_lines orelse return invalidParameter("null minversion output", .{});
     const count_out = out_count orelse return invalidParameter("null minversion count output", .{});
@@ -774,6 +1057,7 @@ pub export fn TDNFRepoMdNativeMinVersionExcludeLines(
         raw_repos,
         repo_count,
         root_dir,
+        config,
         true,
         .{},
         .{},
@@ -822,6 +1106,7 @@ pub export fn TDNFRepoMdNativeDowngradeCandidateLines(
         raw_repos,
         repo_count,
         root_dir,
+        null,
         false,
         .{},
         .{},
@@ -846,10 +1131,12 @@ pub export fn TDNFRepoMdNativeDowngradeCandidateLines(
     return 0;
 }
 
-pub export fn TDNFRepoMdNativeRequiresForPackageRefs(
+fn nativeRequiresForPackageRefs(
     raw_repos: ?[*]const c.TDNF_REPOMD_NATIVE_REPO_INPUT,
     repo_count: u32,
     root_dir: ?[*:0]const u8,
+    config: ?*const c.tdnf_rpm_config,
+    config_required: bool,
     raw_package_refs: [*c][*c]u8,
     out_deps: ?*[*c][*c]u8,
     out_count: ?*u32,
@@ -857,6 +1144,9 @@ pub export fn TDNFRepoMdNativeRequiresForPackageRefs(
     clearError();
     if (out_deps) |out| out.* = null;
     if (out_count) |out| out.* = 0;
+    if (config_required and config == null) {
+        return invalidParameter("null rpm config", .{});
+    }
 
     const deps_out = out_deps orelse return invalidParameter("null requires output", .{});
     const count_out = out_count orelse return invalidParameter("null requires count output", .{});
@@ -871,6 +1161,7 @@ pub export fn TDNFRepoMdNativeRequiresForPackageRefs(
         raw_repos,
         repo_count,
         root_dir,
+        config,
         true,
         .{},
         .{ .need_relations = true },
@@ -890,8 +1181,10 @@ pub export fn TDNFRepoMdNativeRequiresForPackageRefs(
     return 0;
 }
 
-pub export fn TDNFRepoMdNativeAutoInstalledOrphanLines(
+fn nativeAutoInstalledOrphanLines(
     root_dir: ?[*:0]const u8,
+    config: ?*const c.tdnf_rpm_config,
+    config_required: bool,
     raw_auto_installed_refs: [*c][*c]u8,
     out_lines: ?*[*c][*c]u8,
     out_count: ?*u32,
@@ -899,6 +1192,9 @@ pub export fn TDNFRepoMdNativeAutoInstalledOrphanLines(
     clearError();
     if (out_lines) |out| out.* = null;
     if (out_count) |out| out.* = 0;
+    if (config_required and config == null) {
+        return invalidParameter("null rpm config", .{});
+    }
 
     const lines_out = out_lines orelse return invalidParameter("null orphan output", .{});
     const count_out = out_count orelse return invalidParameter("null orphan count output", .{});
@@ -913,6 +1209,7 @@ pub export fn TDNFRepoMdNativeAutoInstalledOrphanLines(
         null,
         0,
         root_dir,
+        config,
         true,
         .{},
         .{
@@ -1173,12 +1470,12 @@ fn loadAvailableDataset(raw_repo: c.TDNF_REPOMD_NATIVE_REPO_INPUT, options: Avai
     };
 }
 
-fn loadInstalledDataset(root_dir: ?[*:0]const u8, options: InstalledLoadOptions) !LoadedDataset {
+fn loadInstalledDataset(root_dir: ?[*:0]const u8, config: ?*const c.tdnf_rpm_config, options: InstalledLoadOptions) !LoadedDataset {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.c_allocator);
     errdefer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const repository = try loadInstalledRepositoryModel(arena, root_dir, options);
+    const repository = try loadInstalledRepositoryModel(arena, root_dir, config, options);
 
     return .{
         .kind = .installed,
@@ -1188,11 +1485,14 @@ fn loadInstalledDataset(root_dir: ?[*:0]const u8, options: InstalledLoadOptions)
     };
 }
 
-fn loadInstalledRepositoryModel(arena: std.mem.Allocator, root_dir: ?[*:0]const u8, options: InstalledLoadOptions) !model.RepositoryModel {
+fn loadInstalledRepositoryModel(arena: std.mem.Allocator, root_dir: ?[*:0]const u8, config: ?*const c.tdnf_rpm_config, options: InstalledLoadOptions) !model.RepositoryModel {
     var builder = RepositoryBuilder.init(arena);
     errdefer builder.deinit();
 
-    const iter = c.tdnf_rpmdb_iter_open(root_dir) orelse return error.RpmDbOpenFailed;
+    const iter = if (config) |rpm_config|
+        c.tdnf_rpmdb_iter_open_config(rpm_config)
+    else
+        c.tdnf_rpmdb_iter_open(root_dir) orelse return error.RpmDbOpenFailed;
     defer c.tdnf_rpmdb_iter_close(iter);
 
     while (true) {
@@ -2088,20 +2388,35 @@ fn parseEntryArray(raw_values: [*c][*c]u8) ![]NameEvrQuery {
         return try std.heap.c_allocator.alloc(NameEvrQuery, 0);
     }
 
-    var count: usize = 0;
-    while (raw_values[count] != null) : (count += 1) {}
-    if (count == 0) {
+    var value_count: usize = 0;
+    var entry_count: usize = 0;
+    while (raw_values[value_count] != null) : (value_count += 1) {
+        var tokens = std.mem.tokenizeAny(
+            u8,
+            std.mem.span(raw_values[value_count]),
+            " \t\r\n",
+        );
+        while (tokens.next() != null) entry_count += 1;
+    }
+    if (entry_count == 0) {
         return try std.heap.c_allocator.alloc(NameEvrQuery, 0);
     }
 
-    const out = try std.heap.c_allocator.alloc(NameEvrQuery, count);
+    const out = try std.heap.c_allocator.alloc(NameEvrQuery, entry_count);
     var populated: usize = 0;
     errdefer std.heap.c_allocator.free(out);
 
     var index: usize = 0;
-    while (index < count) : (index += 1) {
-        out[populated] = try parseNameEvrQuery(std.mem.span(raw_values[index]));
-        populated += 1;
+    while (index < value_count) : (index += 1) {
+        var tokens = std.mem.tokenizeAny(
+            u8,
+            std.mem.span(raw_values[index]),
+            " \t\r\n",
+        );
+        while (tokens.next()) |token| {
+            out[populated] = try parseNameEvrQuery(token);
+            populated += 1;
+        }
     }
 
     return out[0..populated];
@@ -2115,7 +2430,8 @@ fn parseEntriesText(allocator: std.mem.Allocator, text: []const u8) ![]NameEvrQu
         if (trimmed.len == 0 or trimmed[0] == '#') {
             continue;
         }
-        count += 1;
+        var tokens = std.mem.tokenizeAny(u8, trimmed, " \t\r\n");
+        while (tokens.next() != null) count += 1;
     }
 
     const out = try allocator.alloc(NameEvrQuery, count);
@@ -2128,8 +2444,11 @@ fn parseEntriesText(allocator: std.mem.Allocator, text: []const u8) ![]NameEvrQu
         if (trimmed.len == 0 or trimmed[0] == '#') {
             continue;
         }
-        out[populated] = try parseNameEvrQuery(trimmed);
-        populated += 1;
+        var tokens = std.mem.tokenizeAny(u8, trimmed, " \t\r\n");
+        while (tokens.next()) |token| {
+            out[populated] = try parseNameEvrQuery(token);
+            populated += 1;
+        }
     }
 
     return out[0..populated];
@@ -2362,6 +2681,7 @@ fn computeMinVersionExcludeLines(ctx: *NativeContext, entries: []const MinVersio
 }
 
 fn computeDowngradeCandidateLines(ctx: *NativeContext, entries: []const MinVersionEntry, installed_ref: []const u8) ![][]const u8 {
+    _ = entries;
     const installed = (try parsePackageRefSpec(installed_ref)).nevra;
     var best: ?PackageRef = null;
 
@@ -2371,9 +2691,6 @@ fn computeDowngradeCandidateLines(ctx: *NativeContext, entries: []const MinVersi
         }
         for (dataset.repository.packages, 0..) |pkg, package_index| {
             if (!dataset.packageAllowed(package_index)) {
-                continue;
-            }
-            if (!packagePassesMinVersions(pkg, entries)) {
                 continue;
             }
             if (!std.mem.eql(u8, pkg.nevra.name, installed.name)) {
@@ -2838,7 +3155,7 @@ fn buildSearchInfoArray(ctx: *NativeContext, refs: []const SearchRef) !c.PTDNF_P
         switch (ref) {
             .package => |pkg_ref| {
                 const pkg = ctx.package(pkg_ref);
-                try fillBasicPkgIdentity(item, ctx.repoId(pkg_ref), pkg, ctx.datasets.items[pkg_ref.dataset_index].kind == .available);
+                try fillBasicPkgIdentity(item, ctx.repoId(pkg_ref), pkg, false);
                 item[0].pszSummary = try dupOptionalCString(pkgquery.summary(pkg));
             },
             .advisory => |adv_ref| {
@@ -2901,7 +3218,7 @@ fn buildProvidesInfoList(ctx: *NativeContext, refs: []const PackageRef) !c.PTDNF
             errdefer freeTrackedPackageInfoList(allocated);
 
             const pkg = ctx.package(ref);
-            try fillBasicPkgIdentity(allocated, ctx.repoId(ref), pkg, ctx.datasets.items[ref.dataset_index].kind == .available);
+            try fillBasicPkgIdentity(allocated, ctx.repoId(ref), pkg, false);
             allocated[0].pszSummary = try dupOptionalCString(pkgquery.summary(pkg));
             break :blk allocated;
         };
@@ -2921,7 +3238,7 @@ fn buildPackageInfoArray(ctx: *NativeContext, refs: []const PackageRef, detail: 
         const item: c.PTDNF_PKG_INFO = @ptrCast(array + index);
         const pkg = ctx.package(ref);
         const explicit_epoch = ctx.datasets.items[ref.dataset_index].kind == .available;
-        try fillBasicPkgIdentity(item, ctx.repoId(ref), pkg, explicit_epoch);
+        try fillBasicPkgIdentity(item, ctx.repoId(ref), pkg, false);
 
         if (fill_queryformat) {
             try fillQueryFormatFields(item, ctx, ref, explicit_epoch);

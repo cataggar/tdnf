@@ -50,6 +50,7 @@ static int luaPushResult(lua_State *L, int nResult)
 }
 
 static int luaRpmExecute(lua_State *L);
+static int luaRpmInput(lua_State *L);
 static int luaRpmSpawn(lua_State *L);
 static int luaRpmGlob(lua_State *L);
 static int luaRpmVercmp(lua_State *L);
@@ -69,6 +70,7 @@ static int luaOpenPosix(lua_State *L);
 
 static const luaL_Reg gRpmLib[] = {
     { "execute", luaRpmExecute },
+    { "input", luaRpmInput },
     { "spawn", luaRpmSpawn },
     { "glob", luaRpmGlob },
     { "vercmp", luaRpmVercmp },
@@ -501,6 +503,27 @@ static int luaRpmExecute(lua_State *L)
     }
 
     return luaPushResult(L, nStatus);
+}
+
+static int luaRpmInput(lua_State *L)
+{
+    char *pszLine = NULL;
+    size_t nCapacity = 0;
+    ssize_t nLength = getline(&pszLine, &nCapacity, stdin);
+
+    if (nLength < 0) {
+        free(pszLine);
+        lua_pushnil(L);
+        return 1;
+    }
+    while (nLength > 0 &&
+           (pszLine[nLength - 1] == '\n' ||
+            pszLine[nLength - 1] == '\r')) {
+        nLength--;
+    }
+    lua_pushlstring(L, pszLine, (size_t)nLength);
+    free(pszLine);
+    return 1;
 }
 
 static int luaRpmGlob(lua_State *L)

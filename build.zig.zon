@@ -22,6 +22,7 @@
         "build.zig.zon",
         "COPYING",
         "README.md",
+        "abi",
         "include",
         "common",
         "client",

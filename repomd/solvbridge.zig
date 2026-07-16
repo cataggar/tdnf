@@ -145,7 +145,42 @@ pub export fn TDNFRepoMdNativeLoadInstalledSolvRepo(
         return mapBuildError(err);
     };
 
-    loadInstalledPackagesIntoBridge(arena, &bridge, root_dir, flags) catch |err| {
+    loadInstalledPackagesIntoBridge(arena, &bridge, root_dir, null, flags) catch |err| {
+        return mapNativeRpmError(err);
+    };
+
+    bridge.finish() catch |err| {
+        return mapBuildError(err);
+    };
+
+    return 0;
+}
+
+pub export fn TDNFRepoMdNativeLoadInstalledSolvRepoConfig(
+    raw_repo: ?*c.Repo,
+    config: ?*const c.tdnf_rpm_config,
+    flags: c_int,
+) u32 {
+    clearError();
+
+    const repo = raw_repo orelse {
+        setError("null repo", .{});
+        return c.ERROR_TDNF_INVALID_PARAMETER;
+    };
+    if (repo.pool == null or config == null) {
+        setError("repo or rpm config is null", .{});
+        return c.ERROR_TDNF_INVALID_PARAMETER;
+    }
+
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var bridge = NativeRpmBridge.init(arena, repo, optionsFromRpmFlags(flags)) catch |err| {
+        return mapBuildError(err);
+    };
+
+    loadInstalledPackagesIntoBridge(arena, &bridge, null, config, flags) catch |err| {
         return mapNativeRpmError(err);
     };
 
@@ -975,9 +1010,13 @@ fn loadInstalledPackagesIntoBridge(
     arena: std.mem.Allocator,
     bridge: *NativeRpmBridge,
     root_dir: ?[*:0]const u8,
+    config: ?*const c.tdnf_rpm_config,
     flags: c_int,
 ) NativeRpmError!void {
-    const iter = c.tdnf_rpmdb_iter_open(root_dir) orelse {
+    const iter = (if (config) |cfg|
+        c.tdnf_rpmdb_iter_open_config(cfg)
+    else
+        c.tdnf_rpmdb_iter_open(root_dir)) orelse {
         setError("failed to open rpmdb iterator: {s}", .{std.mem.span(c.tdnf_rpmdb_last_error())});
         return error.RpmDbOpenFailed;
     };

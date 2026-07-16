@@ -1,5 +1,6 @@
 const std = @import("std");
 const header = @import("rpm_header");
+const install_engine = @import("install.zig");
 const txn_config = @import("txn_config.zig");
 
 const Allocator = std.mem.Allocator;
@@ -17,14 +18,9 @@ const c = @cImport({
     @cInclude("time.h");
     @cInclude("unistd.h");
 });
-
-const RPMTRANS_FLAG_NOSCRIPTS: u32 = 1 << 2;
-const RPMTRANS_FLAG_NOPRE: u32 = 1 << 17;
-const RPMTRANS_FLAG_NOPOST: u32 = 1 << 18;
-const RPMTRANS_FLAG_NOPREUN: u32 = 1 << 21;
-const RPMTRANS_FLAG_NOPOSTUN: u32 = 1 << 22;
-const RPMTRANS_FLAG_NOPRETRANS: u32 = 1 << 24;
-const RPMTRANS_FLAG_NOPOSTTRANS: u32 = 1 << 25;
+const rpmtrans = @cImport({
+    @cInclude("tdnfrpmtrans.h");
+});
 
 pub const Phase = enum(u32) {
     pre = 0,
@@ -52,18 +48,23 @@ pub const Result = struct {
 
 pub const Options = struct {
     install_root: []const u8,
+    config: ?*const txn_config.TxnConfig = null,
     trans_flags: u32 = 0,
     rpmdefines: []const []const u8 = &.{},
     arg1: ?i32 = null,
     arg2: ?i32 = null,
+    stdin_data: ?[]const u8 = null,
     script_fd: ?c_int = null,
     redirect_stdout_to_stderr: bool = false,
+    pinned_root_fd: ?c_int = null,
 };
 
 pub const RunError = Allocator.Error ||
     txn_config.InitError ||
+    txn_config.ExpandError ||
     txn_config.ParseDefineError ||
     txn_config.SetMacroError ||
+    install_engine.Error ||
     error{
         BadHeader,
         PathTooLong,
@@ -85,42 +86,42 @@ fn phaseInfo(phase: Phase) PhaseInfo {
             .name = "%pre",
             .script_tag = @intFromEnum(header.TagId.prein),
             .prog_tag = @intFromEnum(header.TagId.preinprog),
-            .skip_flag = RPMTRANS_FLAG_NOPRE,
+            .skip_flag = rpmtrans.TDNF_RPMTRANS_FLAG_NOPRE,
             .critical = true,
         },
         .post => .{
             .name = "%post",
             .script_tag = @intFromEnum(header.TagId.postin),
             .prog_tag = @intFromEnum(header.TagId.postinprog),
-            .skip_flag = RPMTRANS_FLAG_NOPOST,
+            .skip_flag = rpmtrans.TDNF_RPMTRANS_FLAG_NOPOST,
             .critical = false,
         },
         .preun => .{
             .name = "%preun",
             .script_tag = @intFromEnum(header.TagId.preun),
             .prog_tag = @intFromEnum(header.TagId.preunprog),
-            .skip_flag = RPMTRANS_FLAG_NOPREUN,
+            .skip_flag = rpmtrans.TDNF_RPMTRANS_FLAG_NOPREUN,
             .critical = true,
         },
         .postun => .{
             .name = "%postun",
             .script_tag = @intFromEnum(header.TagId.postun),
             .prog_tag = @intFromEnum(header.TagId.postunprog),
-            .skip_flag = RPMTRANS_FLAG_NOPOSTUN,
+            .skip_flag = rpmtrans.TDNF_RPMTRANS_FLAG_NOPOSTUN,
             .critical = false,
         },
         .pretrans => .{
             .name = "%pretrans",
             .script_tag = @intFromEnum(header.TagId.pretrans),
             .prog_tag = @intFromEnum(header.TagId.pretransprog),
-            .skip_flag = RPMTRANS_FLAG_NOPRETRANS,
+            .skip_flag = rpmtrans.TDNF_RPMTRANS_FLAG_NOPRETRANS,
             .critical = true,
         },
         .posttrans => .{
             .name = "%posttrans",
             .script_tag = @intFromEnum(header.TagId.posttrans),
             .prog_tag = @intFromEnum(header.TagId.posttransprog),
-            .skip_flag = RPMTRANS_FLAG_NOPOSTTRANS,
+            .skip_flag = rpmtrans.TDNF_RPMTRANS_FLAG_NOPOSTTRANS,
             .critical = false,
         },
     };
@@ -133,7 +134,8 @@ pub fn runHeaderScript(
     options: Options,
 ) RunError!Result {
     const info = phaseInfo(phase);
-    if ((options.trans_flags & RPMTRANS_FLAG_NOSCRIPTS) != 0 or
+    if ((options.trans_flags & (rpmtrans.TDNF_RPMTRANS_FLAG_NOSCRIPTS |
+        rpmtrans.TDNF_RPMTRANS_FLAG_JUSTDB)) != 0 or
         (options.trans_flags & info.skip_flag) != 0)
     {
         return .{
@@ -168,12 +170,35 @@ pub fn runPreparedScript(
     critical: bool,
     options: Options,
 ) RunError!Result {
-    var config = try txn_config.TxnConfig.init(allocator, options.install_root);
+    var config = if (options.config) |supplied|
+        try supplied.clone(allocator)
+    else
+        try txn_config.TxnConfig.init(allocator, options.install_root);
     defer config.deinit();
 
     for (options.rpmdefines) |define| {
         _ = try config.applyRpmDefine(define);
     }
+    var pinned_root = if (options.pinned_root_fd) |root_fd| blk: {
+        const duplicate = std.c.fcntl(
+            root_fd,
+            std.c.F.DUPFD_CLOEXEC,
+            @as(c_int, 0),
+        );
+        if (duplicate < 0) return error.SyscallFailed;
+        break :blk try install_engine.RootDir.initFromOwnedFd(
+            allocator,
+            duplicate,
+            null,
+            null,
+        );
+    } else try install_engine.RootDir.init(
+        allocator,
+        config.installRoot(),
+        null,
+        null,
+    );
+    defer pinned_root.deinit();
 
     if (interpreter.len == 0) {
         return .{
@@ -193,7 +218,14 @@ pub fn runPreparedScript(
         if (c.tdnf_rpmzig_lua_supported() == 0) {
             return error.UnsupportedInterpreter;
         }
-        return try runLuaScriptProcess(allocator, &config, body, critical, options);
+        return try runLuaScriptProcess(
+            allocator,
+            &config,
+            &pinned_root,
+            body,
+            critical,
+            options,
+        );
     }
 
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -203,10 +235,7 @@ pub fn runPreparedScript(
     var script_file: ?TempScript = null;
     defer {
         if (script_file) |temp| {
-            const host_z = arena_alloc.dupeZ(u8, temp.host_path) catch null;
-            if (host_z) |path_z| {
-                _ = linux.unlink(path_z.ptr);
-            }
+            pinned_root.remove(temp.exec_path) catch {};
         }
     }
 
@@ -219,7 +248,12 @@ pub fn runPreparedScript(
     }
 
     if (script_body) |body| {
-        script_file = try writeTempScript(arena_alloc, &config, body);
+        script_file = try writeTempScript(
+            arena_alloc,
+            &config,
+            &pinned_root,
+            body,
+        );
         const exec_z = try arena_alloc.dupeZ(u8, script_file.?.exec_path);
         try argv.append(arena_alloc, exec_z.ptr);
     }
@@ -236,8 +270,12 @@ pub fn runPreparedScript(
     }
     try argv.append(arena_alloc, null);
 
-    const path_env = try arena_alloc.dupeZ(u8, config.value(.install_script_path));
-    const install_root_z = try arena_alloc.dupeZ(u8, config.installRoot());
+    const expanded_path = try config.expandMacroAlloc(arena_alloc, .install_script_path);
+    const path_env = try arena_alloc.dupeZ(u8, expanded_path);
+    const input_fd = try prepareInputFd(options.stdin_data);
+    defer if (input_fd >= 0) {
+        _ = linux.close(input_fd);
+    };
 
     const pid = c.fork();
     if (pid < 0) {
@@ -247,7 +285,9 @@ pub fn runPreparedScript(
         runExecChild(
             argv.items.ptr,
             path_env.ptr,
-            install_root_z.ptr,
+            pinned_root.fd,
+            std.mem.eql(u8, config.installRoot(), "/"),
+            input_fd,
             options.script_fd orelse -1,
             options.redirect_stdout_to_stderr,
         );
@@ -259,14 +299,19 @@ pub fn runPreparedScript(
 fn runLuaScriptProcess(
     allocator: Allocator,
     config: *const txn_config.TxnConfig,
+    pinned_root: *const install_engine.RootDir,
     body: []const u8,
     critical: bool,
     options: Options,
 ) RunError!Result {
-    const path_env = try allocator.dupeZ(u8, config.value(.install_script_path));
+    const expanded_path = try config.expandMacroAlloc(allocator, .install_script_path);
+    defer allocator.free(expanded_path);
+    const path_env = try allocator.dupeZ(u8, expanded_path);
     defer allocator.free(path_env);
-    const install_root_z = try allocator.dupeZ(u8, config.installRoot());
-    defer allocator.free(install_root_z);
+    const input_fd = try prepareInputFd(options.stdin_data);
+    defer if (input_fd >= 0) {
+        _ = linux.close(input_fd);
+    };
 
     const pid = c.fork();
     if (pid < 0) {
@@ -277,9 +322,11 @@ fn runLuaScriptProcess(
             body.ptr,
             body.len,
             path_env.ptr,
-            install_root_z.ptr,
+            pinned_root.fd,
+            std.mem.eql(u8, config.installRoot(), "/"),
             options.arg1 orelse -1,
             options.arg2 orelse -1,
+            input_fd,
             options.script_fd orelse -1,
             options.redirect_stdout_to_stderr,
         );
@@ -348,20 +395,21 @@ fn collectInterpreterArgs(
 }
 
 const TempScript = struct {
-    host_path: []const u8,
     exec_path: []const u8,
 };
 
 fn writeTempScript(
     allocator: Allocator,
     config: *const txn_config.TxnConfig,
+    pinned_root: *const install_engine.RootDir,
     body: []const u8,
 ) RunError!TempScript {
-    var host_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const host_dir = config.resolvePath(.tmppath, &host_dir_buf) catch return error.PathTooLong;
-    try ensureDirPathAbsolute(allocator, host_dir);
-
-    const exec_dir = config.value(.tmppath);
+    const exec_dir = try config.expandMacroAlloc(allocator, .tmppath);
+    defer allocator.free(exec_dir);
+    if (exec_dir.len == 0 or exec_dir[0] != '/') {
+        return error.SyscallFailed;
+    }
+    try pinned_root.ensureDirectory(exec_dir);
 
     var attempts: usize = 0;
     while (attempts < 16) : (attempts += 1) {
@@ -369,29 +417,13 @@ fn writeTempScript(
             (@as(u64, @intCast(c.getpid())) << 16) ^
             @as(u64, attempts);
         const filename = try std.fmt.allocPrint(allocator, "tdnf-scriptlet-{x}", .{token});
-        const host_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ host_dir, filename });
+        defer allocator.free(filename);
         const exec_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ exec_dir, filename });
-        const host_path_z = try allocator.dupeZ(u8, host_path);
-        defer allocator.free(host_path_z);
-
-        const open_rc = linux.openat(
-            std.posix.AT.FDCWD,
-            host_path_z.ptr,
-            .{
-                .ACCMODE = .WRONLY,
-                .CREAT = true,
-                .EXCL = true,
-                .CLOEXEC = true,
-            },
+        const fd = (try pinned_root.createExclusiveRegular(
+            exec_path,
             0o700,
-        );
-        switch (std.posix.errno(open_rc)) {
-            .SUCCESS => {},
-            .EXIST => continue,
-            else => return error.SyscallFailed,
-        }
-        const fd: c_int = @intCast(open_rc);
-        errdefer _ = linux.unlink(host_path_z.ptr);
+        )) orelse continue;
+        errdefer pinned_root.remove(exec_path) catch {};
 
         if (writeAll(fd, body) != 0) {
             _ = linux.close(fd);
@@ -400,9 +432,7 @@ fn writeTempScript(
         if (std.posix.errno(linux.close(fd)) != .SUCCESS) {
             return error.SyscallFailed;
         }
-
         return .{
-            .host_path = host_path,
             .exec_path = exec_path,
         };
     }
@@ -446,19 +476,34 @@ fn ensureDirPathAbsolute(allocator: Allocator, dir_path: []const u8) RunError!vo
 
 fn prepareChildProcess(
     path_env: [*:0]u8,
-    install_root: [*:0]u8,
+    install_root_fd: c_int,
+    install_root_is_host: bool,
+    input_fd: c_int,
     script_fd: c_int,
     redirect_stdout_to_stderr: bool,
 ) bool {
-    const null_rc = linux.openat(
-        std.posix.AT.FDCWD,
-        "/dev/null",
-        .{ .ACCMODE = .RDONLY, .CLOEXEC = true },
-        0,
-    );
-    if (std.posix.errno(null_rc) == .SUCCESS) {
+    if (input_fd >= 0) {
+        if (std.posix.errno(linux.dup2(input_fd, c.STDIN_FILENO)) != .SUCCESS) {
+            return false;
+        }
+        if (input_fd != c.STDIN_FILENO) {
+            _ = linux.close(input_fd);
+        }
+    } else {
+        const null_rc = linux.openat(
+            std.posix.AT.FDCWD,
+            "/dev/null",
+            .{ .ACCMODE = .RDONLY, .CLOEXEC = true },
+            0,
+        );
+        if (std.posix.errno(null_rc) != .SUCCESS) {
+            return false;
+        }
         const null_fd: c_int = @intCast(null_rc);
-        _ = linux.dup2(null_fd, c.STDIN_FILENO);
+        if (std.posix.errno(linux.dup2(null_fd, c.STDIN_FILENO)) != .SUCCESS) {
+            _ = linux.close(null_fd);
+            return false;
+        }
         _ = linux.close(null_fd);
     }
 
@@ -474,14 +519,18 @@ fn prepareChildProcess(
         return false;
     }
 
-    if (!std.mem.eql(u8, std.mem.span(install_root), "/")) {
-        if (std.posix.errno(linux.chroot(install_root)) != .SUCCESS) {
+    if (std.posix.errno(linux.fchdir(install_root_fd)) != .SUCCESS) {
+        return false;
+    }
+    if (!install_root_is_host) {
+        if (std.posix.errno(linux.chroot(".")) != .SUCCESS) {
             return false;
         }
     }
     if (std.posix.errno(linux.chdir("/")) != .SUCCESS) {
         return false;
     }
+    _ = linux.close(install_root_fd);
 
     return true;
 }
@@ -489,11 +538,20 @@ fn prepareChildProcess(
 fn runExecChild(
     argv: [*]const ?[*:0]const u8,
     path_env: [*:0]u8,
-    install_root: [*:0]u8,
+    install_root_fd: c_int,
+    install_root_is_host: bool,
+    input_fd: c_int,
     script_fd: c_int,
     redirect_stdout_to_stderr: bool,
 ) noreturn {
-    if (!prepareChildProcess(path_env, install_root, script_fd, redirect_stdout_to_stderr)) {
+    if (!prepareChildProcess(
+        path_env,
+        install_root_fd,
+        install_root_is_host,
+        input_fd,
+        script_fd,
+        redirect_stdout_to_stderr,
+    )) {
         c._exit(127);
     }
 
@@ -505,18 +563,46 @@ fn runLuaChild(
     script_ptr: [*]const u8,
     script_len: usize,
     path_env: [*:0]u8,
-    install_root: [*:0]u8,
+    install_root_fd: c_int,
+    install_root_is_host: bool,
     arg1: c_int,
     arg2: c_int,
+    input_fd: c_int,
     script_fd: c_int,
     redirect_stdout_to_stderr: bool,
 ) noreturn {
-    if (!prepareChildProcess(path_env, install_root, script_fd, redirect_stdout_to_stderr)) {
+    if (!prepareChildProcess(
+        path_env,
+        install_root_fd,
+        install_root_is_host,
+        input_fd,
+        script_fd,
+        redirect_stdout_to_stderr,
+    )) {
         c._exit(127);
     }
 
     const rc = c.tdnf_rpmzig_lua_run(script_ptr, script_len, arg1, arg2);
     c._exit(if (rc == 0) 0 else 1);
+}
+
+fn prepareInputFd(data: ?[]const u8) RunError!c_int {
+    const bytes = data orelse return -1;
+    const raw_fd = linux.memfd_create("tdnf-trigger-input", 0);
+    if (std.posix.errno(raw_fd) != .SUCCESS) {
+        return error.SyscallFailed;
+    }
+    const fd: c_int = @intCast(raw_fd);
+    errdefer _ = linux.close(fd);
+
+    if (writeAll(fd, bytes) != 0) {
+        return error.SyscallFailed;
+    }
+    const seek_rc = linux.lseek(fd, 0, c.SEEK_SET);
+    if (std.posix.errno(seek_rc) != .SUCCESS) {
+        return error.SyscallFailed;
+    }
+    return fd;
 }
 
 fn testTmpPath(allocator: Allocator) ![]u8 {
@@ -531,6 +617,121 @@ fn testTmpPath(allocator: Allocator) ![]u8 {
 
 fn testTmpDefine(allocator: Allocator, tmp_path: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "_tmppath {s}", .{tmp_path});
+}
+
+test "scriptlet config expands recursive tmppath and PATH" {
+    const allocator = std.testing.allocator;
+    var config = try txn_config.TxnConfig.init(allocator, "/native-root");
+    defer config.deinit();
+    _ = try config.applyRpmDefine("_native_tmp /run/tdnf");
+    _ = try config.applyRpmDefine("_tmppath %{_native_tmp}/scripts");
+    _ = try config.applyRpmDefine("_native_script_path /opt/tdnf/bin");
+    _ = try config.applyRpmDefine("_install_script_path %{_native_script_path}:/usr/bin");
+
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "/native-root/run/tdnf/scripts",
+        try config.resolvePath(.tmppath, &tmp_buf),
+    );
+    const path = try config.expandMacroAlloc(allocator, .install_script_path);
+    defer allocator.free(path);
+    try std.testing.expectEqualStrings("/opt/tdnf/bin:/usr/bin", path);
+}
+
+test "scriptlet temp files stay under pinned installroot after path swap" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "root/var/tmp");
+    try tmp.dir.createDirPath(std.testing.io, "outside");
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    switch (linux.errno(linux.getcwd(cwd_buf[0..].ptr, cwd_buf.len))) {
+        .SUCCESS => {},
+        else => return error.SyscallFailed,
+    }
+    const cwd_len = std.mem.findScalar(u8, &cwd_buf, 0) orelse
+        return error.SyscallFailed;
+    const cwd = cwd_buf[0..cwd_len];
+    const base = try std.fmt.allocPrint(
+        allocator,
+        "{s}/.zig-cache/tmp/{s}",
+        .{ cwd, tmp.sub_path },
+    );
+    defer allocator.free(base);
+    const root_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/root",
+        .{base},
+    );
+    defer allocator.free(root_path);
+    const parked_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/parked",
+        .{base},
+    );
+    defer allocator.free(parked_path);
+    const outside_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/outside",
+        .{base},
+    );
+    defer allocator.free(outside_path);
+    var config = try txn_config.TxnConfig.init(allocator, root_path);
+    defer config.deinit();
+    var pinned_root = try install_engine.RootDir.init(
+        allocator,
+        root_path,
+        null,
+        null,
+    );
+    defer pinned_root.deinit();
+    const root_z = try allocator.dupeZ(u8, root_path);
+    defer allocator.free(root_z);
+    const parked_z = try allocator.dupeZ(u8, parked_path);
+    defer allocator.free(parked_z);
+    const outside_z = try allocator.dupeZ(u8, outside_path);
+    defer allocator.free(outside_z);
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        std.c.rename(root_z.ptr, parked_z.ptr),
+    );
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.symlink(outside_z.ptr, root_z.ptr),
+    );
+    const temp = try writeTempScript(
+        allocator,
+        &config,
+        &pinned_root,
+        "echo safe",
+    );
+    defer allocator.free(temp.exec_path);
+    defer pinned_root.remove(temp.exec_path) catch {};
+    const parked_script = try std.fmt.allocPrint(
+        allocator,
+        "{s}{s}",
+        .{ parked_path, temp.exec_path },
+    );
+    defer allocator.free(parked_script);
+    const outside_script = try std.fmt.allocPrint(
+        allocator,
+        "{s}{s}",
+        .{ outside_path, temp.exec_path },
+    );
+    defer allocator.free(outside_script);
+    try tmp.dir.access(
+        std.testing.io,
+        parked_script[base.len + 1 ..],
+        .{},
+    );
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.access(
+            std.testing.io,
+            outside_script[base.len + 1 ..],
+            .{},
+        ),
+    );
 }
 
 const TestHeaderEntry = struct {
@@ -725,6 +926,50 @@ test "runHeaderScript passes arg1" {
         .arg1 = 5,
     });
     try std.testing.expect(result.ran);
+    try std.testing.expectEqual(Outcome.ok, result.outcome);
+}
+
+test "runPreparedScript supplies trigger stdin" {
+    const allocator = std.testing.allocator;
+    const tmp_path = try testTmpPath(allocator);
+    defer allocator.free(tmp_path);
+    const define = try testTmpDefine(allocator, tmp_path);
+    defer allocator.free(define);
+    const defines = [_][]const u8{define};
+    try ensureDirPathAbsolute(allocator, tmp_path);
+
+    const result = try runPreparedScript(
+        allocator,
+        &.{"/bin/sh"},
+        "IFS= read -r first\nIFS= read -r second\n" ++
+            "[ \"$first\" = /one ] && [ \"$second\" = /two ]\n",
+        false,
+        .{
+            .install_root = "/",
+            .rpmdefines = &defines,
+            .stdin_data = "/one\n/two\n",
+        },
+    );
+    try std.testing.expectEqual(Outcome.ok, result.outcome);
+}
+
+test "Lua rpm.input reads trigger stdin" {
+    if (c.tdnf_rpmzig_lua_supported() == 0) return;
+
+    const allocator = std.testing.allocator;
+    const result = try runPreparedScript(
+        allocator,
+        &.{"<lua>"},
+        "local first = rpm.input()\n" ++
+            "local second = rpm.input()\n" ++
+            "if first ~= '/one' or second ~= '/two' or " ++
+            "rpm.input() ~= nil then error('bad trigger input') end\n",
+        false,
+        .{
+            .install_root = "/",
+            .stdin_data = "/one\n/two\n",
+        },
+    );
     try std.testing.expectEqual(Outcome.ok, result.outcome);
 }
 

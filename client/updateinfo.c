@@ -44,10 +44,10 @@ TDNFUpdateInfoSummary(
     dwError = TDNFNativeQueryBuildRepoInputs(pTdnf, &pRepos, &dwRepoCount);
     BAIL_ON_TDNF_ERROR(dwError);
 
-    dwError = TDNFRepoMdNativeUpdateInfoSummaryLines(
+    dwError = TDNFRepoMdNativeUpdateInfoSummaryLinesConfig(
                   pRepos,
                   dwRepoCount,
-                  TDNFNativeQueryInstallRoot(pTdnf),
+                  pTdnf->pRpmConfig,
                   ppszPackageNameSpecs,
                   dwSecurity,
                   pszSeverity,

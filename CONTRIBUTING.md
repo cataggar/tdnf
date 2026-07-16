@@ -39,21 +39,38 @@ zig build install --prefix ./out
 cd pytests && LD_LIBRARY_PATH=../out/lib pytest -v
 ```
 
+The C-to-Zig migration and public ABI baselines are enforced separately:
+
+```
+zig build migration-audit --prefix ./out
+zig build abi-audit --prefix ./out
+zig build native-dependency-audit --prefix ./out
+zig build public-api-audit --prefix ./out
+```
+
 The integration tests need an rpm-aware host (`rpm`, `rpmbuild`,
 `createrepo_c`, plus the python `pytest` / `requests` / `pyOpenSSL`
 stack). See README.md for the apt package list.
 
-CI runs a plain `zig build` plus `flake8 pytests` on every PR; the
-integration tests above are expected to be run by the developer locally.
+The host RPM commands are test fixture generators and result oracles,
+not build dependencies or runtime fallbacks. CI also builds without RPM
+development files, runs Zig tests and the native helper smoke suite,
+checks every installed ELF, compiles an isolated public C consumer, and
+runs `flake8 pytests`. The full integration tests above are expected to
+be run by the developer locally.
+
+Generated `config.h` files, `pytests/config.json`, and installed package
+metadata are outputs of `build.zig`; edit the corresponding `.in`
+templates rather than generated files.
 
 ### Staying In Sync With Upstream
 
-When your branch gets out of sync with the `dev` branch, use the following to update:
+When your branch gets out of sync with the `main` branch, use the following to update:
 
 ``` shell
 git checkout topic/yourname/feature
 git fetch -a
-git rebase dev
+git rebase main
 git push -f yourrepo
 ```
 
@@ -78,7 +95,7 @@ If you need to squash changes into an earlier commit, you can use:
 ``` bash
 git add path/to/files
 git commit
-git rebase -i dev
+git rebase -i main
 git push -f yourfork
 ```
 

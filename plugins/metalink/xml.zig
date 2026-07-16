@@ -5,13 +5,8 @@
 //! forward-only callback surface for file/size/hash/url records.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const shared_xml = @import("xml");
 const sax = shared_xml.sax;
-
-const c_xml = if (builtin.is_test) @cImport({
-    @cInclude("xml.h");
-}) else struct {};
 
 pub const ERROR_TDNF_OUT_OF_MEMORY: u32 = 1612;
 pub const ERROR_TDNF_INVALID_PARAMETER: u32 = 1622;
@@ -615,14 +610,15 @@ const entity_fixture =
     \\</metalink>
 ;
 
-test "xml header ABI matches Zig callbacks struct" {
+test "callbacks struct uses the C ABI pointer layout" {
     const testing = std.testing;
+    const pointer_size = @sizeOf(?TDNF_ML_ON_FILE);
 
-    try testing.expectEqual(@sizeOf(c_xml.TDNF_METALINK_XML_CALLBACKS), @sizeOf(TDNF_METALINK_XML_CALLBACKS));
-    try testing.expectEqual(@offsetOf(c_xml.TDNF_METALINK_XML_CALLBACKS, "pfnFile"), @offsetOf(TDNF_METALINK_XML_CALLBACKS, "pfnFile"));
-    try testing.expectEqual(@offsetOf(c_xml.TDNF_METALINK_XML_CALLBACKS, "pfnSize"), @offsetOf(TDNF_METALINK_XML_CALLBACKS, "pfnSize"));
-    try testing.expectEqual(@offsetOf(c_xml.TDNF_METALINK_XML_CALLBACKS, "pfnHash"), @offsetOf(TDNF_METALINK_XML_CALLBACKS, "pfnHash"));
-    try testing.expectEqual(@offsetOf(c_xml.TDNF_METALINK_XML_CALLBACKS, "pfnUrl"), @offsetOf(TDNF_METALINK_XML_CALLBACKS, "pfnUrl"));
+    try testing.expectEqual(4 * pointer_size, @sizeOf(TDNF_METALINK_XML_CALLBACKS));
+    try testing.expectEqual(@as(usize, 0), @offsetOf(TDNF_METALINK_XML_CALLBACKS, "pfnFile"));
+    try testing.expectEqual(pointer_size, @offsetOf(TDNF_METALINK_XML_CALLBACKS, "pfnSize"));
+    try testing.expectEqual(2 * pointer_size, @offsetOf(TDNF_METALINK_XML_CALLBACKS, "pfnHash"));
+    try testing.expectEqual(3 * pointer_size, @offsetOf(TDNF_METALINK_XML_CALLBACKS, "pfnUrl"));
 }
 
 test "parses metalink 3.0 fixture and ignores foreign namespaces" {

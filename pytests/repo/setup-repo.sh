@@ -14,11 +14,48 @@ fi
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 METALINK_FIXTURE=${SCRIPT_DIR}/../fixtures/metalink/photon-setup.xml
+CALLER_HOME=${HOME}
+CALLER_RPMMACROS=${CALLER_HOME}/.rpmmacros
+if [ -f "${CALLER_RPMMACROS}" ]; then
+  CALLER_RPMMACROS_STATE=$(cksum < "${CALLER_RPMMACROS}")
+else
+  CALLER_RPMMACROS_STATE=missing
+fi
+
+function verify_caller_rpmmacros() {
+  local current=missing
+  if [ -f "${CALLER_RPMMACROS}" ]; then
+    current=$(cksum < "${CALLER_RPMMACROS}")
+  fi
+  if [ "${current}" != "${CALLER_RPMMACROS_STATE}" ]; then
+    echo "ERROR: setup-repo modified ${CALLER_RPMMACROS}" >&2
+    return 1
+  fi
+}
+trap verify_caller_rpmmacros EXIT
 
 function fix_dir_perms() {
   chmod 755 ${TEST_REPO_DIR}
   find ${TEST_REPO_DIR} -type d -exec chmod 0755 {} \;
   find ${TEST_REPO_DIR} -type f -exec chmod 0644 {} \;
+}
+
+function save_mutable_baseline() {
+  local baseline=${TEST_REPO_DIR}/.baseline
+  rm -rf "${baseline}"
+  mkdir -p "${baseline}"
+  cp "${TEST_REPO_DIR}/tdnf.conf" "${baseline}/tdnf.conf"
+  cp -a "${TEST_REPO_DIR}/yum.repos.d" "${baseline}/yum.repos.d"
+  cp "${TEST_REPO_DIR}/photon-test/metalink" "${baseline}/metalink"
+}
+
+function restore_mutable_baseline() {
+  local baseline=${TEST_REPO_DIR}/.baseline
+  cp "${baseline}/tdnf.conf" "${TEST_REPO_DIR}/tdnf.conf"
+  rm -rf "${TEST_REPO_DIR}/yum.repos.d"
+  cp -a "${baseline}/yum.repos.d" "${TEST_REPO_DIR}/yum.repos.d"
+  cp "${baseline}/metalink" "${TEST_REPO_DIR}/photon-test/metalink"
+  rm -rf "${TEST_REPO_DIR}/vars" "${TEST_REPO_DIR}/pluginconf.d"
 }
 
 ## used to check return code for each command.
@@ -32,9 +69,14 @@ function check_err() {
 
 TEST_REPO_DIR=$1
 if [ -d ${TEST_REPO_DIR} ]; then
-    echo "Repo already exists"
-    fix_dir_perms
-    exit 0
+    if [ -d "${TEST_REPO_DIR}/.baseline" ]; then
+        echo "Repo already exists"
+        restore_mutable_baseline
+        fix_dir_perms
+        exit 0
+    fi
+    echo "Repo has no pristine baseline; rebuilding"
+    rm -rf "${TEST_REPO_DIR}"
 fi
 
 REPO_SRC_DIR=$2
@@ -65,6 +107,9 @@ mkdir -p -m 755 ${BUILD_PATH}/BUILD \
     ${PUBLISH_UNSIGNED_PATH} \
     ${GNUPGHOME}
 
+mkdir -p "${TEST_REPO_DIR}/home"
+export HOME=${TEST_REPO_DIR}/home
+
 #gpgkey data for unattended key generation
 cat << EOF > ${TEST_REPO_DIR}/gpgkeydata
 %echo Generating a key for repogpgcheck signatures
@@ -84,13 +129,6 @@ EOF
 gpg --batch --generate-key ${TEST_REPO_DIR}/gpgkeydata
 check_err "Failed to generate gpg key."
 
-cat << EOF > ~/.rpmmacros
-%_gpg_name tdnftest@tdnf.test
-%__gpg /usr/bin/gpg
-%__transaction_unshare %{nil}
-EOF
-
-
 for d in conflicts enhances obsoletes provides recommends requires suggests supplements ; do
     sed s/@@dep@@/$d/ < ${REPO_SRC_DIR}/tdnf-repoquery-deps.spec.in > ${BUILD_PATH}/SOURCES/tdnf-repoquery-$d.spec
 done
@@ -98,11 +136,18 @@ done
 echo "Building packages"
 for spec in ${REPO_SRC_DIR}/*.spec ${BUILD_PATH}/SOURCES/*.spec ; do
     echo "Building ${spec}"
-    rpmbuild -D "_topdir ${BUILD_PATH}" -ba ${spec} 2>&1
+    rpmbuild \
+      -D "_topdir ${BUILD_PATH}" \
+      -D "__transaction_unshare %{nil}" \
+      -ba ${spec} 2>&1
     check_err "ERROR: failed to build ${spec}"
 done
 cp -r ${BUILD_PATH}/RPMS ${PUBLISH_UNSIGNED_PATH}
-rpmsign --addsign ${BUILD_PATH}/RPMS/*/*.rpm
+rpmsign \
+  --define "_gpg_name tdnftest@tdnf.test" \
+  --define "__gpg /usr/bin/gpg" \
+  --define "__transaction_unshare %{nil}" \
+  --addsign ${BUILD_PATH}/RPMS/*/*.rpm
 check_err "Failed to sign built packages."
 cp -r ${BUILD_PATH}/RPMS ${PUBLISH_PATH}
 cp -r ${BUILD_PATH}/SRPMS ${PUBLISH_SRC_PATH}
@@ -201,6 +246,5 @@ EOF
 cat "${METALINK_FIXTURE}" > "${PUBLISH_PATH}/metalink"
 check_err "Failed to install metalink fixture."
 
-cp ${REPO_SRC_DIR}/automatic.conf ${TEST_REPO_DIR}
-
+save_mutable_baseline
 fix_dir_perms

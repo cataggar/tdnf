@@ -8,8 +8,6 @@
 
 #include "includes.h"
 
-#include "rpm/rpmcli.h"
-
 #include "../llconf/nodes.h"
 
 #include "rpmtrans_native.h"
@@ -19,7 +17,7 @@
 #define INSTALL_REINSTALL 2
 
 static void
-TDNFClearNativeProblems(
+TDNFClearNativePlan(
     PTDNFRPMTS pTS
     );
 
@@ -32,9 +30,10 @@ static uint32_t
 TDNFRecordTransactionItem(
     PTDNFRPMTS pTS,
     TDNF_RPM_TS_ITEM_TYPE nType,
-    Header pHeader,
+    int nPackageKind,
+    tdnf_rpm_file **ppRpmFile,
     const char *pszPath,
-    uint32_t dwDbOffset,
+    uint32_t dwRpmDbHnum,
     const char *pszName,
     const char *pszEVR,
     const char *pszArch
@@ -63,11 +62,6 @@ TDNFRpmCleanupTS(PTDNF pTdnf,
     nKeepCachedRpms = pTdnf->pConf->nKeepCache;
     nDownloadOnly = pTdnf->pArgs->nDownloadOnly;
 
-    if(pTS->pTS)
-    {
-        rpmtsCloseDB(pTS->pTS);
-        rpmtsFree(pTS->pTS);
-    }
     if(pTS->pCachedRpmsArray)
     {
         if(!nKeepCachedRpms && !nDownloadOnly)
@@ -76,7 +70,7 @@ TDNFRpmCleanupTS(PTDNF pTdnf,
         }
         TDNFFreeCachedRpmsArray(pTS->pCachedRpmsArray);
     }
-    TDNFClearNativeProblems(pTS);
+    TDNFClearNativePlan(pTS);
     TDNFFreeTransactionItems(pTS);
     TDNF_SAFE_FREE_MEMORY(pTS);
 
@@ -111,28 +105,7 @@ TDNFRpmCreateTS(
                   (void**)&pTS->pCachedRpmsArray);
     BAIL_ON_TDNF_ERROR(dwError);
 
-    rpmSetVerbosity(TDNFConfGetRpmVerbosity(pTdnf));
-
-    pTS->pTS = rpmtsCreate();
-    if(!pTS->pTS)
-    {
-        dwError = ERROR_TDNF_RPMTS_CREATE_FAILED;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
     pTS->nTransFlags = pTdnf->pConf->rpmTransFlags;
-
-    if(rpmtsSetRootDir (pTS->pTS, pTdnf->pArgs->pszInstallRoot))
-    {
-        dwError = ERROR_TDNF_RPMTS_BAD_ROOT_DIR;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    if(rpmtsSetNotifyCallback(pTS->pTS, TDNFRpmCB, (void*)pTS))
-    {
-        dwError = ERROR_TDNF_RPMTS_SET_CB_FAILED;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
 
     dwError = TDNFPopulateTransaction(pTS, pTdnf, pSolvedInfo);
     BAIL_ON_TDNF_ERROR(dwError);
@@ -180,7 +153,7 @@ TDNFRunTransactionWithHistory(
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    rc = history_sync(pHistoryCtx, pTdnf->pArgs->pszInstallRoot);
+    rc = history_sync_config(pHistoryCtx, pTdnf->pRpmConfig);
     if (rc != 0)
     {
         dwError = ERROR_TDNF_HISTORY_ERROR;
@@ -190,7 +163,10 @@ TDNFRunTransactionWithHistory(
     dwError = TDNFRunTransaction(pTS, pTdnf);
     BAIL_ON_TDNF_ERROR(dwError);
 
-    rc = history_update_state(pHistoryCtx, pTdnf->pArgs->pszInstallRoot, pszCmdLine);
+    rc = history_update_state_config(
+             pHistoryCtx,
+             pTdnf->pRpmConfig,
+             pszCmdLine);
     if (rc != 0)
     {
         dwError = ERROR_TDNF_HISTORY_ERROR;
@@ -415,6 +391,7 @@ TDNFPopulateTransaction(
     {
         dwError = TDNFTransAddErasePkgs(
                       pTS,
+                      pTdnf,
                       pSolvedInfo->pPkgsToRemove);
         BAIL_ON_TDNF_ERROR(dwError);
     }
@@ -422,6 +399,7 @@ TDNFPopulateTransaction(
     {
         dwError = TDNFTransAddErasePkgs(
                       pTS,
+                      pTdnf,
                       pSolvedInfo->pPkgsObsoleted);
         BAIL_ON_TDNF_ERROR(dwError);
     }
@@ -437,6 +415,7 @@ TDNFPopulateTransaction(
         {
             dwError = TDNFTransAddErasePkgs(
                       pTS,
+                      pTdnf,
                       pSolvedInfo->pPkgsRemovedByDowngrade);
             BAIL_ON_TDNF_ERROR(dwError);
         }
@@ -450,7 +429,7 @@ error:
 }
 
 static void
-TDNFClearNativeProblems(
+TDNFClearNativePlan(
     PTDNFRPMTS pTS
     )
 {
@@ -459,12 +438,8 @@ TDNFClearNativeProblems(
         return;
     }
 
-    if(pTS->ppszNativeProblems)
-    {
-        TDNFFreeStringArray(pTS->ppszNativeProblems);
-        pTS->ppszNativeProblems = NULL;
-    }
-    pTS->dwNativeProblemCount = 0;
+    TDNFRepoMdNativeTransactionPlanFree(pTS->pNativePlan);
+    pTS->pNativePlan = NULL;
 }
 
 static void
@@ -484,10 +459,7 @@ TDNFFreeTransactionItems(
     while(pItem)
     {
         pNext = pItem->pNext;
-        if(pItem->pHeader)
-        {
-            headerFree(pItem->pHeader);
-        }
+        tdnf_rpm_file_close(pItem->pRpmFile);
         TDNF_SAFE_FREE_MEMORY(pItem->pszPath);
         TDNF_SAFE_FREE_MEMORY(pItem->pszName);
         TDNF_SAFE_FREE_MEMORY(pItem->pszEVR);
@@ -505,9 +477,10 @@ static uint32_t
 TDNFRecordTransactionItem(
     PTDNFRPMTS pTS,
     TDNF_RPM_TS_ITEM_TYPE nType,
-    Header pHeader,
+    int nPackageKind,
+    tdnf_rpm_file **ppRpmFile,
     const char *pszPath,
-    uint32_t dwDbOffset,
+    uint32_t dwRpmDbHnum,
     const char *pszName,
     const char *pszEVR,
     const char *pszArch
@@ -515,24 +488,38 @@ TDNFRecordTransactionItem(
 {
     uint32_t dwError = 0;
     PTDNF_RPM_TS_ITEM pItem = NULL;
+    PTDNF_RPM_TS_ITEM pExisting = NULL;
 
-    if(!pTS || !pHeader)
+    if(!pTS ||
+       (nType != TDNF_RPM_TS_ITEM_ERASE &&
+        (!ppRpmFile || !*ppRpmFile ||
+         nPackageKind != TDNF_RPM_PACKAGE_KIND_BINARY)) ||
+       (nType == TDNF_RPM_TS_ITEM_ERASE && !dwRpmDbHnum))
     {
         dwError = ERROR_TDNF_INVALID_PARAMETER;
         BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    if(nType == TDNF_RPM_TS_ITEM_ERASE)
+    {
+        for(pExisting = pTS->pTransactionItems;
+            pExisting;
+            pExisting = pExisting->pNext)
+        {
+            if(pExisting->nType == TDNF_RPM_TS_ITEM_ERASE &&
+               pExisting->dwRpmDbHnum == dwRpmDbHnum)
+            {
+                goto cleanup;
+            }
+        }
     }
 
     dwError = TDNFAllocateMemory(1, sizeof(TDNF_RPM_TS_ITEM), (void **)&pItem);
     BAIL_ON_TDNF_ERROR(dwError);
 
     pItem->nType = nType;
-    pItem->pHeader = headerLink(pHeader);
-    if(!pItem->pHeader)
-    {
-        dwError = ERROR_TDNF_OUT_OF_MEMORY;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-    pItem->dwDbOffset = dwDbOffset;
+    pItem->nPackageKind = nPackageKind;
+    pItem->dwRpmDbHnum = dwRpmDbHnum;
 
     if(!IsNullOrEmptyString(pszPath))
     {
@@ -555,6 +542,12 @@ TDNFRecordTransactionItem(
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
+    if(ppRpmFile)
+    {
+        pItem->pRpmFile = *ppRpmFile;
+        *ppRpmFile = NULL;
+    }
+
     if(pTS->pTransactionItemsTail)
     {
         pTS->pTransactionItemsTail->pNext = pItem;
@@ -572,10 +565,6 @@ cleanup:
 error:
     if(pItem)
     {
-        if(pItem->pHeader)
-        {
-            headerFree(pItem->pHeader);
-        }
         TDNF_SAFE_FREE_MEMORY(pItem->pszPath);
         TDNF_SAFE_FREE_MEMORY(pItem->pszName);
         TDNF_SAFE_FREE_MEMORY(pItem->pszEVR);
@@ -592,12 +581,12 @@ TDNFNativeOrderAndCheck(
     )
 {
     uint32_t dwError = 0;
-    TDNF_REPOMD_NATIVE_TRANSACTION_ITEM *pInputs = NULL;
+    TDNF_REPOMD_NATIVE_TRANSACTION_ITEM_V2 *pInputs = NULL;
+    const unsigned char **ppbHeaders = NULL;
+    size_t *pnHeaderLengths = NULL;
+    uint64_t *pqwPackageSizes = NULL;
     PTDNF_RPM_TS_ITEM pItem = NULL;
-    char **ppszOrderLines = NULL;
-    char **ppszProblemLines = NULL;
-    uint32_t dwOrderCount = 0;
-    uint32_t dwProblemCount = 0;
+    TDNF_REPOMD_NATIVE_TRANSACTION_PLAN *pPlan = NULL;
     uint32_t dwIndex = 0;
     const char *pszLastError = NULL;
 
@@ -607,7 +596,7 @@ TDNFNativeOrderAndCheck(
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    TDNFClearNativeProblems(pTS);
+    TDNFClearNativePlan(pTS);
 
     if(!pTS->dwTransactionItemCount)
     {
@@ -616,13 +605,36 @@ TDNFNativeOrderAndCheck(
 
     dwError = TDNFAllocateMemory(
                   pTS->dwTransactionItemCount,
-                  sizeof(TDNF_REPOMD_NATIVE_TRANSACTION_ITEM),
+                  sizeof(TDNF_REPOMD_NATIVE_TRANSACTION_ITEM_V2),
                   (void **)&pInputs);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    dwError = TDNFAllocateMemory(
+                  pTS->dwTransactionItemCount,
+                  sizeof(*ppbHeaders),
+                  (void **)&ppbHeaders);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    dwError = TDNFAllocateMemory(
+                  pTS->dwTransactionItemCount,
+                  sizeof(*pnHeaderLengths),
+                  (void **)&pnHeaderLengths);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    dwError = TDNFAllocateMemory(
+                  pTS->dwTransactionItemCount,
+                  sizeof(*pqwPackageSizes),
+                  (void **)&pqwPackageSizes);
     BAIL_ON_TDNF_ERROR(dwError);
 
     pItem = pTS->pTransactionItems;
     while(pItem)
     {
+        const unsigned char *pbHeader = NULL;
+        const unsigned char *pbRpm = NULL;
+        size_t nHeaderLength = 0;
+        size_t nRpmLength = 0;
+
         if(dwIndex >= pTS->dwTransactionItemCount)
         {
             dwError = ERROR_TDNF_INVALID_PARAMETER;
@@ -656,10 +668,31 @@ TDNFNativeOrderAndCheck(
                 BAIL_ON_TDNF_ERROR(dwError);
         }
 
+        if(pItem->nType != TDNF_RPM_TS_ITEM_ERASE)
+        {
+            if(!pItem->pRpmFile ||
+               tdnf_rpm_file_main_header_blob(
+                   pItem->pRpmFile,
+                   &pbHeader,
+                   &nHeaderLength) != 0 ||
+               tdnf_rpm_file_bytes(
+                   pItem->pRpmFile,
+                   &pbRpm,
+                   &nRpmLength) != 0)
+            {
+                dwError = ERROR_TDNF_RPM_CHECK;
+                BAIL_ON_TDNF_ERROR(dwError);
+            }
+            ppbHeaders[dwIndex] = pbHeader;
+            pnHeaderLengths[dwIndex] = nHeaderLength;
+            pqwPackageSizes[dwIndex] = nRpmLength;
+        }
+
         pInputs[dwIndex].pszPath = pItem->pszPath;
         pInputs[dwIndex].pszName = pItem->pszName;
         pInputs[dwIndex].pszEVR = pItem->pszEVR;
         pInputs[dwIndex].pszArch = pItem->pszArch;
+        pInputs[dwIndex].dwRpmDbHnum = pItem->dwRpmDbHnum;
 
         dwIndex++;
         pItem = pItem->pNext;
@@ -671,14 +704,14 @@ TDNFNativeOrderAndCheck(
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    dwError = TDNFRepoMdNativeTransactionSolve(
+    dwError = tdnf_repomd_native_verified_transaction_solve_config(
                   pInputs,
+                  ppbHeaders,
+                  pnHeaderLengths,
+                  pqwPackageSizes,
                   pTS->dwTransactionItemCount,
-                  TDNFNativeQueryInstallRoot(pTdnf),
-                  &ppszOrderLines,
-                  &dwOrderCount,
-                  &ppszProblemLines,
-                  &dwProblemCount);
+                  pTdnf->pRpmConfig,
+                  &pPlan);
     if(dwError)
     {
         pszLastError = TDNFRepoMdNativeTransactionLastError();
@@ -689,201 +722,114 @@ TDNFNativeOrderAndCheck(
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    if(dwProblemCount)
+    if(!pPlan ||
+       pPlan->dwItemCount != pTS->dwTransactionItemCount ||
+       (pPlan->dwItemCount &&
+        (!pPlan->pdwOrderIndices || !pPlan->pItems)))
     {
-        pTS->ppszNativeProblems = ppszProblemLines;
-        pTS->dwNativeProblemCount = dwProblemCount;
-        ppszProblemLines = NULL;
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    pTS->pNativePlan = pPlan;
+    pPlan = NULL;
+
+    if(pTS->pNativePlan->dwProblemCount)
+    {
         dwError = ERROR_TDNF_RPM_CHECK;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    /*
-     * `ppszOrderLines` used to feed the librpm rpmts rebuild step
-     * consumed by the retired `rpmtsRun` fallback. The native
-     * executor (client/rpmtrans_native.c) walks
-     * `pTS->pTransactionItems` directly and does its own ordering,
-     * so the order lines returned by TDNFRepoMdNativeTransactionSolve
-     * are dropped here.
-     */
-
-cleanup:
-    TDNF_SAFE_FREE_MEMORY(pInputs);
-    TDNFFreeStringArray(ppszOrderLines);
-    if(ppszProblemLines)
-    {
-        TDNFFreeStringArray(ppszProblemLines);
-    }
-    return dwError;
-
-error:
-    goto cleanup;
-}
-
-static uint32_t
-TDNFDetectPreTransFailure(
-    rpmts pTS,
-    char *pszError
-    )
-{
-    uint32_t dwError = 0;
-    rpmtsi pi = NULL;
-    rpmte pte = NULL;
-    char *pszToken;
-    int i = 0;
-    char *pszErrorStr = NULL;
-    char *pszPkgName = NULL;
-    char *pszSymbol = NULL;
-    char *pszVersion = NULL;
-    char *pszCachePkgName = NULL;
-    char *pszCachePkgEVR = NULL;
-
-    if (!pTS || IsNullOrEmptyString(pszError))
-    {
-        dwError = ERROR_TDNF_INVALID_PARAMETER;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-    // Error Str has the format: <Pkg-Name> <Symbol> <version-release>
-    dwError = TDNFAllocateString(pszError, &pszErrorStr);
-    BAIL_ON_TDNF_ERROR(dwError);
-
-    pszToken = strtok(pszErrorStr, " ");
-    while (pszToken != NULL)
-    {
-        switch(i)
+        for(dwIndex = 0;
+            dwIndex < pTS->pNativePlan->dwProblemCount;
+            dwIndex++)
         {
-            case 0:
-                pszPkgName = pszToken;
-                break;
-            case 1:
-                pszSymbol = pszToken;
-                break;
-            case 2:
-                pszVersion = pszToken;
-                break;
-            default:
-                pr_err("RPM problem string format unsupported\n");
-                dwError = ERROR_TDNF_INVALID_PARAMETER;
-                BAIL_ON_TDNF_ERROR(dwError);
-        }
-        i++;
-        pszToken = strtok(NULL, " ");
-    }
-
-    if (IsNullOrEmptyString(pszPkgName) || IsNullOrEmptyString(pszSymbol) || IsNullOrEmptyString(pszVersion))
-    {
-        dwError = ERROR_TDNF_INVALID_PARAMETER;
-        BAIL_ON_TDNF_ERROR(dwError);
-    }
-
-    pi = rpmtsiInit(pTS);
-    while ((pte = rpmtsiNext(pi, 0)) != NULL)
-    {
-        dwError = TDNFAllocateString(rpmteN(pte), &pszCachePkgName);
-        BAIL_ON_TDNF_ERROR(dwError);
-
-        dwError = TDNFAllocateString(rpmteEVR(pte), &pszCachePkgEVR);
-        BAIL_ON_TDNF_ERROR(dwError);
-
-        if (strcmp(pszCachePkgName, pszPkgName) == 0)
-        {
-            if ((strchr(pszSymbol, '>') && (rpmvercmp(pszCachePkgEVR, pszVersion) > 0)) ||
-                (strchr(pszSymbol, '<') && (rpmvercmp(pszCachePkgEVR, pszVersion) < 0)) ||
-                (strchr(pszSymbol, '=') && (rpmvercmp(pszCachePkgEVR, pszVersion) == 0)))
+            if(pTS->pNativePlan->pProblems[dwIndex].nType ==
+               TDNF_REPOMD_NATIVE_PROBLEM_FILE_CONFLICT)
             {
-                pr_err("Detected rpm pre-transaction dependency errors. "
-                        "Install %s %s %s first to resolve this failure.\n",
-                        pszPkgName, pszSymbol, pszVersion);
+                dwError = ERROR_TDNF_TRANSACTION_FAILED;
                 break;
             }
         }
+        BAIL_ON_TDNF_ERROR(dwError);
     }
 
 cleanup:
-    rpmtsiFree(pi);
-    TDNF_SAFE_FREE_MEMORY(pszErrorStr);
-    TDNF_SAFE_FREE_MEMORY(pszCachePkgName);
-    TDNF_SAFE_FREE_MEMORY(pszCachePkgEVR);
+    TDNF_SAFE_FREE_MEMORY(pInputs);
+    TDNF_SAFE_FREE_MEMORY(ppbHeaders);
+    TDNF_SAFE_FREE_MEMORY(pnHeaderLengths);
+    TDNF_SAFE_FREE_MEMORY(pqwPackageSizes);
+    TDNFRepoMdNativeTransactionPlanFree(pPlan);
     return dwError;
+
 error:
     goto cleanup;
 }
-
 
 static void
 reportProblems(PTDNFRPMTS pTS)
 {
-    rpmps ps = NULL;
-    rpmpsi psi = NULL;
-    char *pErrorStr = NULL;
+    uint32_t dwIndex = 0;
+    TDNF_REPOMD_NATIVE_TRANSACTION_PLAN *pPlan = NULL;
 
-    if(!pTS)
+    if(!pTS || !pTS->pNativePlan)
     {
-        goto cleanup;
+        return;
     }
 
-    if(pTS->ppszNativeProblems && pTS->dwNativeProblemCount)
+    pPlan = pTS->pNativePlan;
+    if(!pPlan->dwProblemCount || !pPlan->pProblems)
     {
-        uint32_t dwIndex = 0;
+        return;
+    }
 
-        pr_crit("Found %u problems\n", pTS->dwNativeProblemCount);
-        for(dwIndex = 0; dwIndex < pTS->dwNativeProblemCount; dwIndex++)
+    pr_crit("Found %u problems\n", pPlan->dwProblemCount);
+    for(dwIndex = 0; dwIndex < pPlan->dwProblemCount; dwIndex++)
+    {
+        const TDNF_REPOMD_NATIVE_TRANSACTION_PROBLEM *pProblem =
+            &pPlan->pProblems[dwIndex];
+        const char *pszPackage = pProblem->pszPackage ?
+            pProblem->pszPackage : "(unknown)";
+        const char *pszRelated = pProblem->pszRelatedPackage ?
+            pProblem->pszRelatedPackage : "(unknown)";
+        const char *pszSubject = pProblem->pszSubject ?
+            pProblem->pszSubject : "(unknown)";
+
+        switch(pProblem->nType)
         {
-            pr_crit("%s\n", pTS->ppszNativeProblems[dwIndex]);
-        }
-        goto cleanup;
-    }
-
-    ps = rpmtsProblems(pTS->pTS);
-    if(ps)
-    {
-        int nProbs = rpmpsNumProblems(ps);
-        if(nProbs > 0)
-        {
-            pr_crit("Found %d problems\n", nProbs);
-
-            psi = rpmpsInitIterator(ps);
-            while(rpmpsNextIterator(psi) >= 0)
-            {
-                rpmProblem prob = rpmpsGetProblem(psi);
-                char *msg = rpmProblemString(prob);
-                if (strstr(msg, "no digest") != NULL)
-                {
-                    pr_crit("%s. Use --skipdigest to ignore\n", msg);
-                }
-                else
-                {
-                    pr_crit("%s\n", msg);
-                    if (rpmProblemGetType(prob) == RPMPROB_REQUIRES)
-                    {
-                        uint32_t dwError = 0;
-
-                        dwError = TDNFAllocateString(rpmProblemGetStr(prob), &pErrorStr);
-                        BAIL_ON_TDNF_ERROR(dwError);
-
-                        dwError = TDNFDetectPreTransFailure(pTS->pTS, pErrorStr);
-                        BAIL_ON_TDNF_ERROR(dwError);
-
-                        TDNF_SAFE_FREE_MEMORY(pErrorStr);
-                    }
-                }
-            }
+            case TDNF_REPOMD_NATIVE_PROBLEM_DEPENDENCY:
+                pr_crit("nothing provides %s needed by %s\n",
+                        pszSubject, pszPackage);
+                break;
+            case TDNF_REPOMD_NATIVE_PROBLEM_PRETRANS:
+                pr_crit("nothing provides %s needed by %s\n",
+                        pszSubject, pszPackage);
+                pr_err("Detected rpm pre-transaction dependency errors. "
+                       "Install %s first to resolve this failure.\n",
+                       pszSubject);
+                break;
+            case TDNF_REPOMD_NATIVE_PROBLEM_CONFLICT:
+                pr_crit("package %s conflicts with %s\n",
+                        pszPackage, pszRelated);
+                break;
+            case TDNF_REPOMD_NATIVE_PROBLEM_OBSOLETES:
+                pr_crit("package %s obsoletes %s\n",
+                        pszPackage, pszRelated);
+                break;
+            case TDNF_REPOMD_NATIVE_PROBLEM_FILE_CONFLICT:
+                pr_crit("file %s from install of %s conflicts with file "
+                        "from package %s\n",
+                        pszSubject, pszPackage, pszRelated);
+                break;
+            case TDNF_REPOMD_NATIVE_PROBLEM_UNSUPPORTED_MULTIPLE:
+                pr_crit("package %s has %u installed %s instances selected "
+                        "for one upgrade; remove extra instances or configure "
+                        "the package as installonly\n",
+                        pszPackage, pProblem->dwCount, pszSubject);
+                break;
+            default:
+                pr_crit("unknown native transaction problem for %s\n",
+                        pszPackage);
+                break;
         }
     }
-cleanup:
-    TDNF_SAFE_FREE_MEMORY(pErrorStr);
-    if (psi)
-    {
-        rpmpsFreeIterator(psi);
-    }
-    if (ps)
-    {
-        rpmpsFree(ps);
-    }
-    return;
-
-error:
-    goto cleanup;
 }
 
 /*
@@ -894,7 +840,7 @@ error:
  * This can be disabled by setting "openmax=0" in the configuration.
  *
  * The native transaction executor (client/rpmtrans_native.c) does not
- * exhibit this librpm-specific behaviour, so TDNFSetOpenMax is no
+ * exhibit this legacy behaviour, so TDNFSetOpenMax is no
  * longer wired into the transaction path. The `openmax` config key
  * remains parsed and stored on TDNF_CONF for public-API stability but
  * is a no-op.
@@ -917,14 +863,16 @@ TDNFRunTransaction(
     dwError = TDNFNativeOrderAndCheck(pTS, pTdnf);
     BAIL_ON_TDNF_ERROR(dwError);
 
+    if(!pTS->dwTransactionItemCount)
+    {
+        goto cleanup;
+    }
+
     /*
-     * Composed rpmzig native install/rpmdb-write/erase/scriptlet/
-     * trigger executor: replaces librpm's rpmtsRun path entirely.
-     * There is no build-time opt-out — the librpm rpmtsRun fallback
-     * that was retained by PR #132 as a rollback safety net has been
-     * removed (issue #117 follow-up).
+     * The composed rpmzig install/rpmdb-write/erase/scriptlet/trigger
+     * executor is authoritative and has no build-time opt-out.
      */
-    dwError = TDNFRunTransactionNative(pTS, pTdnf);
+    dwError = TDNFRunTransactionNative(pTS, pTdnf, pTS->pNativePlan);
     if (dwError)
     {
         reportProblems(pTS);
@@ -996,13 +944,19 @@ TDNFTransAddInstallPkg(
 {
     uint32_t dwError = 0;
     char* pszFilePath = NULL;
-    Header rpmHeader = NULL;
+    tdnf_rpm_file *pRpmFile = NULL;
+    tdnf_rpm_file_metadata rpmMetadata = {0};
     PTDNF_CACHED_RPM_ENTRY pRpmCache = NULL;
     const char* pszPackageLocation = NULL;
     const char* pszPkgName = NULL;
+    const char* pszHeaderName = NULL;
+    const char* pszHeaderArch = NULL;
+    char* pszHeaderEVR = NULL;
     uint8_t digest_from_file[TDNF_MAX_DIGEST_LEN] = {0};
     hash_op *hash = NULL;
-    int nSize = 0;
+    const unsigned char *pbRpmBytes = NULL;
+    size_t nRpmLength = 0;
+    int nPackageKind = TDNF_RPM_PACKAGE_KIND_BINARY;
 
     if(!pTS || !pTdnf || !pInfo || !pRepo)
     {
@@ -1099,11 +1053,40 @@ TDNFTransAddInstallPkg(
         BAIL_ON_TDNF_SYSTEM_ERROR(dwError);
     }
 
+    /*
+     * Parse once and keep this handle for every subsequent check and for the
+     * transaction.  In particular, never validate repodata against a path
+     * that is reopened before signature/digest verification.
+     */
+    pRpmFile = tdnf_rpm_file_open(pszFilePath);
+    if(!pRpmFile)
+    {
+        pr_err("Unable to parse package %s: %s\n",
+               pszFilePath, tdnf_rpmdb_last_error());
+        dwError = ERROR_TDNF_RPMRC_NOTFOUND;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
     if(pInfo->pbChecksum != NULL) {
+        if(pInfo->nChecksumType < TDNF_HASH_MD5 ||
+           pInfo->nChecksumType >= TDNF_HASH_SENTINEL)
+        {
+            dwError = ERROR_TDNF_CHECKSUM_MISMATCH;
+            BAIL_ON_TDNF_ERROR(dwError);
+        }
         hash = hash_ops + pInfo->nChecksumType;
 
-        dwError = TDNFGetDigestForFile(pszFilePath, pInfo->nChecksumType, digest_from_file);
-        BAIL_ON_TDNF_ERROR(dwError);
+        if(tdnf_rpm_file_digest(
+               pRpmFile,
+               pInfo->nChecksumType,
+               digest_from_file,
+               sizeof(digest_from_file)) != 0)
+        {
+            pr_err("Unable to calculate checksum for %s: %s\n",
+                   pszFilePath, tdnf_rpmdb_last_error());
+            dwError = ERROR_TDNF_RPM_CHECK;
+            BAIL_ON_TDNF_ERROR(dwError);
+        }
 
         if (memcmp(digest_from_file, pInfo->pbChecksum, hash->length))
         {
@@ -1113,65 +1096,75 @@ TDNFTransAddInstallPkg(
         }
     }
 
-    dwError = TDNFGetFileSize(pszFilePath, &nSize);
-    BAIL_ON_TDNF_ERROR(dwError);
+    if(tdnf_rpm_file_bytes(pRpmFile, &pbRpmBytes, &nRpmLength) != 0)
+    {
+        dwError = ERROR_TDNF_RPM_CHECK;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
 
-    if (nSize != (int)pInfo->dwDownloadSizeBytes) {
-        pr_err("rpm file (%s) size (%u) does not match expected size (%u)\n", pszFilePath, nSize, pInfo->dwDownloadSizeBytes);
+    if (nRpmLength != (size_t)pInfo->dwDownloadSizeBytes) {
+        pr_err("rpm file (%s) size (%zu) does not match expected size (%u)\n", pszFilePath, nRpmLength, pInfo->dwDownloadSizeBytes);
         dwError = ERROR_TDNF_SIZE_MISMATCH;
         BAIL_ON_TDNF_ERROR(dwError);
     }
 
-    dwError = TDNFGPGCheckPackage(pTS, pTdnf, pRepo, pszFilePath, &rpmHeader);
-    BAIL_ON_TDNF_ERROR(dwError);
-
-    if (!pRepo->nGPGCheck)
-    {
-        rpmtsSetVSFlags(pTS->pTS, rpmtsVSFlags(pTS->pTS) | RPMVSF_MASK_NODIGESTS | RPMVSF_MASK_NOSIGNATURES);
-        rpmtsSetVfyLevel(pTS->pTS, ~RPMSIG_VERIFIABLE_TYPE);
-    }
-
-    if (headerIsSource(rpmHeader)) {
-        if (!pTdnf->pArgs->nDownloadOnly && !pTdnf->pArgs->nTestOnly) {
-            dwError = rpmInstallSource(pTS->pTS, pszFilePath, NULL, NULL);
-            BAIL_ON_TDNF_RPM_ERROR(dwError);
-        }
-    } else {
-        if (nInstallFlag == INSTALL_REINSTALL){
-            dwError = rpmtsAddReinstallElement(
-                      pTS->pTS,
-                      rpmHeader,
-                      (fnpyKey)pszFilePath);
-        } else {
-            dwError = rpmtsAddInstallElement(
-                          pTS->pTS,
-                          rpmHeader,
-                          (fnpyKey)pszFilePath,
-                          nInstallFlag == INSTALL_UPGRADE,
-                          NULL);
-        }
-        BAIL_ON_TDNF_RPM_ERROR(dwError);
-    }
-
-    dwError = TDNFRecordTransactionItem(
-                  pTS,
-                  nInstallFlag == INSTALL_REINSTALL ?
-                      TDNF_RPM_TS_ITEM_REINSTALL :
-                      (nInstallFlag == INSTALL_UPGRADE ?
-                           TDNF_RPM_TS_ITEM_UPGRADE :
-                           TDNF_RPM_TS_ITEM_INSTALL),
-                  rpmHeader,
+    dwError = TDNFGPGCheckPackageWithFile(
+                  pTdnf,
+                  pRepo,
                   pszFilePath,
-                  0,
-                  headerGetString(rpmHeader, RPMTAG_NAME),
-                  headerGetString(rpmHeader, RPMTAG_EVR),
-                  headerGetString(rpmHeader, RPMTAG_ARCH));
+                  pRpmFile,
+                  NULL);
     BAIL_ON_TDNF_ERROR(dwError);
 
-    /* add to cached array only when file is actually in cache dir */
+    if(tdnf_rpm_file_get_metadata(pRpmFile, &rpmMetadata) != 0 ||
+       !rpmMetadata.main_header_blob ||
+       !rpmMetadata.main_header_blob_len)
+    {
+        pr_err("Unable to read native package metadata for %s: %s\n",
+               pszFilePath, tdnf_rpmdb_last_error());
+        dwError = ERROR_TDNF_RPM_CHECK;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+    nPackageKind = rpmMetadata.package_kind;
+    pszHeaderName = rpmMetadata.name;
+    pszHeaderArch = rpmMetadata.arch;
+    if(rpmMetadata.has_epoch)
+    {
+        dwError = TDNFAllocateStringPrintf(
+                      &pszHeaderEVR,
+                      "%u:%s-%s",
+                      rpmMetadata.epoch,
+                      rpmMetadata.version,
+                      rpmMetadata.release);
+    }
+    else
+    {
+        dwError = TDNFAllocateStringPrintf(
+                      &pszHeaderEVR,
+                      "%s-%s",
+                      rpmMetadata.version,
+                      rpmMetadata.release);
+    }
+    BAIL_ON_TDNF_ERROR(dwError);
+    if(IsNullOrEmptyString(pszHeaderName) ||
+       IsNullOrEmptyString(pszHeaderEVR) ||
+       IsNullOrEmptyString(pszHeaderArch))
+    {
+        dwError = ERROR_TDNF_RPM_CHECK;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    if(nPackageKind != TDNF_RPM_PACKAGE_KIND_BINARY &&
+       nPackageKind != TDNF_RPM_PACKAGE_KIND_SOURCE &&
+       nPackageKind != TDNF_RPM_PACKAGE_KIND_NOSRC)
+    {
+        dwError = ERROR_TDNF_RPM_CHECK;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
     if(pTS->pCachedRpmsArray &&
-        !strncmp(pszFilePath, pTdnf->pConf->pszCacheDir,
-            strlen(pTdnf->pConf->pszCacheDir)))
+       !strncmp(pszFilePath, pTdnf->pConf->pszCacheDir,
+           strlen(pTdnf->pConf->pszCacheDir)))
     {
         dwError = TDNFAllocateMemory(
                       1,
@@ -1179,19 +1172,55 @@ TDNFTransAddInstallPkg(
                       (void**)&pRpmCache);
         BAIL_ON_TDNF_ERROR(dwError);
         pRpmCache->pszFilePath = pszFilePath;
+    }
+
+    if(nPackageKind != TDNF_RPM_PACKAGE_KIND_BINARY)
+    {
+        if (!pTdnf->pArgs->nDownloadOnly && !pTdnf->pArgs->nTestOnly)
+        {
+            if(tdnf_rpm_file_extract_source_config(
+                   pRpmFile,
+                   pTdnf->pRpmConfig,
+                   (uint32_t)pTS->nTransFlags) != 0)
+            {
+                pr_err("Unable to extract source package %s: %s\n",
+                       pszFilePath, tdnf_rpmdb_last_error());
+                dwError = ERROR_TDNF_RPM_CHECK;
+            }
+            BAIL_ON_TDNF_ERROR(dwError);
+        }
+    }
+    else
+    {
+        dwError = TDNFRecordTransactionItem(
+                      pTS,
+                      nInstallFlag == INSTALL_REINSTALL ?
+                          TDNF_RPM_TS_ITEM_REINSTALL :
+                          (nInstallFlag == INSTALL_UPGRADE ?
+                               TDNF_RPM_TS_ITEM_UPGRADE :
+                               TDNF_RPM_TS_ITEM_INSTALL),
+                      nPackageKind,
+                      &pRpmFile,
+                      pszFilePath,
+                      0,
+                      pszHeaderName,
+                      pszHeaderEVR,
+                      pszHeaderArch);
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    if(pRpmCache)
+    {
         pRpmCache->pNext = pTS->pCachedRpmsArray->pHead;
         pTS->pCachedRpmsArray->pHead = pRpmCache;
+        pRpmCache = NULL;
+        pszFilePath = NULL;
     }
 
 cleanup:
-    if(rpmHeader)
-    {
-        headerFree(rpmHeader);
-    }
-    if(!pTS->pCachedRpmsArray && dwError == 0)
-    {
-        TDNF_SAFE_FREE_MEMORY(pszFilePath);
-    }
+    tdnf_rpm_file_close(pRpmFile);
+    TDNF_SAFE_FREE_MEMORY(pszHeaderEVR);
+    TDNF_SAFE_FREE_MEMORY(pszFilePath);
     return dwError;
 
 error:
@@ -1204,6 +1233,7 @@ error:
 uint32_t
 TDNFTransAddErasePkgs(
     PTDNFRPMTS pTS,
+    PTDNF pTdnf,
     PTDNF_PKG_INFO pInfos
     )
 {
@@ -1218,7 +1248,7 @@ TDNFTransAddErasePkgs(
 
     for(pInfo = pInfos; pInfo; pInfo = pInfo->pNext)
     {
-        dwError = TDNFTransAddErasePkg(pTS, pInfo);
+        dwError = TDNFTransAddErasePkg(pTS, pTdnf, pInfo);
         BAIL_ON_TDNF_ERROR(dwError);
     }
 cleanup:
@@ -1235,18 +1265,19 @@ error:
 uint32_t
 TDNFTransAddErasePkg(
     PTDNFRPMTS pTS,
+    PTDNF pTdnf,
     PTDNF_PKG_INFO pInfo
     )
 {
     uint32_t dwError = 0;
-    Header pRpmHeader = NULL;
-    rpmdbMatchIterator pIterator = NULL;
-    char *pszFullName = NULL;
+    tdnf_rpmdb_label_match *pMatches = NULL;
+    size_t nMatchCount = 0;
+    size_t i = 0;
     const char *pszPkgName = NULL;
     const char *pszPkgEvr = NULL;
-    const char *pszPkgArch = NULL;
 
-    if(!pTS || !pInfo || IsNullOrEmptyString(pInfo->pszName) ||
+    if(!pTS || !pTdnf || !pTdnf->pRpmConfig || !pInfo ||
+       IsNullOrEmptyString(pInfo->pszName) ||
        IsNullOrEmptyString(pInfo->pszEVR))
     {
         dwError = ERROR_TDNF_INVALID_PARAMETER;
@@ -1255,39 +1286,43 @@ TDNFTransAddErasePkg(
 
     pszPkgName = pInfo->pszName;
     pszPkgEvr = pInfo->pszEVR;
-    pszPkgArch = pInfo->pszArch;
 
-    dwError = TDNFAllocateStringPrintf(&pszFullName, "%s-%s", pszPkgName, pszPkgEvr);
-    BAIL_ON_TDNF_ERROR(dwError);
-
-    pIterator = rpmtsInitIterator(pTS->pTS, (rpmTag)RPMDBI_LABEL, pszFullName, 0);
-    while ((pRpmHeader = rpmdbNextIterator(pIterator)) != NULL)
+    if(tdnf_rpmdb_find_label_matches_config(
+           pTdnf->pRpmConfig,
+           pszPkgName,
+           pszPkgEvr,
+           &pMatches,
+           &nMatchCount) != 0)
     {
-        uint32_t nOffset = rpmdbGetIteratorOffset(pIterator);
-        if(nOffset)
-        {
-            dwError = rpmtsAddEraseElement(pTS->pTS, pRpmHeader, nOffset);
-            BAIL_ON_TDNF_ERROR(dwError);
+        pr_err("Unable to look up installed package %s-%s: %s\n",
+               pszPkgName, pszPkgEvr, tdnf_rpmdb_last_error());
+        dwError = ERROR_TDNF_RPM_CHECK;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
 
-            dwError = TDNFRecordTransactionItem(
-                          pTS,
-                          TDNF_RPM_TS_ITEM_ERASE,
-                          pRpmHeader,
-                          NULL,
-                          nOffset,
-                          pszPkgName,
-                          pszPkgEvr,
-                          pszPkgArch);
-            BAIL_ON_TDNF_ERROR(dwError);
+    for(i = 0; i < nMatchCount; i++)
+    {
+        if(!IsNullOrEmptyString(pInfo->pszArch) &&
+           (IsNullOrEmptyString(pMatches[i].arch) ||
+            strcmp(pInfo->pszArch, pMatches[i].arch)))
+        {
+            continue;
         }
+        dwError = TDNFRecordTransactionItem(
+                      pTS,
+                      TDNF_RPM_TS_ITEM_ERASE,
+                      TDNF_RPM_PACKAGE_KIND_BINARY,
+                      NULL,
+                      NULL,
+                      pMatches[i].hnum,
+                      pMatches[i].name,
+                      pMatches[i].evr,
+                      pMatches[i].arch);
+        BAIL_ON_TDNF_ERROR(dwError);
     }
 
 cleanup:
-    TDNF_SAFE_FREE_MEMORY(pszFullName);
-    if(pIterator)
-    {
-        rpmdbFreeIterator(pIterator);
-    }
+    tdnf_rpmdb_label_matches_free(pMatches, nMatchCount);
     return dwError;
 
 error:
@@ -1296,98 +1331,21 @@ error:
 
 void*
 TDNFRpmCB(
-     const void* pArg,
-     const rpmCallbackType what,
-     const rpm_loff_t amount,
-     const rpm_loff_t total,
-     fnpyKey key,
-     rpmCallbackData data
-     )
+    const void *pArg,
+    int nWhat,
+    int64_t llAmount,
+    int64_t llTotal,
+    const void *pKey,
+    void *pData
+    )
 {
-    Header pPkgHeader = (Header) pArg;
-    void* pResult = NULL;
-    char* pszFileName = (char*)key;
-    PTDNFRPMTS pTS = (PTDNFRPMTS)data;
-
-    switch (what)
-    {
-        case RPMCALLBACK_INST_OPEN_FILE:
-            if(IsNullOrEmptyString(pszFileName))
-            {
-                return NULL;
-            }
-            pTS->pFD = Fopen(pszFileName, "r.ufdio");
-            return (void *)pTS->pFD;
-            break;
-
-        case RPMCALLBACK_INST_CLOSE_FILE:
-            if(pTS->pFD)
-            {
-                Fclose(pTS->pFD);
-                pTS->pFD = NULL;
-            }
-            break;
-        case RPMCALLBACK_INST_START:
-        case RPMCALLBACK_UNINST_START:
-            if(pTS->nQuiet)
-                break;
-            if(what == RPMCALLBACK_INST_START)
-            {
-                pr_info("%s", "Installing/Updating: ");
-            }
-            else
-            {
-                pr_info("%s", "Removing: ");
-            }
-            {
-                char* pszNevra = NULL;
-                if (!headerIsSource(pPkgHeader)) {
-                    pszNevra = headerGetAsString(pPkgHeader, RPMTAG_NEVRA);
-                    pr_info("%s\n", pszNevra);
-                } else {
-                    /* don't confuse users with arch */
-                    pszNevra = headerGetAsString(pPkgHeader, RPMTAG_NEVR);
-                    pr_info("%s (source)\n", pszNevra);
-                }
-                free(pszNevra);
-                (void)fflush(stdout);
-            }
-            break;
-        case RPMCALLBACK_SCRIPT_ERROR:
-            {
-                /* https://bugzilla.redhat.com/show_bug.cgi?id=216221#c15 */
-                const char *pszScript;
-                const char* pszNevra = headerGetAsString(pPkgHeader, RPMTAG_NEVRA);
-
-                switch (amount)
-                {
-                    case RPMTAG_PREIN:
-                        pszScript = "%prein";
-                        break;
-                    case RPMTAG_POSTIN:
-                        pszScript = "%postin";
-                        break;
-                    case RPMTAG_PREUN:
-                        pszScript = "%preun";
-                        break;
-                    case RPMTAG_POSTUN:
-                        pszScript = "%postun";
-                        break;
-                    default:
-                        pszScript = "(unknown)";
-                        break;
-                }
-                /* %pre and %preun will cause errors (install/uninstall will fail),
-                   other scripts just warn (install/uninstall will succeed) */
-                pr_crit("package %s: script %s in %s\n",
-                    pszNevra, total == RPMRC_OK ? "warning" : "error", pszScript);
-            }
-            break;
-        default:
-            break;
-    }
-
-    return pResult;
+    (void)pArg;
+    (void)nWhat;
+    (void)llAmount;
+    (void)llTotal;
+    (void)pKey;
+    (void)pData;
+    return NULL;
 }
 
 uint32_t

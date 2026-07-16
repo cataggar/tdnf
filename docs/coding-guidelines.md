@@ -42,6 +42,15 @@ Each component must have the following file format.
 Note:
 
 1. A component must never include header files from within another component's source folder. It may only include header files from the relevant "include" folders.
+2. Production sources and public headers must not include system RPM
+   headers or use system RPM ABI types and functions. Package parsing,
+   database access, configuration, verification, and transactions go
+   through the native interfaces in `rpmzig/` and `include/`.
+3. Host `rpm`, `rpmkeys`, and `rpmbuild` commands are permitted only in
+   tests as fixture generators or behavior oracles. Never add a runtime
+   or build fallback to them.
+4. Generated `config.h` files are outputs of `build.zig`. Edit the
+   matching `.h.in` template rather than the generated file.
 
 ### Source files
 
@@ -157,6 +166,9 @@ error:
 For simplicity, always maintain entry and exit methods per component. These methods must be used to perform any appropriate initialization and cleanup. It may be possible to link these up with init and fini as supported by the compiler.
 
 Dependent components must invoke these entry and exit methods appropriately.
+
+The public `TDNFInit` and `TDNFUninit` symbols are retained as no-ops for
+ABI compatibility; native package state is handle-scoped.
 
 ### Memory management
 

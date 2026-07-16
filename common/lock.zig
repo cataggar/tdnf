@@ -48,22 +48,6 @@ fn tdnfCreateLockFile(pszLockPath: [*:0]const u8) c_int {
         return -1;
     }
 
-    {
-        var szPidBuf = [_]u8{0} ** 128;
-        const nWritten = c.snprintf(
-            &szPidBuf[0],
-            szPidBuf.len,
-            "%ld\n",
-            @as(c_long, @intCast(std.c.getpid())),
-        );
-
-        if (nWritten > 0) {
-            if (std.c.write(nLockFd, szPidBuf[0..].ptr, @as(usize, @intCast(nWritten))) == 0) {
-                std.c.sync();
-            }
-        }
-    }
-
     return nLockFd;
 }
 
@@ -94,6 +78,26 @@ export fn tdnfLockAcquire(pszLockPathOpt: ?[*:0]const u8) c_int {
         _ = sleep(1);
     }
 
+    {
+        var szPidBuf = [_]u8{0} ** 128;
+        const nWritten = c.snprintf(
+            &szPidBuf[0],
+            szPidBuf.len,
+            "%ld\n",
+            @as(c_long, @intCast(std.c.getpid())),
+        );
+        if (nWritten > 0 and
+            std.c.ftruncate(nLockFd, 0) == 0 and
+            std.c.lseek(nLockFd, 0, c.SEEK_SET) == 0)
+        {
+            _ = std.c.write(
+                nLockFd,
+                szPidBuf[0..].ptr,
+                @intCast(nWritten),
+            );
+        }
+    }
+
     return nLockFd;
 }
 
@@ -106,13 +110,9 @@ export fn tdnfLockFree(pszLockPathOpt: ?[*:0]const u8, nLockFd: c_int) void {
         }
         _ = close(nLockFd);
     }
-
-    if (std.c.access(pszLockPath, 0) == 0 and c.remove(pszLockPath) != 0) {
-        log_console(LOG_ERR, "WARNING: Unable to remove lockfile(%s)\n", pszLockPath);
-    }
 }
 
-test "tdnfLockAcquire writes the pid and tdnfLockFree removes the file" {
+test "tdnfLockAcquire writes the pid and keeps a stable lock inode" {
     var szLockPath = [_]u8{0} ** 128;
     const pszLockPath = try std.fmt.bufPrintZ(
         &szLockPath,
@@ -139,5 +139,5 @@ test "tdnfLockAcquire writes the pid and tdnfLockFree removes the file" {
     try std.testing.expectEqualStrings(pszExpectedPid, pszContents);
 
     tdnfLockFree(pszLockPath, nLockFd);
-    try std.testing.expect(std.c.access(pszLockPath, 0) != 0);
+    try std.testing.expect(std.c.access(pszLockPath, 0) == 0);
 }
