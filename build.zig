@@ -140,6 +140,7 @@ pub fn build(b: *Build) void {
     const libsolvext = libsolv_dep.artifact("solvext");
     const libsolv_include = libsolv.getEmittedIncludeTree();
     const libsolvext_include = libsolvext.getEmittedIncludeTree();
+    const libsolv_flat_include = libsolv_include.path(b, "solv");
 
     // ----- generated headers (written into source tree to match the CMake
     //       layout, which avoids the "two config.h" search-order problem).
@@ -351,7 +352,11 @@ pub fn build(b: *Build) void {
     repomd_mod.addImport("rpm_pkgfile", rpmzig_pkgfile_mod);
     repomd_mod.addIncludePath(b.path("include"));
     repomd_mod.addIncludePath(b.path("rpmzig"));
-    repomd_mod.addSystemIncludePath(libsolv_include);
+    addLibsolvCoreIncludes(
+        repomd_mod,
+        libsolv_include,
+        libsolv_flat_include,
+    );
 
     const repomd_lib = b.addLibrary(.{
         .name = "tdnfrepomd",
@@ -435,8 +440,12 @@ pub fn build(b: *Build) void {
         mod.addIncludePath(b.path("include"));
         mod.addIncludePath(b.path("solv"));
         mod.addIncludePath(b.path("rpmzig"));
-        mod.addSystemIncludePath(libsolv_include);
-        mod.addSystemIncludePath(libsolvext_include);
+        addLibsolvIncludes(
+            mod,
+            libsolv_include,
+            libsolv_flat_include,
+            libsolvext_include,
+        );
         mod.addCSourceFiles(.{
             .root = b.path("solv"),
             .files = &.{ "tdnfpackage.c", "tdnfpool.c", "tdnfquery.c", "tdnfrepo.c", "tdnfrepo_native.c", "simplequery.c" },
@@ -1012,8 +1021,12 @@ pub fn build(b: *Build) void {
     });
     tdnf_so_mod.addIncludePath(b.path("include"));
     tdnf_so_mod.addIncludePath(b.path("client"));
-    tdnf_so_mod.addSystemIncludePath(libsolv_include);
-    tdnf_so_mod.addSystemIncludePath(libsolvext_include);
+    addLibsolvIncludes(
+        tdnf_so_mod,
+        libsolv_include,
+        libsolv_flat_include,
+        libsolvext_include,
+    );
     tdnf_so_mod.addIncludePath(b.path("rpmzig"));
     // Native transaction ordering, dependency/conflict checks, and the
     // composed transaction executor are unconditional.
@@ -1199,8 +1212,12 @@ pub fn build(b: *Build) void {
         test_mod.addImport("rpmdb_test", rpmzig_rpmdb_test_mod);
         test_mod.addIncludePath(b.path("include"));
         test_mod.addIncludePath(b.path("rpmzig"));
-        test_mod.addSystemIncludePath(libsolv_include);
-        test_mod.addSystemIncludePath(libsolvext_include);
+        addLibsolvIncludes(
+            test_mod,
+            libsolv_include,
+            libsolv_flat_include,
+            libsolvext_include,
+        );
         test_mod.addObjectFile(libsolv.getEmittedBin());
         test_mod.addObjectFile(libsolvext.getEmittedBin());
         linkLuaScriptletDeps(test_mod, rpmzig_lua, rpmzig_lua_lib);
@@ -1246,6 +1263,12 @@ pub fn build(b: *Build) void {
     });
     metalink_mod.addIncludePath(b.path("include"));
     metalink_mod.addIncludePath(b.path("plugins/metalink"));
+    addLibsolvIncludes(
+        metalink_mod,
+        libsolv_include,
+        libsolv_flat_include,
+        libsolvext_include,
+    );
     metalink_mod.addCSourceFiles(.{
         .root = b.path("plugins/metalink"),
         .files = &.{ "api.c", "metalink.c", "utils.c", "list.c" },
@@ -1271,6 +1294,12 @@ pub fn build(b: *Build) void {
     });
     repogpgcheck_mod.addIncludePath(b.path("include"));
     repogpgcheck_mod.addIncludePath(b.path("plugins/repogpgcheck"));
+    addLibsolvIncludes(
+        repogpgcheck_mod,
+        libsolv_include,
+        libsolv_flat_include,
+        libsolvext_include,
+    );
     repogpgcheck_mod.addCSourceFiles(.{
         .root = b.path("plugins/repogpgcheck"),
         .files = &.{ "api.c", "repogpgcheck.c" },
@@ -1415,6 +1444,25 @@ fn staticLib(
 
 fn linkSystem(mod: *Build.Module, names: []const []const u8) void {
     for (names) |n| mod.linkSystemLibrary(n, .{});
+}
+
+fn addLibsolvCoreIncludes(
+    mod: *Build.Module,
+    include_tree: LazyPath,
+    flat_include: LazyPath,
+) void {
+    mod.addSystemIncludePath(include_tree);
+    mod.addSystemIncludePath(flat_include);
+}
+
+fn addLibsolvIncludes(
+    mod: *Build.Module,
+    include_tree: LazyPath,
+    flat_include: LazyPath,
+    ext_include_tree: LazyPath,
+) void {
+    addLibsolvCoreIncludes(mod, include_tree, flat_include);
+    mod.addSystemIncludePath(ext_include_tree);
 }
 
 fn configureLuaScriptletSupport(
@@ -1598,8 +1646,4 @@ fn isValidKey(key: []const u8) bool {
 fn lookup(key: []const u8, vars: []const TemplateVar) ?[]const u8 {
     for (vars) |v| if (std.mem.eql(u8, v.key, key)) return v.value;
     return null;
-}
-
-comptime {
-    _ = LazyPath;
 }

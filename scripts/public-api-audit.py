@@ -193,6 +193,8 @@ def main():
                 str(prefix / "bin" / "tdnf"),
                 "-c",
                 str(runtime_config),
+                "--releasever",
+                "1",
                 "repolist",
             ],
             env=runtime_environment,

@@ -126,7 +126,15 @@ grep -Eiq '^[[:xdigit:]]+[[:space:]]+[1-9][0-9]*$' \
     "${OWNER_RPM}" --rpmdb "${KEY_ROOT}" |
     grep -Fq 'Result:    OK'
 
-unshare -Ur "${LIBEXEC}/tdnf-rpm-install" \
+run_as_root() {
+    if [[ "${EUID}" -eq 0 ]]; then
+        "$@"
+    else
+        unshare -Ur "$@"
+    fi
+}
+
+run_as_root "${LIBEXEC}/tdnf-rpm-install" \
     --root "${DB_ROOT}" "${OWNER_RPM}"
 grep -Fxq 'payload' \
     "${DB_ROOT}/var/lib/tdnf-rpmzig-smoke/payload"
@@ -140,7 +148,7 @@ HNUM="$(
 LIST_OUTPUT="$("${LIBEXEC}/tdnf-rpmdb-list" "${DB_ROOT}")"
 grep -Fxq 'tdnf-rpmzig-smoke-1.0.0-1.noarch' <<< "${LIST_OUTPUT}"
 
-unshare -Ur "${LIBEXEC}/tdnf-rpm-scriptlet" \
+run_as_root "${LIBEXEC}/tdnf-rpm-scriptlet" \
     --root "${DB_ROOT}" \
     --phase pre \
     --arg1 1 \
@@ -149,7 +157,7 @@ unshare -Ur "${LIBEXEC}/tdnf-rpm-scriptlet" \
 grep -Fxq 'pre:1' \
     "${DB_ROOT}/var/lib/tdnf-rpmzig-smoke/scriptlet"
 
-unshare -Ur "${LIBEXEC}/tdnf-rpm-trigger" \
+run_as_root "${LIBEXEC}/tdnf-rpm-trigger" \
     --db-root "${DB_ROOT}" \
     --install-root "${DB_ROOT}" \
     --phase triggerin \
@@ -159,7 +167,7 @@ unshare -Ur "${LIBEXEC}/tdnf-rpm-trigger" \
 grep -Fxq 'triggerin' \
     "${DB_ROOT}/var/lib/tdnf-rpmzig-smoke/trigger"
 
-unshare -Ur "${LIBEXEC}/tdnf-rpm-erase" \
+run_as_root "${LIBEXEC}/tdnf-rpm-erase" \
     --root "${DB_ROOT}" "${HNUM}"
 [[ "$("${LIBEXEC}/tdnf-rpmdb-count" "${DB_ROOT}")" == "0" ]]
 test ! -e "${DB_ROOT}/var/lib/tdnf-rpmzig-smoke/payload"

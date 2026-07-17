@@ -50,7 +50,7 @@ jobs:
       - name: Smoke test (Debug)
         run: |
           LD_LIBRARY_PATH=./out/lib ./out/bin/tdnf --version
-          ./scripts/smoke-rpmzig.sh ./out
+          sudo ./scripts/smoke-rpmzig.sh ./out
 
       - name: Zig unit tests
         run: zig build -Drpmzig-lua-lib=lua5.4 test --prefix ./out
@@ -63,7 +63,7 @@ jobs:
       - name: Smoke test (ReleaseSafe)
         run: |
           LD_LIBRARY_PATH=./out/lib ./out/bin/tdnf --version
-          ./scripts/smoke-rpmzig.sh ./out
+          sudo ./scripts/smoke-rpmzig.sh ./out
 
       - name: Public ABI audit
         run: |
@@ -102,6 +102,9 @@ jobs:
             echo "::error::legacy package metadata must not be visible"
             exit 1
           fi
+
+      - name: Install host RPM test oracle
+        run: sudo apt-get install -y --no-install-recommends rpm
 
       - name: Install Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
