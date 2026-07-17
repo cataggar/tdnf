@@ -1474,6 +1474,9 @@ fn configureLuaScriptletSupport(
 ) void {
     mod.addIncludePath(b.path("include"));
     mod.addIncludePath(b.path("rpmzig"));
+    const lua_options = b.addOptions();
+    lua_options.addOption(bool, "enabled", enabled);
+    mod.addOptions("lua_scriptlet_options", lua_options);
     if (enabled) {
         mod.addCSourceFiles(.{
             .root = b.path("rpmzig"),
