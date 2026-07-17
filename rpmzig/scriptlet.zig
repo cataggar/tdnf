@@ -316,6 +316,7 @@ fn runLuaScriptProcess(
     }
     if (pid == 0) {
         runLuaChild(
+            config,
             body.ptr,
             body.len,
             path_env.ptr,
@@ -557,6 +558,7 @@ fn runExecChild(
 }
 
 fn runLuaChild(
+    config: *const txn_config.TxnConfig,
     script_ptr: [*]const u8,
     script_len: usize,
     path_env: [*:0]u8,
@@ -579,7 +581,7 @@ fn runLuaChild(
         c._exit(127);
     }
 
-    const rc = lua_scriptlet.run(script_ptr[0..script_len], arg1, arg2);
+    const rc = lua_scriptlet.run(config, script_ptr[0..script_len], arg1, arg2);
     c._exit(if (rc == 0) 0 else 1);
 }
 
@@ -1539,6 +1541,7 @@ test "Lua corpus covers Fedora and Azure package scriptlet patterns" {
         allocator,
         \\local root = "{s}"
         \\assert(posix.mkdir(root) == 0)
+        \\assert(rpm.expand("%{{_sysconfdir}}/selinux") == "/etc/selinux")
         \\
         \\-- Azure Linux filesystem bootstrap operations.
         \\assert(posix.mkdir(root .. "/proc") == 0)

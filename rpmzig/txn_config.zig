@@ -27,6 +27,7 @@ pub const DEFAULT_INSTALL_SCRIPT_PATH = "/sbin:/bin:/usr/sbin:/usr/bin:/usr/X11R
 pub const DEFAULT_TOPDIR = "%{getenv:HOME}/rpmbuild";
 pub const DEFAULT_SPECDIR = "%{_topdir}/SPECS";
 pub const DEFAULT_SOURCEDIR = "%{_topdir}/SOURCES";
+pub const DEFAULT_SYSCONFDIR = "/etc";
 pub const DEFAULT_SCRIPT_INTERPRETER = "/bin/sh";
 const MAX_EXPANSION_DEPTH = 32;
 
@@ -194,6 +195,12 @@ pub const TxnConfig = struct {
                 };
             };
         }
+        config.setMacroByName("_sysconfdir", DEFAULT_SYSCONFDIR) catch |err| {
+            return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.InvalidMacroName, error.InvalidMacroValue => unreachable,
+            };
+        };
 
         return config;
     }

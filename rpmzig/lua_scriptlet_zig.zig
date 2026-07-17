@@ -1,5 +1,6 @@
 const std = @import("std");
 const zlua = @import("zlua");
+const txn_config = @import("txn_config.zig");
 
 const c = @cImport({
     @cInclude("dirent.h");
@@ -24,12 +25,17 @@ const spawn_o_creat: c_int = 0o100;
 const spawn_o_append: c_int = 0o2000;
 
 extern var environ: [*:null]?[*:0]u8;
+var active_config: ?*const txn_config.TxnConfig = null;
 
 pub fn run(
+    config: *const txn_config.TxnConfig,
     script: []const u8,
     arg1: c_int,
     arg2: c_int,
 ) c_int {
+    std.debug.assert(active_config == null);
+    active_config = config;
+    defer active_config = null;
     return runLua(script, arg1, arg2) catch |err| {
         var message_buffer: [256]u8 = undefined;
         const message = std.fmt.bufPrint(
@@ -141,6 +147,7 @@ fn installHostModules(lua: *zlua.State) !void {
     var rpm = try lua.createModule("rpm");
     defer rpm.deinit();
     try addFunction(lua, rpm, "execute", rpmExecute);
+    try addFunction(lua, rpm, "expand", luaRpmExpand);
     try addFunction(lua, rpm, "input", rpmInput);
     try addFunction(lua, rpm, "next_file", rpmInput);
     try addFunction(lua, rpm, "next_line", rpmInput);
@@ -372,6 +379,17 @@ fn rpmInput(ctx: *zlua.Context) !void {
         end -= 1;
     }
     try ctx.returnValues(line[0..end]);
+}
+
+fn luaRpmExpand(ctx: *zlua.Context) !void {
+    const config = active_config orelse return ctx.raise("macro context unavailable");
+    const allocator = ctx.state().allocator();
+    const text = try ctx.arg(0, []const u8);
+    const expanded = config.expandTextAlloc(allocator, text) catch {
+        return ctx.raise("macro expansion failed");
+    };
+    defer allocator.free(expanded);
+    try ctx.returnValues(expanded);
 }
 
 fn luaOsExit(ctx: *zlua.Context) !void {
