@@ -11,7 +11,7 @@ Requires Zig 0.16+ and the following C development packages
 (Debian/Ubuntu names):
 
 ```
-libgpgme-dev liblua5.4-dev
+libgpgme-dev
 ```
 
 SQLite and libsolv are built from the dependencies pinned in
@@ -32,20 +32,11 @@ Debug build:
 zig build -Doptimize=Debug install --prefix ./out
 ```
 
-Native Lua scriptlet support (for `<lua>` RPM scriptlets) is enabled by
-default, since real base packages in supported distros (Fedora
-`bash`/`glibc`/`filesystem`/`setup`, Azure Linux `filesystem`) use
-`<lua>`-tagged scriptlets. The default link name is `lua`; on distros
-that package the library under another name (for example Debian/
-Ubuntu's `liblua5.4-dev`), pass `-Drpmzig-lua-lib=lua5.4`:
-
-```sh
-zig build -Drpmzig-lua-lib=lua5.4 install --prefix ./out
-```
-
-Disable Lua support entirely with `-Drpmzig-lua=false` (this fails
-loudly on any `<lua>`-tagged scriptlet at execution time rather than
-silently mis-executing it).
+Native Lua scriptlet support (for `<lua>` RPM scriptlets) is always
+enabled through the pure-Zig runtime pinned in `build.zig.zon`. No
+system Lua headers or libraries are required. This is needed by real
+base packages in supported distros, including Fedora
+`bash`/`glibc`/`filesystem`/`setup` and Azure Linux `filesystem`.
 
 The composed native transaction executor (rpmzig install, rpmdb-write,
 file-erase, scriptlet, trigger engines) is the sole transaction-

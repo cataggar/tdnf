@@ -910,8 +910,7 @@ typedef struct tdnf_rpm_scriptlet_result {
  * The header blob must match the format returned by
  * tdnf_rpm_file_main_header_blob() or stored in the sqlite rpmdb
  * Packages.blob column. Shell scriptlets are supported by default.
- * Lua (`<lua>`) scriptlets are supported only when built with
- * `zig build -Drpmzig-lua=true ...`; otherwise they return -1.
+ * Lua (`<lua>`) scriptlets are executed by the built-in Zig runtime.
  *
  * On success, `*result_out` is always populated. A non-zero script
  * exit is reported in `result_out->outcome` plus `exit_status`; it is

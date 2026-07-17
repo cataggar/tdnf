@@ -31,7 +31,6 @@ jobs:
             gcc \
             gnupg \
             libgpgme-dev \
-            liblua5.4-dev \
             pkg-config \
             rpm
 
@@ -45,7 +44,7 @@ jobs:
         uses: ./.github/actions/zig-cache
 
       - name: Build (Debug)
-        run: zig build -Drpmzig-lua-lib=lua5.4 install --prefix ./out
+        run: zig build install --prefix ./out
 
       - name: Smoke test (Debug)
         run: |
@@ -53,12 +52,12 @@ jobs:
           sudo ./scripts/smoke-rpmzig.sh ./out
 
       - name: Zig unit tests
-        run: zig build -Drpmzig-lua-lib=lua5.4 test --prefix ./out
+        run: zig build test --prefix ./out
 
       - name: Build (ReleaseSafe)
         run: |
           rm -rf out
-          zig build -Doptimize=ReleaseSafe -Drpmzig-lua-lib=lua5.4 install --prefix ./out
+          zig build -Doptimize=ReleaseSafe install --prefix ./out
 
       - name: Smoke test (ReleaseSafe)
         run: |
@@ -67,13 +66,13 @@ jobs:
 
       - name: Public ABI audit
         run: |
-          zig build -Doptimize=ReleaseSafe -Drpmzig-lua-lib=lua5.4 abi-audit --prefix ./out
-          zig build -Drpmzig-lua-lib=lua5.4 migration-audit --prefix ./out
+          zig build -Doptimize=ReleaseSafe abi-audit --prefix ./out
+          zig build migration-audit --prefix ./out
 
       - name: Native dependency and public API audits
         run: |
-          zig build -Doptimize=ReleaseSafe -Drpmzig-lua-lib=lua5.4 native-dependency-audit --prefix ./out
-          zig build -Doptimize=ReleaseSafe -Drpmzig-lua-lib=lua5.4 public-api-audit --prefix ./out
+          zig build -Doptimize=ReleaseSafe native-dependency-audit --prefix ./out
+          zig build -Doptimize=ReleaseSafe public-api-audit --prefix ./out
 
   no-rpm-development:
     name: Build without RPM development files
@@ -89,7 +88,6 @@ jobs:
             flake8 \
             gcc \
             libgpgme-dev \
-            liblua5.4-dev \
             pkg-config
           legacy_dev="lib$(printf 'r%sm' 'p')-dev"
           if dpkg-query -W -f='${Status}' "${legacy_dev}" 2>/dev/null |
@@ -117,17 +115,17 @@ jobs:
 
       - name: Build, test, and lint
         run: |
-          zig build -Doptimize=ReleaseSafe -Drpmzig-lua-lib=lua5.4 install --prefix ./out
-          zig build -Drpmzig-lua-lib=lua5.4 test --prefix ./out
-          zig build -Drpmzig-lua-lib=lua5.4 lint --prefix ./out
-          zig build -Doptimize=ReleaseSafe -Drpmzig-lua-lib=lua5.4 install --prefix ./out
+          zig build -Doptimize=ReleaseSafe install --prefix ./out
+          zig build test --prefix ./out
+          zig build lint --prefix ./out
+          zig build -Doptimize=ReleaseSafe install --prefix ./out
 
       - name: Audit ABI, migration, dependencies, and public API
         run: |
-          zig build -Drpmzig-lua-lib=lua5.4 migration-audit --prefix ./out
-          zig build -Doptimize=ReleaseSafe -Drpmzig-lua-lib=lua5.4 abi-audit --prefix ./out
-          zig build -Doptimize=ReleaseSafe -Drpmzig-lua-lib=lua5.4 native-dependency-audit --prefix ./out
-          zig build -Doptimize=ReleaseSafe -Drpmzig-lua-lib=lua5.4 public-api-audit --prefix ./out
+          zig build migration-audit --prefix ./out
+          zig build -Doptimize=ReleaseSafe abi-audit --prefix ./out
+          zig build -Doptimize=ReleaseSafe native-dependency-audit --prefix ./out
+          zig build -Doptimize=ReleaseSafe public-api-audit --prefix ./out
 
   lint:
     name: Source policy

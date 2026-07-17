@@ -1,14 +1,14 @@
 {
   "maximums": {
-    "tracked_c_files": 58,
-    "tracked_h_files": 55,
+    "tracked_c_files": 56,
+    "tracked_h_files": 54,
     "tracked_h_in_files": 4,
-    "tracked_c_lines": 31636,
-    "zig_cimport_files": 46,
-    "zig_cinclude_directives": 274,
-    "build_add_c_source_calls": 26,
-    "build_add_system_include_calls": 7,
-    "build_link_system_library_calls": 4,
+    "tracked_c_lines": 30723,
+    "zig_cimport_files": 47,
+    "zig_cinclude_directives": 285,
+    "build_add_c_source_calls": 24,
+    "build_add_system_include_calls": 3,
+    "build_link_system_library_calls": 1,
     "build_link_system_helper_calls": 4,
     "build_pkg_config_literals": 0
   }

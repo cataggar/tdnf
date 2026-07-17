@@ -62,6 +62,8 @@ def tracked_files():
 def forbidden_repository_patterns():
     package_prefix = "rp" + "m"
     legacy_library = "lib" + package_prefix + r"(?:io)?\.so"
+    lua_name = "l" + "ua"
+    legacy_lua_library = "lib" + lua_name + r"[0-9.]*\.so"
     return (
         (
             re.compile(
@@ -98,6 +100,36 @@ def forbidden_repository_patterns():
                 re.IGNORECASE,
             ),
             "runtime system RPM library load",
+        ),
+        (
+            re.compile(
+                r"#\s*include\s*[<\"]" + lua_name + r"(?:[0-9.]*/)?"
+            ),
+            "system Lua header include",
+        ),
+        (
+            re.compile(
+                r"@cInclude\s*\(\s*[\"']" + lua_name + r"(?:[0-9.]*/)?"
+            ),
+            "system Lua header import",
+        ),
+        (
+            re.compile(
+                r"linkSystem[^\n]*[\"']" + lua_name + r"[0-9.]*[\"']"
+            ),
+            "system Lua link declaration",
+        ),
+        (
+            re.compile(package_prefix + "zig-" + lua_name),
+            "obsolete Lua runtime build selector",
+        ),
+        (
+            re.compile(
+                r"\b(?:dlopen|dlmopen)\s*\([^;\n]*[\"'][^\"']*"
+                + legacy_lua_library,
+                re.IGNORECASE,
+            ),
+            "runtime system Lua library load",
         ),
     )
 
@@ -226,10 +258,11 @@ def elf_errors(prefix):
         r"^(?:rpm|rpmlog|header[A-Z_]|pgp[A-Z_]|F[A-Z])"
     )
     needed_pattern = re.compile(
-        r"\blib(?:rpm(?:io)?|sqlite3|solv(?:ext)?)\.so(?:\.|])"
+        r"\blib(?:rpm(?:io)?|sqlite3|solv(?:ext)?|lua[0-9.]*)\.so(?:\.|])"
     )
     runtime_load_pattern = re.compile(
-        r"\blib" + "rpm" + r"(?:io)?\.so(?:\.[0-9]+)*\b"
+        r"\blib(?:" + "rpm" + r"(?:io)?|" + "lua" +
+        r"[0-9.]*)\.so(?:\.[0-9]+)*\b"
     )
 
     for path in elf_paths:
@@ -264,8 +297,8 @@ def elf_errors(prefix):
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Reject system RPM headers, build declarations, and installed "
-            "ELF dependencies."
+            "Reject system RPM/Lua headers, build declarations, and "
+            "installed ELF dependencies."
         )
     )
     parser.add_argument(
