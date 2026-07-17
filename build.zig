@@ -440,8 +440,12 @@ pub fn build(b: *Build) void {
         mod.addIncludePath(b.path("include"));
         mod.addIncludePath(b.path("solv"));
         mod.addIncludePath(b.path("rpmzig"));
-        addLibsolvCoreIncludes(mod, libsolv_include, libsolv_flat_include);
-        mod.addSystemIncludePath(libsolvext_include);
+        addLibsolvIncludes(
+            mod,
+            libsolv_include,
+            libsolv_flat_include,
+            libsolvext_include,
+        );
         mod.addCSourceFiles(.{
             .root = b.path("solv"),
             .files = &.{ "tdnfpackage.c", "tdnfpool.c", "tdnfquery.c", "tdnfrepo.c", "tdnfrepo_native.c", "simplequery.c" },
@@ -1017,12 +1021,12 @@ pub fn build(b: *Build) void {
     });
     tdnf_so_mod.addIncludePath(b.path("include"));
     tdnf_so_mod.addIncludePath(b.path("client"));
-    addLibsolvCoreIncludes(
+    addLibsolvIncludes(
         tdnf_so_mod,
         libsolv_include,
         libsolv_flat_include,
+        libsolvext_include,
     );
-    tdnf_so_mod.addSystemIncludePath(libsolvext_include);
     tdnf_so_mod.addIncludePath(b.path("rpmzig"));
     // Native transaction ordering, dependency/conflict checks, and the
     // composed transaction executor are unconditional.
@@ -1208,12 +1212,12 @@ pub fn build(b: *Build) void {
         test_mod.addImport("rpmdb_test", rpmzig_rpmdb_test_mod);
         test_mod.addIncludePath(b.path("include"));
         test_mod.addIncludePath(b.path("rpmzig"));
-        addLibsolvCoreIncludes(
+        addLibsolvIncludes(
             test_mod,
             libsolv_include,
             libsolv_flat_include,
+            libsolvext_include,
         );
-        test_mod.addSystemIncludePath(libsolvext_include);
         test_mod.addObjectFile(libsolv.getEmittedBin());
         test_mod.addObjectFile(libsolvext.getEmittedBin());
         linkLuaScriptletDeps(test_mod, rpmzig_lua, rpmzig_lua_lib);
@@ -1259,6 +1263,12 @@ pub fn build(b: *Build) void {
     });
     metalink_mod.addIncludePath(b.path("include"));
     metalink_mod.addIncludePath(b.path("plugins/metalink"));
+    addLibsolvIncludes(
+        metalink_mod,
+        libsolv_include,
+        libsolv_flat_include,
+        libsolvext_include,
+    );
     metalink_mod.addCSourceFiles(.{
         .root = b.path("plugins/metalink"),
         .files = &.{ "api.c", "metalink.c", "utils.c", "list.c" },
@@ -1284,6 +1294,12 @@ pub fn build(b: *Build) void {
     });
     repogpgcheck_mod.addIncludePath(b.path("include"));
     repogpgcheck_mod.addIncludePath(b.path("plugins/repogpgcheck"));
+    addLibsolvIncludes(
+        repogpgcheck_mod,
+        libsolv_include,
+        libsolv_flat_include,
+        libsolvext_include,
+    );
     repogpgcheck_mod.addCSourceFiles(.{
         .root = b.path("plugins/repogpgcheck"),
         .files = &.{ "api.c", "repogpgcheck.c" },
@@ -1437,6 +1453,16 @@ fn addLibsolvCoreIncludes(
 ) void {
     mod.addSystemIncludePath(include_tree);
     mod.addSystemIncludePath(flat_include);
+}
+
+fn addLibsolvIncludes(
+    mod: *Build.Module,
+    include_tree: LazyPath,
+    flat_include: LazyPath,
+    ext_include_tree: LazyPath,
+) void {
+    addLibsolvCoreIncludes(mod, include_tree, flat_include);
+    mod.addSystemIncludePath(ext_include_tree);
 }
 
 fn configureLuaScriptletSupport(
