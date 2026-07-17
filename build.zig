@@ -140,6 +140,7 @@ pub fn build(b: *Build) void {
     const libsolvext = libsolv_dep.artifact("solvext");
     const libsolv_include = libsolv.getEmittedIncludeTree();
     const libsolvext_include = libsolvext.getEmittedIncludeTree();
+    const libsolv_flat_include = libsolv_include.path(b, "solv");
 
     // ----- generated headers (written into source tree to match the CMake
     //       layout, which avoids the "two config.h" search-order problem).
@@ -351,7 +352,11 @@ pub fn build(b: *Build) void {
     repomd_mod.addImport("rpm_pkgfile", rpmzig_pkgfile_mod);
     repomd_mod.addIncludePath(b.path("include"));
     repomd_mod.addIncludePath(b.path("rpmzig"));
-    repomd_mod.addSystemIncludePath(libsolv_include);
+    addLibsolvCoreIncludes(
+        repomd_mod,
+        libsolv_include,
+        libsolv_flat_include,
+    );
 
     const repomd_lib = b.addLibrary(.{
         .name = "tdnfrepomd",
@@ -435,7 +440,7 @@ pub fn build(b: *Build) void {
         mod.addIncludePath(b.path("include"));
         mod.addIncludePath(b.path("solv"));
         mod.addIncludePath(b.path("rpmzig"));
-        mod.addSystemIncludePath(libsolv_include);
+        addLibsolvCoreIncludes(mod, libsolv_include, libsolv_flat_include);
         mod.addSystemIncludePath(libsolvext_include);
         mod.addCSourceFiles(.{
             .root = b.path("solv"),
@@ -1012,7 +1017,11 @@ pub fn build(b: *Build) void {
     });
     tdnf_so_mod.addIncludePath(b.path("include"));
     tdnf_so_mod.addIncludePath(b.path("client"));
-    tdnf_so_mod.addSystemIncludePath(libsolv_include);
+    addLibsolvCoreIncludes(
+        tdnf_so_mod,
+        libsolv_include,
+        libsolv_flat_include,
+    );
     tdnf_so_mod.addSystemIncludePath(libsolvext_include);
     tdnf_so_mod.addIncludePath(b.path("rpmzig"));
     // Native transaction ordering, dependency/conflict checks, and the
@@ -1199,7 +1208,11 @@ pub fn build(b: *Build) void {
         test_mod.addImport("rpmdb_test", rpmzig_rpmdb_test_mod);
         test_mod.addIncludePath(b.path("include"));
         test_mod.addIncludePath(b.path("rpmzig"));
-        test_mod.addSystemIncludePath(libsolv_include);
+        addLibsolvCoreIncludes(
+            test_mod,
+            libsolv_include,
+            libsolv_flat_include,
+        );
         test_mod.addSystemIncludePath(libsolvext_include);
         test_mod.addObjectFile(libsolv.getEmittedBin());
         test_mod.addObjectFile(libsolvext.getEmittedBin());
@@ -1417,6 +1430,15 @@ fn linkSystem(mod: *Build.Module, names: []const []const u8) void {
     for (names) |n| mod.linkSystemLibrary(n, .{});
 }
 
+fn addLibsolvCoreIncludes(
+    mod: *Build.Module,
+    include_tree: LazyPath,
+    flat_include: LazyPath,
+) void {
+    mod.addSystemIncludePath(include_tree);
+    mod.addSystemIncludePath(flat_include);
+}
+
 fn configureLuaScriptletSupport(
     b: *Build,
     mod: *Build.Module,
@@ -1598,8 +1620,4 @@ fn isValidKey(key: []const u8) bool {
 fn lookup(key: []const u8, vars: []const TemplateVar) ?[]const u8 {
     for (vars) |v| if (std.mem.eql(u8, v.key, key)) return v.value;
     return null;
-}
-
-comptime {
-    _ = LazyPath;
 }
