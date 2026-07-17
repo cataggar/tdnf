@@ -99,11 +99,20 @@ pub fn build(b: *Build) void {
         "plugin-dir",
         "Plugin install directory (relative to prefix, default: lib/tdnf-plugins)",
     ) orelse "lib/tdnf-plugins";
-    const rpmzig_lua = b.option(
+    const rpmzig_lua_enabled = b.option(
         bool,
         "rpmzig-lua",
-        "Enable native Lua scriptlet execution via the vendored liblua 5.4 runtime. Default true to match librpm's default handling of <lua>-tagged scriptlets used by real base packages (Fedora bash/glibc/filesystem/setup, Azure Linux filesystem). Pass -Drpmzig-lua=false to build without Lua support at the cost of failing loudly on any <lua> scriptlet at execution time.",
+        "Enable native Lua scriptlet execution. Default true to match the handling of <lua>-tagged scriptlets used by real base packages. Pass -Drpmzig-lua=false to build without Lua support at the cost of failing loudly on any <lua> scriptlet at execution time.",
     ) orelse true;
+    const rpmzig_lua_zig = b.option(
+        bool,
+        "rpmzig-lua-zig",
+        "Use the experimental pure-Zig Lua scriptlet runtime instead of system Lua 5.4",
+    ) orelse false;
+    if (rpmzig_lua_zig and !rpmzig_lua_enabled) {
+        std.debug.panic("-Drpmzig-lua-zig=true requires -Drpmzig-lua=true", .{});
+    }
+    const rpmzig_lua = rpmzig_lua_enabled and !rpmzig_lua_zig;
     const rpmzig_lua_lib = b.option(
         []const u8,
         "rpmzig-lua-lib",
@@ -126,6 +135,13 @@ pub fn build(b: *Build) void {
     // Vendored sqlite backs the Zig-side history and rpmdb code paths.
     const sqlite_dep = b.dependency("sqlite", .{});
     const tls_dep = b.dependency("tls", .{});
+    const zlua_mod = if (rpmzig_lua_zig)
+        b.dependency("zlua", .{
+            .target = target,
+            .optimize = optimize,
+        }).module("zlua")
+    else
+        null;
     // libsolv's C sources intentionally rely on wraparound in a few internal
     // hash paths; build them without Zig's safe-mode C traps to match the
     // behaviour of the system libsolv packages we are replacing.
@@ -338,7 +354,15 @@ pub fn build(b: *Build) void {
     });
     rpmzig_rpmdb_test_mod.addImport("rpm_header", rpmzig_header_mod);
     rpmzig_rpmdb_test_mod.addImport("rpm_pkgfile", rpmzig_pkgfile_mod);
-    configureLuaScriptletSupport(b, rpmzig_rpmdb_test_mod, rpmzig_lua, rpmzig_lua_lib, true);
+    configureLuaScriptletSupport(
+        b,
+        rpmzig_rpmdb_test_mod,
+        rpmzig_lua,
+        rpmzig_lua_zig,
+        rpmzig_lua_lib,
+        zlua_mod,
+        true,
+    );
 
     const repomd_mod = b.createModule(.{
         .root_source_file = b.path("repomd/root.zig"),
@@ -494,7 +518,15 @@ pub fn build(b: *Build) void {
         });
         mod.addImport("rpm_header", rpmzig_header_mod);
         mod.addImport("rpm_pkgfile", rpmzig_pkgfile_mod);
-        configureLuaScriptletSupport(b, mod, rpmzig_lua, rpmzig_lua_lib, false);
+        configureLuaScriptletSupport(
+            b,
+            mod,
+            rpmzig_lua,
+            rpmzig_lua_zig,
+            rpmzig_lua_lib,
+            zlua_mod,
+            false,
+        );
         const lib = b.addLibrary(.{
             .name = "tdnfrpmzig",
             .linkage = .static,
@@ -573,7 +605,15 @@ pub fn build(b: *Build) void {
         });
         test_mod.addImport("rpm_header", rpmzig_header_mod);
         test_mod.addImport("rpm_pkgfile", rpmzig_pkgfile_mod);
-        configureLuaScriptletSupport(b, test_mod, rpmzig_lua, rpmzig_lua_lib, true);
+        configureLuaScriptletSupport(
+            b,
+            test_mod,
+            rpmzig_lua,
+            rpmzig_lua_zig,
+            rpmzig_lua_lib,
+            zlua_mod,
+            true,
+        );
         const tests = b.addTest(.{ .root_module = test_mod });
         const run_tests = b.addRunArtifact(tests);
         zig_test_step.dependOn(&run_tests.step);
@@ -1468,23 +1508,28 @@ fn addLibsolvIncludes(
 fn configureLuaScriptletSupport(
     b: *Build,
     mod: *Build.Module,
-    enabled: bool,
+    system_enabled: bool,
+    zig_enabled: bool,
     lua_lib: []const u8,
+    zlua_mod: ?*Build.Module,
     link_system_libs: bool,
 ) void {
     mod.addIncludePath(b.path("include"));
     mod.addIncludePath(b.path("rpmzig"));
     const lua_options = b.addOptions();
-    lua_options.addOption(bool, "enabled", enabled);
+    lua_options.addOption(bool, "enabled", system_enabled or zig_enabled);
+    lua_options.addOption(bool, "zig_runtime", zig_enabled);
     mod.addOptions("lua_scriptlet_options", lua_options);
-    if (enabled) {
+    if (zig_enabled) {
+        mod.addImport("zlua", zlua_mod.?);
+    } else if (system_enabled) {
         mod.addCSourceFiles(.{
             .root = b.path("rpmzig"),
             .files = &.{"lua_scriptlet_runtime.c"},
             .flags = &tdnf_cflags,
         });
         if (link_system_libs) {
-            linkLuaScriptletDeps(mod, enabled, lua_lib);
+            linkLuaScriptletDeps(mod, system_enabled, lua_lib);
         }
     } else {
         mod.addCSourceFiles(.{

@@ -16,6 +16,10 @@
             .url = "https://github.com/cataggar/libsolv/archive/99b33fe2ca708fd61652b1c36e0fc35edd59a5b1.tar.gz",
             .hash = "libsolv-0.7.39-PoNzehBtIABMbRTsbiVIOYaZ-HaX_EtRRjQhXT_U1TWu",
         },
+        .zlua = .{
+            .url = "https://github.com/cataggar/zlua/archive/1c62a23ad41037669ecc0811b96d57be6e4fe10c.tar.gz",
+            .hash = "zlua-0.3.1-S9VpHAa6IQCLpQb5Ib6ooyU3xFrHn2_ZK0jc1dclo4up",
+        },
     },
     .paths = .{
         "build.zig",

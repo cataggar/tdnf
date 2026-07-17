@@ -1195,6 +1195,139 @@ test "Lua contract maps failures and routes output" {
     ) != null);
 }
 
+test "Lua contract preserves process IO and state shutdown" {
+    if (!try luaContractSupported()) return;
+
+    const allocator = std.testing.allocator;
+    const tmp_path = try testTmpPath(allocator);
+    defer allocator.free(tmp_path);
+    try ensureDirPathAbsolute(allocator, tmp_path);
+
+    const unique: u64 = (@as(u64, @intCast(c.time(null))) << 32) ^
+        @as(u64, @intCast(c.getpid()));
+    const unclosed_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/lua-contract-unclosed-{d}",
+        .{ tmp_path, unique },
+    );
+    defer allocator.free(unclosed_path);
+    const unclosed_path_z = try allocator.dupeZ(u8, unclosed_path);
+    defer allocator.free(unclosed_path_z);
+    defer _ = c.unlink(unclosed_path_z.ptr);
+    const remove_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/lua-contract-remove-{d}",
+        .{ tmp_path, unique },
+    );
+    defer allocator.free(remove_path);
+    try ensureDirPathAbsolute(allocator, remove_path);
+    const remove_path_z = try allocator.dupeZ(u8, remove_path);
+    defer allocator.free(remove_path_z);
+    defer _ = c.rmdir(remove_path_z.ptr);
+    const output_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/lua-contract-process-{d}",
+        .{ tmp_path, unique },
+    );
+    defer allocator.free(output_path);
+    const output_path_z = try allocator.dupeZ(u8, output_path);
+    defer allocator.free(output_path_z);
+    defer _ = c.unlink(output_path_z.ptr);
+    const output_fd = try createAbsoluteOutputFile(allocator, output_path);
+    errdefer _ = linux.close(output_fd);
+
+    const inherited_result = try runPreparedScript(
+        allocator,
+        &.{"<lua>"},
+        \\local ok, status, code =
+        \\  os.execute("read line; printf child-stdin:%s \"$line\"")
+        \\assert(ok == true and status == "exit" and code == 0)
+        \\assert(rpm.input() == "/parent")
+    ,
+        false,
+        .{
+            .install_root = "/",
+            .stdin_data = "/child\n/parent\n",
+            .script_fd = output_fd,
+            .redirect_stdout_to_stderr = true,
+        },
+    );
+    try std.testing.expectEqual(Outcome.ok, inherited_result.outcome);
+
+    const script = try std.fmt.allocPrint(
+        allocator,
+        \\assert(rpm.input() == "/one")
+        \\assert(io.read("*l") == "/two")
+        \\local file = assert(io.open("{s}", "w"))
+        \\file:write("closed-at-shutdown")
+        \\local ok, status, code =
+        \\  os.execute("printf os-execute-marker")
+        \\assert(ok == true and status == "exit" and code == 0)
+        \\assert(os.remove("{s}"))
+    ,
+        .{ unclosed_path, remove_path },
+    );
+    defer allocator.free(script);
+    const result = try runPreparedScript(
+        allocator,
+        &.{"<lua>"},
+        script,
+        true,
+        .{
+            .install_root = "/",
+            .stdin_data = "/one\n/two\n",
+            .script_fd = output_fd,
+            .redirect_stdout_to_stderr = true,
+        },
+    );
+    try std.testing.expectEqual(Outcome.ok, result.outcome);
+    const unclosed = try readAbsoluteFile(allocator, unclosed_path);
+    defer allocator.free(unclosed);
+    try std.testing.expectEqualStrings("closed-at-shutdown", unclosed);
+    try std.testing.expectEqual(
+        @as(c_int, -1),
+        c.access(remove_path_z.ptr, c.F_OK),
+    );
+
+    const exit_result = try runPreparedScript(
+        allocator,
+        &.{"<lua>"},
+        \\io.stdout:write("os-exit-marker")
+        \\os.exit(7, true)
+        \\error("os.exit returned")
+    ,
+        false,
+        .{
+            .install_root = "/",
+            .script_fd = output_fd,
+            .redirect_stdout_to_stderr = true,
+        },
+    );
+    try std.testing.expectEqual(Outcome.exited, exit_result.outcome);
+    try std.testing.expectEqual(@as(i32, 7), exit_result.exit_status);
+
+    if (std.posix.errno(linux.close(output_fd)) != .SUCCESS) {
+        return error.SyscallFailed;
+    }
+    const output = try readAbsoluteFile(allocator, output_path);
+    defer allocator.free(output);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        output,
+        "child-stdin:/child",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        output,
+        "os-execute-marker",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        output,
+        "os-exit-marker",
+    ) != null);
+}
+
 test "runHeaderScript handles Lua bash-style postun" {
     const allocator = std.testing.allocator;
     const tmp_path = try testTmpPath(allocator);

@@ -24,6 +24,11 @@ const integrity = @import("integrity.zig");
 const rpmdb_pubkey = @import("rpmdb_pubkey.zig");
 const certificate = @import("pgp/certificate.zig");
 const rpmdb_write = @import("rpmdb_write.zig");
+const lua_scriptlet_options = @import("lua_scriptlet_options");
+const lua_scriptlet_runtime = if (lua_scriptlet_options.zig_runtime)
+    @import("lua_scriptlet_zig.zig")
+else
+    struct {};
 pub const txn_config = @import("txn_config.zig");
 const source_engine = @import("source.zig");
 const scriptlet_engine = @import("scriptlet.zig");
@@ -38,6 +43,7 @@ const pubkey_c = @cImport({
 
 comptime {
     _ = integrity;
+    _ = lua_scriptlet_runtime;
 }
 
 pub const TxnConfig = txn_config.TxnConfig;
