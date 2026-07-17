@@ -99,25 +99,6 @@ pub fn build(b: *Build) void {
         "plugin-dir",
         "Plugin install directory (relative to prefix, default: lib/tdnf-plugins)",
     ) orelse "lib/tdnf-plugins";
-    const rpmzig_lua_enabled = b.option(
-        bool,
-        "rpmzig-lua",
-        "Enable native Lua scriptlet execution. Default true to match the handling of <lua>-tagged scriptlets used by real base packages. Pass -Drpmzig-lua=false to build without Lua support at the cost of failing loudly on any <lua> scriptlet at execution time.",
-    ) orelse true;
-    const rpmzig_lua_zig = b.option(
-        bool,
-        "rpmzig-lua-zig",
-        "Use the experimental pure-Zig Lua scriptlet runtime instead of system Lua 5.4",
-    ) orelse false;
-    if (rpmzig_lua_zig and !rpmzig_lua_enabled) {
-        std.debug.panic("-Drpmzig-lua-zig=true requires -Drpmzig-lua=true", .{});
-    }
-    const rpmzig_lua = rpmzig_lua_enabled and !rpmzig_lua_zig;
-    const rpmzig_lua_lib = b.option(
-        []const u8,
-        "rpmzig-lua-lib",
-        "System Lua library name for -Drpmzig-lua=true (default: lua)",
-    ) orelse "lua";
     const prefix = b.install_prefix;
     const libdir = "lib";
     // `b.install_prefix` is the literal `--prefix` argument (e.g. `./out`)
@@ -135,13 +116,10 @@ pub fn build(b: *Build) void {
     // Vendored sqlite backs the Zig-side history and rpmdb code paths.
     const sqlite_dep = b.dependency("sqlite", .{});
     const tls_dep = b.dependency("tls", .{});
-    const zlua_mod = if (rpmzig_lua_zig)
-        b.dependency("zlua", .{
-            .target = target,
-            .optimize = optimize,
-        }).module("zlua")
-    else
-        null;
+    const zlua_mod = b.dependency("zlua", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("zlua");
     // libsolv's C sources intentionally rely on wraparound in a few internal
     // hash paths; build them without Zig's safe-mode C traps to match the
     // behaviour of the system libsolv packages we are replacing.
@@ -354,15 +332,7 @@ pub fn build(b: *Build) void {
     });
     rpmzig_rpmdb_test_mod.addImport("rpm_header", rpmzig_header_mod);
     rpmzig_rpmdb_test_mod.addImport("rpm_pkgfile", rpmzig_pkgfile_mod);
-    configureLuaScriptletSupport(
-        b,
-        rpmzig_rpmdb_test_mod,
-        rpmzig_lua,
-        rpmzig_lua_zig,
-        rpmzig_lua_lib,
-        zlua_mod,
-        true,
-    );
+    configureLuaScriptletSupport(b, rpmzig_rpmdb_test_mod, zlua_mod);
 
     const repomd_mod = b.createModule(.{
         .root_source_file = b.path("repomd/root.zig"),
@@ -518,15 +488,7 @@ pub fn build(b: *Build) void {
         });
         mod.addImport("rpm_header", rpmzig_header_mod);
         mod.addImport("rpm_pkgfile", rpmzig_pkgfile_mod);
-        configureLuaScriptletSupport(
-            b,
-            mod,
-            rpmzig_lua,
-            rpmzig_lua_zig,
-            rpmzig_lua_lib,
-            zlua_mod,
-            false,
-        );
+        configureLuaScriptletSupport(b, mod, zlua_mod);
         const lib = b.addLibrary(.{
             .name = "tdnfrpmzig",
             .linkage = .static,
@@ -571,7 +533,6 @@ pub fn build(b: *Build) void {
             .flags = &tdnf_cflags,
         });
         test_mod.linkLibrary(rpmzig_lib);
-        linkLuaScriptletDeps(test_mod, rpmzig_lua, rpmzig_lua_lib);
         const tests = b.addTest(.{ .root_module = test_mod });
         const run_tests = b.addRunArtifact(tests);
         zig_test_step.dependOn(&run_tests.step);
@@ -605,15 +566,7 @@ pub fn build(b: *Build) void {
         });
         test_mod.addImport("rpm_header", rpmzig_header_mod);
         test_mod.addImport("rpm_pkgfile", rpmzig_pkgfile_mod);
-        configureLuaScriptletSupport(
-            b,
-            test_mod,
-            rpmzig_lua,
-            rpmzig_lua_zig,
-            rpmzig_lua_lib,
-            zlua_mod,
-            true,
-        );
+        configureLuaScriptletSupport(b, test_mod, zlua_mod);
         const tests = b.addTest(.{ .root_module = test_mod });
         const run_tests = b.addRunArtifact(tests);
         zig_test_step.dependOn(&run_tests.step);
@@ -635,7 +588,6 @@ pub fn build(b: *Build) void {
         test_mod.linkLibrary(jsondump_lib);
         test_mod.linkLibrary(llconf_lib);
         test_mod.linkLibrary(rpmzig_lib);
-        linkLuaScriptletDeps(test_mod, rpmzig_lua, rpmzig_lua_lib);
         const tests = b.addTest(.{ .root_module = test_mod });
         const run_tests = b.addRunArtifact(tests);
         zig_test_step.dependOn(&run_tests.step);
@@ -728,7 +680,6 @@ pub fn build(b: *Build) void {
             .flags = &tdnf_cflags,
         });
         mod.linkLibrary(rpmzig_lib);
-        linkLuaScriptletDeps(mod, rpmzig_lua, rpmzig_lua_lib);
         const exe = b.addExecutable(.{
             .name = "tdnf-rpmdb-count",
             .root_module = mod,
@@ -755,7 +706,6 @@ pub fn build(b: *Build) void {
             .flags = &tdnf_cflags,
         });
         mod.linkLibrary(rpmzig_lib);
-        linkLuaScriptletDeps(mod, rpmzig_lua, rpmzig_lua_lib);
         const exe = b.addExecutable(.{
             .name = "tdnf-rpmdb-list",
             .root_module = mod,
@@ -782,7 +732,6 @@ pub fn build(b: *Build) void {
             .flags = &tdnf_cflags,
         });
         mod.linkLibrary(rpmzig_lib);
-        linkLuaScriptletDeps(mod, rpmzig_lua, rpmzig_lua_lib);
         const exe = b.addExecutable(.{
             .name = "tdnf-rpm-info",
             .root_module = mod,
@@ -810,7 +759,6 @@ pub fn build(b: *Build) void {
             .flags = &tdnf_cflags,
         });
         mod.linkLibrary(rpmzig_lib);
-        linkLuaScriptletDeps(mod, rpmzig_lua, rpmzig_lua_lib);
         const exe = b.addExecutable(.{
             .name = "tdnf-rpmdb-pubkeys",
             .root_module = mod,
@@ -838,7 +786,6 @@ pub fn build(b: *Build) void {
             .flags = &tdnf_cflags,
         });
         mod.linkLibrary(rpmzig_lib);
-        linkLuaScriptletDeps(mod, rpmzig_lua, rpmzig_lua_lib);
         const exe = b.addExecutable(.{
             .name = "tdnf-rpmdb-import-pubkeys",
             .root_module = mod,
@@ -866,7 +813,6 @@ pub fn build(b: *Build) void {
             .flags = &tdnf_cflags,
         });
         mod.linkLibrary(rpmzig_lib);
-        linkLuaScriptletDeps(mod, rpmzig_lua, rpmzig_lua_lib);
         const exe = b.addExecutable(.{
             .name = "tdnf-rpmdb-write",
             .root_module = mod,
@@ -894,7 +840,6 @@ pub fn build(b: *Build) void {
             .flags = &tdnf_cflags,
         });
         mod.linkLibrary(rpmzig_lib);
-        linkLuaScriptletDeps(mod, rpmzig_lua, rpmzig_lua_lib);
         const exe = b.addExecutable(.{
             .name = "tdnf-rpm-files",
             .root_module = mod,
@@ -923,7 +868,6 @@ pub fn build(b: *Build) void {
             .flags = &tdnf_cflags,
         });
         mod.linkLibrary(rpmzig_lib);
-        linkLuaScriptletDeps(mod, rpmzig_lua, rpmzig_lua_lib);
         const exe = b.addExecutable(.{
             .name = "tdnf-rpm-install",
             .root_module = mod,
@@ -952,7 +896,6 @@ pub fn build(b: *Build) void {
             .flags = &tdnf_cflags,
         });
         mod.linkLibrary(rpmzig_lib);
-        linkLuaScriptletDeps(mod, rpmzig_lua, rpmzig_lua_lib);
         const exe = b.addExecutable(.{
             .name = "tdnf-rpm-scriptlet",
             .root_module = mod,
@@ -981,7 +924,6 @@ pub fn build(b: *Build) void {
             .flags = &tdnf_cflags,
         });
         mod.linkLibrary(rpmzig_lib);
-        linkLuaScriptletDeps(mod, rpmzig_lua, rpmzig_lua_lib);
         const exe = b.addExecutable(.{
             .name = "tdnf-rpm-trigger",
             .root_module = mod,
@@ -1010,7 +952,6 @@ pub fn build(b: *Build) void {
             .flags = &tdnf_cflags,
         });
         mod.linkLibrary(rpmzig_lib);
-        linkLuaScriptletDeps(mod, rpmzig_lua, rpmzig_lua_lib);
         const exe = b.addExecutable(.{
             .name = "tdnf-rpm-erase",
             .root_module = mod,
@@ -1039,7 +980,6 @@ pub fn build(b: *Build) void {
             .flags = &tdnf_cflags,
         });
         mod.linkLibrary(rpmzig_lib);
-        linkLuaScriptletDeps(mod, rpmzig_lua, rpmzig_lua_lib);
         const exe = b.addExecutable(.{
             .name = "tdnf-rpm-verify",
             .root_module = mod,
@@ -1101,7 +1041,6 @@ pub fn build(b: *Build) void {
     tdnf_so_mod.linkLibrary(history_lib);
     tdnf_so_mod.linkLibrary(llconf_lib);
     tdnf_so_mod.linkLibrary(rpmzig_lib);
-    linkLuaScriptletDeps(tdnf_so_mod, rpmzig_lua, rpmzig_lua_lib);
     tdnf_so_mod.linkLibrary(repomd_lib);
     tdnf_so_mod.linkLibrary(download_zig_lib);
     tdnf_so_mod.addObjectFile(libsolv.getEmittedBin());
@@ -1197,7 +1136,6 @@ pub fn build(b: *Build) void {
     });
     history_util_mod.linkLibrary(history_lib);
     history_util_mod.linkLibrary(rpmzig_lib);
-    linkLuaScriptletDeps(history_util_mod, rpmzig_lua, rpmzig_lua_lib);
     const history_util_exe = b.addExecutable(.{
         .name = "tdnf-history-util",
         .root_module = history_util_mod,
@@ -1260,7 +1198,6 @@ pub fn build(b: *Build) void {
         );
         test_mod.addObjectFile(libsolv.getEmittedBin());
         test_mod.addObjectFile(libsolvext.getEmittedBin());
-        linkLuaScriptletDeps(test_mod, rpmzig_lua, rpmzig_lua_lib);
         const tests = b.addTest(.{ .root_module = test_mod });
         const run_tests = b.addRunArtifact(tests);
         zig_test_step.dependOn(&run_tests.step);
@@ -1508,49 +1445,11 @@ fn addLibsolvIncludes(
 fn configureLuaScriptletSupport(
     b: *Build,
     mod: *Build.Module,
-    system_enabled: bool,
-    zig_enabled: bool,
-    lua_lib: []const u8,
-    zlua_mod: ?*Build.Module,
-    link_system_libs: bool,
+    zlua_mod: *Build.Module,
 ) void {
     mod.addIncludePath(b.path("include"));
     mod.addIncludePath(b.path("rpmzig"));
-    const lua_options = b.addOptions();
-    lua_options.addOption(bool, "enabled", system_enabled or zig_enabled);
-    lua_options.addOption(bool, "zig_runtime", zig_enabled);
-    mod.addOptions("lua_scriptlet_options", lua_options);
-    if (zig_enabled) {
-        mod.addImport("zlua", zlua_mod.?);
-    } else if (system_enabled) {
-        mod.addCSourceFiles(.{
-            .root = b.path("rpmzig"),
-            .files = &.{"lua_scriptlet_runtime.c"},
-            .flags = &tdnf_cflags,
-        });
-        if (link_system_libs) {
-            linkLuaScriptletDeps(mod, system_enabled, lua_lib);
-        }
-    } else {
-        mod.addCSourceFiles(.{
-            .root = b.path("rpmzig"),
-            .files = &.{"lua_scriptlet_stub.c"},
-            .flags = &tdnf_cflags,
-        });
-    }
-}
-
-fn linkLuaScriptletDeps(
-    mod: *Build.Module,
-    enabled: bool,
-    lua_lib: []const u8,
-) void {
-    if (!enabled) {
-        return;
-    }
-    mod.linkSystemLibrary(lua_lib, .{});
-    mod.linkSystemLibrary("m", .{});
-    mod.linkSystemLibrary("dl", .{});
+    mod.addImport("zlua", zlua_mod);
 }
 
 fn hardenExe(exe: *Build.Step.Compile) void {

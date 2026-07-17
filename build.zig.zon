@@ -17,8 +17,8 @@
             .hash = "libsolv-0.7.39-PoNzehBtIABMbRTsbiVIOYaZ-HaX_EtRRjQhXT_U1TWu",
         },
         .zlua = .{
-            .url = "https://github.com/cataggar/zlua/archive/1c62a23ad41037669ecc0811b96d57be6e4fe10c.tar.gz",
-            .hash = "zlua-0.3.1-S9VpHAa6IQCLpQb5Ib6ooyU3xFrHn2_ZK0jc1dclo4up",
+            .url = "https://github.com/cataggar/zlua/archive/e61de740dd87ad3ca7c2e2fd1f2bd211c74ab4b0.tar.gz",
+            .hash = "zlua-0.3.1-S9VpHPC5IQDZWPDCETqUS-uw6hwX4FO4LA5zGerj240E",
         },
     },
     .paths = .{

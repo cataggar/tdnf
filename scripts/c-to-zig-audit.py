@@ -62,7 +62,9 @@ def tracked_files():
             continue
         relative = Path(encoded.decode())
         if len(relative.parts) == 1 or relative.parts[0] in SOURCE_ROOTS:
-            paths.append(ROOT / relative)
+            path = ROOT / relative
+            if path.is_file():
+                paths.append(path)
     return paths
 
 

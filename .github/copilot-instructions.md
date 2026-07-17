@@ -9,17 +9,15 @@ dependency on system RPM libraries, headers, or development metadata.
 ## Build, test, lint
 
 The build is driven by **Zig 0.16+** (no CMake — migrated to `build.zig`).
-The host needs `libgpgme-dev` and `liblua5.4-dev` on Debian/Ubuntu
-(equivalent development packages on other distributions). SQLite and
-libsolv are vendored. Native Lua scriptlet support (`rpmzig-lua`) defaults to
-`true` (real base packages use `<lua>`-tagged scriptlets), so on Debian/
-Ubuntu every `zig build` invocation needs `-Drpmzig-lua-lib=lua5.4` (the
-system package links as `lua5.4`, not the default `lua`) — this applies
-to `install`, `test`, and `lint`/`check` alike.
+The host needs `libgpgme-dev` on Debian/Ubuntu (the equivalent
+development package on other distributions). SQLite, libsolv, and the
+pure-Zig Lua scriptlet runtime are vendored dependencies. Lua scriptlet
+support is unconditional because real base packages use `<lua>`-tagged
+scriptlets; no system Lua headers or libraries are required.
 
 ```sh
 # build + install into ./out
-zig build -Doptimize=ReleaseSafe -Drpmzig-lua-lib=lua5.4 install --prefix ./out
+zig build -Doptimize=ReleaseSafe install --prefix ./out
 
 # tests only (runs `pytest -v` in pytests/, depends on install). Needs an
 # rpm-aware host with rpmbuild + createrepo_c + python pytest/requests/pyOpenSSL.
@@ -127,8 +125,8 @@ engines used from `client/rpmtrans_native.c`):
   plan-pure-zig-pgp.md, issue #14).
 - **Composed native transaction executor** (T4, issue #117):
   `client/rpmtrans_native.c` composes the rpmzig install,
-  rpmdb-write, file-erase, scriptlet, trigger, and (optional)
-  Lua engines into the sole transaction path. It runs
+  rpmdb-write, file-erase, scriptlet, trigger, and pure-Zig Lua
+  engines into the sole transaction path. It runs
   `%pretrans` once, then per-item in native order
   `%pre`→file-install→rpmdb-write→`%post`→`%triggerin`; for
   upgrades the old blob is torn down via
@@ -141,13 +139,6 @@ libtdnf uses the pure-Zig OpenPGP verifier unconditionally on the
 package-install path. Package headers and imported keys are handled by
 rpmzig. The GPGME dependency is isolated to the optional repository
 metadata signature plugin.
-
-Build flags:
-
-| Flag                                        | Default | Meaning                                                    |
-|---------------------------------------------|---------|------------------------------------------------------------|
-| `-Drpmzig-lua=<bool>`                       | `true`  | Native Lua scriptlet dispatch (`<lua>`-tagged `%pre`/`%post`/etc.). Needed for real base packages (Fedora `bash`/`filesystem`/`glibc`/`setup`, Azure Linux `filesystem`). |
-| `-Drpmzig-lua-lib=lua5.4`/`lua`             | `lua`   | System linker name for the Lua runtime. |
 
 The crosscheck-only scaffolding flags used during T4 development
 (`-Drpmzig-file-install-crosscheck`, `-Drpmzig-file-erase-crosscheck`,

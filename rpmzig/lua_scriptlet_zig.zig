@@ -25,21 +25,12 @@ const spawn_o_append: c_int = 0o2000;
 
 extern var environ: [*:null]?[*:0]u8;
 
-pub export fn tdnf_rpmzig_lua_supported() callconv(.c) c_int {
-    return 1;
-}
-
-pub export fn tdnf_rpmzig_lua_run(
-    script_ptr: ?[*]const u8,
-    script_len: usize,
+pub fn run(
+    script: []const u8,
     arg1: c_int,
     arg2: c_int,
-) callconv(.c) c_int {
-    const script_start = script_ptr orelse {
-        writeRawStderr("lua setup failed: missing script body\n");
-        return 1;
-    };
-    return runLua(script_start[0..script_len], arg1, arg2) catch |err| {
+) c_int {
+    return runLua(script, arg1, arg2) catch |err| {
         var message_buffer: [256]u8 = undefined;
         const message = std.fmt.bufPrint(
             &message_buffer,
@@ -151,6 +142,8 @@ fn installHostModules(lua: *zlua.State) !void {
     defer rpm.deinit();
     try addFunction(lua, rpm, "execute", rpmExecute);
     try addFunction(lua, rpm, "input", rpmInput);
+    try addFunction(lua, rpm, "next_file", rpmInput);
+    try addFunction(lua, rpm, "next_line", rpmInput);
     try addFunction(lua, rpm, "spawn", rpmSpawn);
     try addFunction(lua, rpm, "glob", rpmGlob);
     try addFunction(lua, rpm, "vercmp", rpmVercmp);
@@ -161,12 +154,16 @@ fn installHostModules(lua: *zlua.State) !void {
     defer posix.deinit();
     try addFunction(lua, posix, "access", posixAccess);
     try addFunction(lua, posix, "chmod", posixChmod);
+    try addFunction(lua, posix, "dir", posixFilesEntries);
     try addFunction(lua, posix, "_files_entries", posixFilesEntries);
+    try addFunction(lua, posix, "link", posixLink);
     try addFunction(lua, posix, "mkdir", posixMkdir);
     try addFunction(lua, posix, "readlink", posixReadlink);
+    try addFunction(lua, posix, "rmdir", posixRmdir);
     try addFunction(lua, posix, "stat", posixStat);
     try addFunction(lua, posix, "symlink", posixSymlink);
     try addFunction(lua, posix, "uname", posixUname);
+    try addFunction(lua, posix, "unlink", posixUnlink);
     try addFunction(lua, posix, "utime", posixUtime);
     try lua.setGlobal("posix", posix);
     try lua.preloadModule("posix", posix);
@@ -276,7 +273,7 @@ fn filesystemReadFile(
         .{ .ACCMODE = .RDONLY, .CLOEXEC = true },
         0,
     );
-    if (std.posix.errno(open_rc) != .SUCCESS) return error.OpenFailed;
+    if (linux.errno(open_rc) != .SUCCESS) return error.OpenFailed;
     const fd: c_int = @intCast(open_rc);
     defer _ = linux.close(fd);
 
@@ -285,7 +282,7 @@ fn filesystemReadFile(
     var buffer: [4096]u8 = undefined;
     while (true) {
         const count = linux.read(fd, &buffer, buffer.len);
-        switch (std.posix.errno(count)) {
+        switch (linux.errno(count)) {
             .SUCCESS => {
                 if (count == 0) break;
                 try bytes.appendSlice(allocator, buffer[0..count]);
@@ -317,14 +314,14 @@ fn filesystemWriteFile(
         },
         0o666,
     );
-    if (std.posix.errno(open_rc) != .SUCCESS) return error.OpenFailed;
+    if (linux.errno(open_rc) != .SUCCESS) return error.OpenFailed;
     const fd: c_int = @intCast(open_rc);
     defer _ = linux.close(fd);
 
     var written: usize = 0;
     while (written < contents.len) {
         const count = linux.write(fd, contents.ptr + written, contents.len - written);
-        switch (std.posix.errno(count)) {
+        switch (linux.errno(count)) {
             .SUCCESS => {
                 if (count == 0) return error.WriteFailed;
                 written += count;
@@ -417,12 +414,12 @@ const StdinBridge = struct {
 
 fn seekStdin(pos: usize) !void {
     const rc = linux.lseek(c.STDIN_FILENO, @intCast(pos), c.SEEK_SET);
-    if (std.posix.errno(rc) != .SUCCESS) return error.SeekFailed;
+    if (linux.errno(rc) != .SUCCESS) return error.SeekFailed;
 }
 
 fn stdinPosition() !usize {
     const rc = linux.lseek(c.STDIN_FILENO, 0, c.SEEK_CUR);
-    if (std.posix.errno(rc) != .SUCCESS) return error.SeekFailed;
+    if (linux.errno(rc) != .SUCCESS) return error.SeekFailed;
     return rc;
 }
 
@@ -669,10 +666,15 @@ fn posixAccess(ctx: *zlua.Context) !void {
 fn posixChmod(ctx: *zlua.Context) !void {
     const allocator = ctx.state().allocator();
     const path = try ctx.arg(0, []const u8);
-    const mode = try ctx.arg(1, i64);
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
-    if (c.chmod(path_z.ptr, @intCast(mode)) != 0) {
+    var stat: c.struct_stat = std.mem.zeroes(c.struct_stat);
+    if (c.stat(path_z.ptr, &stat) != 0) {
+        try pushError(ctx, errnoValue(), null);
+        return;
+    }
+    const mode = try parseModeArgument(ctx, 1, stat.st_mode);
+    if (c.chmod(path_z.ptr, mode) != 0) {
         try pushError(ctx, errnoValue(), null);
         return;
     }
@@ -699,12 +701,39 @@ fn posixReadlink(ctx: *zlua.Context) !void {
     defer allocator.free(path_z);
     var buffer: [4096]u8 = undefined;
     const length = linux.readlink(path_z.ptr, &buffer, buffer.len);
-    const readlink_error = std.posix.errno(length);
+    const readlink_error = linux.errno(length);
     if (readlink_error != .SUCCESS) {
         try pushError(ctx, @intCast(@intFromEnum(readlink_error)), null);
         return;
     }
     try ctx.returnValues(buffer[0..length]);
+}
+
+fn posixLink(ctx: *zlua.Context) !void {
+    const allocator = ctx.state().allocator();
+    const old_path = try ctx.arg(0, []const u8);
+    const new_path = try ctx.arg(1, []const u8);
+    const old_z = try allocator.dupeZ(u8, old_path);
+    defer allocator.free(old_z);
+    const new_z = try allocator.dupeZ(u8, new_path);
+    defer allocator.free(new_z);
+    if (c.link(old_z.ptr, new_z.ptr) != 0) {
+        try pushError(ctx, errnoValue(), null);
+        return;
+    }
+    try ctx.returnValues(@as(i64, 0));
+}
+
+fn posixRmdir(ctx: *zlua.Context) !void {
+    const allocator = ctx.state().allocator();
+    const path = try ctx.arg(0, []const u8);
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+    if (c.rmdir(path_z.ptr) != 0) {
+        try pushError(ctx, errnoValue(), null);
+        return;
+    }
+    try ctx.returnValues(@as(i64, 0));
 }
 
 fn posixStat(ctx: *zlua.Context) !void {
@@ -718,10 +747,53 @@ fn posixStat(ctx: *zlua.Context) !void {
         return;
     }
 
-    var result = try ctx.state().createTable(.{ .hash_hint = 2 });
+    var mode_buffer: [9]u8 = undefined;
+    statModeString(stat.st_mode, &mode_buffer);
+    if (try ctx.optionalArg(1, []const u8)) |selector| {
+        if (std.mem.eql(u8, selector, "mode")) {
+            try ctx.returnValues(mode_buffer[0..]);
+        } else if (std.mem.eql(u8, selector, "ino")) {
+            try ctx.returnValues(@as(f64, @floatFromInt(stat.st_ino)));
+        } else if (std.mem.eql(u8, selector, "dev")) {
+            try ctx.returnValues(@as(f64, @floatFromInt(stat.st_dev)));
+        } else if (std.mem.eql(u8, selector, "nlink")) {
+            try ctx.returnValues(@as(i64, @intCast(stat.st_nlink)));
+        } else if (std.mem.eql(u8, selector, "uid")) {
+            try ctx.returnValues(@as(i64, @intCast(stat.st_uid)));
+        } else if (std.mem.eql(u8, selector, "gid")) {
+            try ctx.returnValues(@as(i64, @intCast(stat.st_gid)));
+        } else if (std.mem.eql(u8, selector, "size")) {
+            try ctx.returnValues(@as(i64, @intCast(stat.st_size)));
+        } else if (std.mem.eql(u8, selector, "atime")) {
+            try ctx.returnValues(@as(i64, @intCast(stat.st_atim.tv_sec)));
+        } else if (std.mem.eql(u8, selector, "mtime")) {
+            try ctx.returnValues(@as(i64, @intCast(stat.st_mtim.tv_sec)));
+        } else if (std.mem.eql(u8, selector, "ctime")) {
+            try ctx.returnValues(@as(i64, @intCast(stat.st_ctim.tv_sec)));
+        } else if (std.mem.eql(u8, selector, "type")) {
+            try ctx.returnValues(statType(stat.st_mode));
+        } else if (std.mem.eql(u8, selector, "_mode")) {
+            try ctx.returnValues(@as(i64, @intCast(stat.st_mode)));
+        } else {
+            return ctx.raise("unknown stat selector");
+        }
+        return;
+    }
+
+    var result = try ctx.state().createTable(.{ .hash_hint = 12 });
     defer result.deinit();
+    try result.set("mode", mode_buffer[0..]);
+    try result.set("ino", @as(f64, @floatFromInt(stat.st_ino)));
+    try result.set("dev", @as(f64, @floatFromInt(stat.st_dev)));
+    try result.set("nlink", @as(i64, @intCast(stat.st_nlink)));
+    try result.set("uid", @as(i64, @intCast(stat.st_uid)));
+    try result.set("gid", @as(i64, @intCast(stat.st_gid)));
+    try result.set("size", @as(i64, @intCast(stat.st_size)));
+    try result.set("atime", @as(i64, @intCast(stat.st_atim.tv_sec)));
+    try result.set("mtime", @as(i64, @intCast(stat.st_mtim.tv_sec)));
+    try result.set("ctime", @as(i64, @intCast(stat.st_ctim.tv_sec)));
     try result.set("type", statType(stat.st_mode));
-    try result.set("mode", @as(i64, @intCast(stat.st_mode)));
+    try result.set("_mode", @as(i64, @intCast(stat.st_mode)));
     try ctx.returnValues(result);
 }
 
@@ -791,6 +863,18 @@ fn posixUname(ctx: *zlua.Context) !void {
         }
     }
     try ctx.returnValues(output.items);
+}
+
+fn posixUnlink(ctx: *zlua.Context) !void {
+    const allocator = ctx.state().allocator();
+    const path = try ctx.arg(0, []const u8);
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+    if (c.unlink(path_z.ptr) != 0) {
+        try pushError(ctx, errnoValue(), null);
+        return;
+    }
+    try ctx.returnValues(@as(i64, 0));
 }
 
 fn posixUtime(ctx: *zlua.Context) !void {
@@ -870,6 +954,121 @@ fn statType(mode: c.mode_t) []const u8 {
         c.S_IFSOCK => "socket",
         else => "unknown",
     };
+}
+
+fn parseModeArgument(
+    ctx: *zlua.Context,
+    index: usize,
+    initial_mode: c.mode_t,
+) !c.mode_t {
+    var value = try ctx.arg(index, zlua.Value);
+    defer value.deinit();
+    var buffer: [64]u8 = undefined;
+    const text = switch (value) {
+        .string => |string| string,
+        .integer => |integer| std.fmt.bufPrint(&buffer, "{d}", .{integer}) catch
+            return ctx.raise("bad mode"),
+        .number => |number| blk: {
+            if (@trunc(number) != number) return ctx.raise("bad mode");
+            break :blk std.fmt.bufPrint(&buffer, "{d}", .{
+                @as(i64, @intFromFloat(number)),
+            }) catch return ctx.raise("bad mode");
+        },
+        else => return ctx.raise("mode must be a string or number"),
+    };
+    return parseMode(text, initial_mode) orelse ctx.raise("bad mode");
+}
+
+fn parseMode(text: []const u8, initial_mode: c.mode_t) ?c.mode_t {
+    if (text.len == 0) return null;
+    if (text[0] >= '0' and text[0] <= '7') {
+        return std.fmt.parseInt(c.mode_t, text, 8) catch null;
+    }
+    if (text.len == 9 and (text[0] == 'r' or text[0] == '-')) {
+        const clear_mask: c.mode_t = c.S_ISUID | c.S_ISGID | 0o777;
+        var mode = initial_mode & ~clear_mask;
+        const bits = [_]c.mode_t{
+            c.S_IRUSR, c.S_IWUSR, c.S_IXUSR,
+            c.S_IRGRP, c.S_IWGRP, c.S_IXGRP,
+            c.S_IROTH, c.S_IWOTH, c.S_IXOTH,
+        };
+        const chars = "rwxrwxrwx";
+        for (text, 0..) |char, index| {
+            if (char == chars[index]) {
+                mode |= bits[index];
+            } else if (char == 's' and index == 2) {
+                mode |= c.S_ISUID | c.S_IXUSR;
+            } else if (char == 's' and index == 5) {
+                mode |= c.S_ISGID | c.S_IXGRP;
+            } else if (char != '-') {
+                return null;
+            }
+        }
+        return mode;
+    }
+    return parseSymbolicMode(text, initial_mode);
+}
+
+fn parseSymbolicMode(text: []const u8, initial_mode: c.mode_t) ?c.mode_t {
+    var mode = initial_mode;
+    var clauses = std.mem.splitScalar(u8, text, ',');
+    while (clauses.next()) |clause| {
+        var index: usize = 0;
+        var affected: c.mode_t = 0;
+        while (index < clause.len) : (index += 1) {
+            affected |= switch (clause[index]) {
+                'u' => 0o4700,
+                'g' => 0o2070,
+                'o' => 0o1007,
+                'a' => 0o7777,
+                ' ' => continue,
+                else => break,
+            };
+        }
+        if (affected == 0) affected = 0o7777;
+        if (index >= clause.len) return null;
+        const operation = clause[index];
+        if (operation != '+' and operation != '-' and operation != '=') {
+            return null;
+        }
+        index += 1;
+        var changes: c.mode_t = 0;
+        while (index < clause.len) : (index += 1) {
+            changes |= switch (clause[index]) {
+                'r' => 0o444,
+                'w' => 0o222,
+                'x' => 0o111,
+                's' => 0o6000,
+                ' ' => continue,
+                else => return null,
+            };
+        }
+        const selected = changes & affected;
+        switch (operation) {
+            '+' => mode |= selected,
+            '-' => mode &= ~@as(c.mode_t, selected),
+            '=' => {
+                mode &= ~@as(c.mode_t, affected);
+                mode |= selected;
+            },
+            else => unreachable,
+        }
+    }
+    return mode;
+}
+
+fn statModeString(mode: c.mode_t, output: *[9]u8) void {
+    const bits = [_]c.mode_t{
+        c.S_IRUSR, c.S_IWUSR, c.S_IXUSR,
+        c.S_IRGRP, c.S_IWGRP, c.S_IXGRP,
+        c.S_IROTH, c.S_IWOTH, c.S_IXOTH,
+    };
+    const chars = "rwxrwxrwx";
+    for (bits, 0..) |bit, index| {
+        output[index] = if (mode & bit != 0) chars[index] else '-';
+    }
+    if (mode & c.S_ISUID != 0) output[2] = if (mode & c.S_IXUSR != 0) 's' else 'S';
+    if (mode & c.S_ISGID != 0) output[5] = if (mode & c.S_IXGRP != 0) 's' else 'S';
 }
 
 fn cArraySlice(array: []const u8) []const u8 {

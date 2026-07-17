@@ -37,7 +37,6 @@ jobs:
             gcc \
             gnupg \
             libgpgme-dev \
-            liblua5.4-dev \
             pkg-config \
             python3-openssl \
             python3-pytest \
@@ -65,9 +64,9 @@ jobs:
       - name: Warm build (Debug + ReleaseSafe)
         continue-on-error: true
         run: |
-          zig build -Drpmzig-lua-lib=lua5.4 install --prefix ./out
+          zig build install --prefix ./out
           rm -rf out zig-out
-          zig build -Doptimize=ReleaseSafe -Drpmzig-lua-lib=lua5.4 install --prefix ./out
+          zig build -Doptimize=ReleaseSafe install --prefix ./out
 
       - name: Smoke test
         continue-on-error: true

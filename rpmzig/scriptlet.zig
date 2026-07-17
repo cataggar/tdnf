@@ -1,7 +1,7 @@
 const std = @import("std");
 const header = @import("rpm_header");
 const install_engine = @import("install.zig");
-const lua_scriptlet_options = @import("lua_scriptlet_options");
+const lua_scriptlet = @import("lua_scriptlet_zig.zig");
 const txn_config = @import("txn_config.zig");
 
 const Allocator = std.mem.Allocator;
@@ -9,7 +9,6 @@ const linux = std.os.linux;
 
 const c = @cImport({
     @cInclude("errno.h");
-    @cInclude("lua_scriptlet.h");
     @cInclude("signal.h");
     @cInclude("stdlib.h");
     @cInclude("string.h");
@@ -216,9 +215,6 @@ pub fn runPreparedScript(
                 .outcome = .not_run,
             };
         };
-        if (c.tdnf_rpmzig_lua_supported() == 0) {
-            return error.UnsupportedInterpreter;
-        }
         return try runLuaScriptProcess(
             allocator,
             &config,
@@ -583,7 +579,7 @@ fn runLuaChild(
         c._exit(127);
     }
 
-    const rc = c.tdnf_rpmzig_lua_run(script_ptr, script_len, arg1, arg2);
+    const rc = lua_scriptlet.run(script_ptr[0..script_len], arg1, arg2);
     c._exit(if (rc == 0) 0 else 1);
 }
 
@@ -618,12 +614,6 @@ fn testTmpPath(allocator: Allocator) ![]u8 {
 
 fn testTmpDefine(allocator: Allocator, tmp_path: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "_tmppath {s}", .{tmp_path});
-}
-
-fn luaContractSupported() !bool {
-    const supported = c.tdnf_rpmzig_lua_supported() != 0;
-    try std.testing.expectEqual(lua_scriptlet_options.enabled, supported);
-    return supported;
 }
 
 test "scriptlet config expands recursive tmppath and PATH" {
@@ -982,8 +972,6 @@ test "runPreparedScript supplies trigger stdin" {
 }
 
 test "Lua rpm.input reads trigger stdin" {
-    if (c.tdnf_rpmzig_lua_supported() == 0) return;
-
     const allocator = std.testing.allocator;
     const result = try runPreparedScript(
         allocator,
@@ -1002,8 +990,6 @@ test "Lua rpm.input reads trigger stdin" {
 }
 
 test "Lua contract exposes 5.4 arguments libraries and modules" {
-    if (!try luaContractSupported()) return;
-
     const allocator = std.testing.allocator;
     const with_args = try runPreparedScript(
         allocator,
@@ -1054,8 +1040,6 @@ test "Lua contract exposes 5.4 arguments libraries and modules" {
 }
 
 test "Lua contract preserves helper results and errors" {
-    if (!try luaContractSupported()) return;
-
     const allocator = std.testing.allocator;
     const tmp_path = try testTmpPath(allocator);
     defer allocator.free(tmp_path);
@@ -1106,8 +1090,6 @@ test "Lua contract preserves helper results and errors" {
 }
 
 test "Lua contract maps failures and routes output" {
-    if (!try luaContractSupported()) return;
-
     const allocator = std.testing.allocator;
     const tmp_path = try testTmpPath(allocator);
     defer allocator.free(tmp_path);
@@ -1196,8 +1178,6 @@ test "Lua contract maps failures and routes output" {
 }
 
 test "Lua contract preserves process IO and state shutdown" {
-    if (!try luaContractSupported()) return;
-
     const allocator = std.testing.allocator;
     const tmp_path = try testTmpPath(allocator);
     defer allocator.free(tmp_path);
@@ -1369,14 +1349,6 @@ test "runHeaderScript handles Lua bash-style postun" {
     defer allocator.free(blob);
 
     const hdr = try header.Header.parse(blob);
-    if (c.tdnf_rpmzig_lua_supported() == 0) {
-        try std.testing.expectError(error.UnsupportedInterpreter, runHeaderScript(allocator, hdr, .postun, .{
-            .install_root = "/",
-            .arg1 = 0,
-        }));
-        return;
-    }
-
     const result = try runHeaderScript(allocator, hdr, .postun, .{
         .install_root = "/",
         .arg1 = 0,
@@ -1409,6 +1381,8 @@ test "runHeaderScript exposes Lua rpm and posix helpers" {
     defer allocator.free(spawn_error_path);
     const execed_path = try std.fmt.allocPrint(allocator, "{s}/execed", .{root_path});
     defer allocator.free(execed_path);
+    const linked_path = try std.fmt.allocPrint(allocator, "{s}/linked", .{root_path});
+    defer allocator.free(linked_path);
 
     const script = try std.fmt.allocPrint(
         allocator,
@@ -1418,21 +1392,28 @@ test "runHeaderScript exposes Lua rpm and posix helpers" {
         \\local spawn_input = "{s}"
         \\local spawn_error = "{s}"
         \\local execed = "{s}"
+        \\local linked = "{s}"
         \\assert(rpm.vercmp("6.0.rc1", "6.0") > 0)
         \\assert(posix.uname("%r") ~= nil)
         \\assert(posix.mkdir(root) == 0)
         \\assert(posix.mkdir(root .. "/dir") == 0)
         \\assert(posix.mkdir(root .. "/mode-dir", 448) == 0)
         \\local mode_dir = assert(posix.stat(root .. "/mode-dir"))
-        \\assert((mode_dir.mode & 511) == 448)
+        \\assert((mode_dir._mode & 511) == 448)
         \\local f = io.open(marker, "w+")
         \\f:write("marker")
         \\f:close()
         \\assert(posix.utime(marker) == 0)
-        \\assert(posix.chmod(marker, 365) == 0)
+        \\assert(posix.chmod(marker, 0555) == 0)
         \\local marker_stat = assert(posix.stat(marker))
         \\assert(marker_stat.type == "regular")
-        \\assert((marker_stat.mode & 511) == 365)
+        \\assert(marker_stat.mode == "r-xr-xr-x")
+        \\assert((marker_stat._mode & 511) == 365)
+        \\assert(posix.stat(marker, "type") == "regular")
+        \\assert(posix.stat(marker, "mode") == "r-xr-xr-x")
+        \\assert(posix.link(marker, linked) == 0)
+        \\assert(posix.stat(marker, "ino") == posix.stat(linked, "ino"))
+        \\assert(posix.unlink(linked) == 0)
         \\local missing, missing_message, missing_code =
         \\  posix.stat(root .. "/missing")
         \\assert(missing == nil and type(missing_message) == "string")
@@ -1443,6 +1424,11 @@ test "runHeaderScript exposes Lua rpm and posix helpers" {
         \\assert(posix.readlink(root .. "/link") == "dir")
         \\assert(posix.access(root .. "/dir", "x") == 0)
         \\local seen_dir = false
+        \\for _, entry in pairs(posix.dir(root)) do
+        \\  if entry == "dir" then seen_dir = true end
+        \\end
+        \\assert(seen_dir)
+        \\seen_dir = false
         \\for entry in posix.files(root) do
         \\  if entry == "dir" then
         \\    seen_dir = true
@@ -1451,6 +1437,11 @@ test "runHeaderScript exposes Lua rpm and posix helpers" {
         \\assert(seen_dir)
         \\local matches = rpm.glob(root .. "/d*")
         \\assert(matches[1] == root .. "/dir")
+        \\assert(rpm.next_line() == "/one")
+        \\assert(rpm.next_file() == "/two")
+        \\assert(rpm.input() == nil)
+        \\assert(posix.mkdir(root .. "/empty") == 0)
+        \\assert(posix.rmdir(root .. "/empty") == 0)
         \\local input = assert(io.open(spawn_input, "w+"))
         \\input:write("input\n")
         \\input:close()
@@ -1477,6 +1468,7 @@ test "runHeaderScript exposes Lua rpm and posix helpers" {
             spawn_input_path,
             spawn_error_path,
             execed_path,
+            linked_path,
         },
     );
     defer allocator.free(script);
@@ -1490,15 +1482,9 @@ test "runHeaderScript exposes Lua rpm and posix helpers" {
     defer allocator.free(blob);
 
     const hdr = try header.Header.parse(blob);
-    if (c.tdnf_rpmzig_lua_supported() == 0) {
-        try std.testing.expectError(error.UnsupportedInterpreter, runHeaderScript(allocator, hdr, .pretrans, .{
-            .install_root = "/",
-        }));
-        return;
-    }
-
     const result = try runHeaderScript(allocator, hdr, .pretrans, .{
         .install_root = "/",
+        .stdin_data = "/one\n/two\n",
     });
     try std.testing.expect(result.ran);
     try std.testing.expectEqual(Outcome.ok, result.outcome);
@@ -1514,4 +1500,128 @@ test "runHeaderScript exposes Lua rpm and posix helpers" {
     const execed = try readAbsoluteFile(allocator, execed_path);
     defer allocator.free(execed);
     try std.testing.expectEqualStrings("execed", execed);
+}
+
+test "Lua corpus covers Fedora and Azure package scriptlet patterns" {
+    const allocator = std.testing.allocator;
+    const tmp_path = try testTmpPath(allocator);
+    defer allocator.free(tmp_path);
+    try ensureDirPathAbsolute(allocator, tmp_path);
+
+    const unique: u64 = (@as(u64, @intCast(c.time(null))) << 32) ^
+        @as(u64, @intCast(c.getpid()));
+    const root_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/lua-package-corpus-{d}",
+        .{ tmp_path, unique },
+    );
+    defer allocator.free(root_path);
+    const shells_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/shells",
+        .{root_path},
+    );
+    defer allocator.free(shells_path);
+    const spawn_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/spawned",
+        .{root_path},
+    );
+    defer allocator.free(spawn_path);
+    const trigger_input = try std.fmt.allocPrint(
+        allocator,
+        "{s}/usr/bin/tool\n",
+        .{root_path},
+    );
+    defer allocator.free(trigger_input);
+
+    const script = try std.fmt.allocPrint(
+        allocator,
+        \\local root = "{s}"
+        \\assert(posix.mkdir(root) == 0)
+        \\
+        \\-- Azure Linux filesystem bootstrap operations.
+        \\assert(posix.mkdir(root .. "/proc") == 0)
+        \\assert(posix.mkdir(root .. "/sys") == 0)
+        \\assert(posix.chmod(root .. "/proc", 0555) == 0)
+        \\assert(posix.chmod(root .. "/sys", 0555) == 0)
+        \\assert(posix.stat(root .. "/proc", "mode") == "r-xr-xr-x")
+        \\assert(posix.symlink("proc", root .. "/proc-link") == 0)
+        \\
+        \\-- Fedora bash post is idempotent with append/update I/O.
+        \\local shells_path = root .. "/shells"
+        \\local function update_shells()
+        \\  local nl = "\n"
+        \\  local sh = "/bin/sh" .. nl
+        \\  local bash = "/bin/bash" .. nl
+        \\  local file = assert(io.open(shells_path, "a+"))
+        \\  local shells = nl .. file:read("*all") .. nl
+        \\  if not shells:find(nl .. sh) then file:write(sh) end
+        \\  if not shells:find(nl .. bash) then file:write(bash) end
+        \\  file:close()
+        \\end
+        \\update_shells()
+        \\update_shells()
+        \\
+        \\-- Fedora setup and glibc process patterns.
+        \\for _, name in ipairs({{"passwd", "shadow", "group", "gshadow"}}) do
+        \\  os.remove(root .. "/" .. name .. ".rpmnew")
+        \\end
+        \\assert(posix.access("/bin/sh", "x") == 0)
+        \\assert(rpm.spawn({{"/bin/sh", "-c", "true"}}, {{
+        \\  stdout = "/dev/null",
+        \\  stderr = "/dev/null",
+        \\}}) == 0)
+        \\local function post_exec(program, ...)
+        \\  local status = rpm.spawn({{program, ...}})
+        \\  assert(status ~= nil)
+        \\end
+        \\post_exec("/bin/sh", "-c", "printf glibc > " .. root .. "/spawned")
+        \\assert(type(posix.uname("%r")) == "string")
+        \\assert(rpm.vercmp("6.0.rc1", "6.0") > 0)
+        \\
+        \\-- Fedora filesystem file-trigger iteration and atomic link replacement.
+        \\assert(posix.mkdir(root .. "/usr") == 0)
+        \\assert(posix.mkdir(root .. "/usr/bin") == 0)
+        \\assert(posix.mkdir(root .. "/usr/sbin") == 0)
+        \\local tool = assert(io.open(root .. "/usr/bin/tool", "w"))
+        \\tool:write("tool")
+        \\tool:close()
+        \\local filenames = {{tool = true}}
+        \\local path = rpm.next_file()
+        \\while path do
+        \\  local name = path:match("^.+/(.+)$")
+        \\  if filenames[name] then
+        \\    local link = root .. "/usr/sbin/" .. name
+        \\    assert(posix.symlink("../bin/" .. name, link .. ".tmp") == 0)
+        \\    assert(os.rename(link .. ".tmp", link))
+        \\    assert(posix.readlink(link) == "../bin/" .. name)
+        \\  end
+        \\  path = rpm.next_line()
+        \\end
+        \\return 0
+    ,
+        .{root_path},
+    );
+    defer allocator.free(script);
+
+    const result = try runPreparedScript(
+        allocator,
+        &.{"<lua>"},
+        script,
+        true,
+        .{
+            .install_root = "/",
+            .arg1 = 1,
+            .stdin_data = trigger_input,
+        },
+    );
+    try std.testing.expectEqual(Outcome.ok, result.outcome);
+
+    const shells = try readAbsoluteFile(allocator, shells_path);
+    defer allocator.free(shells);
+    try std.testing.expectEqualStrings("/bin/sh\n/bin/bash\n", shells);
+    const spawned = try readAbsoluteFile(allocator, spawn_path);
+    defer allocator.free(spawned);
+    try std.testing.expectEqualStrings("glibc", spawned);
 }
