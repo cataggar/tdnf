@@ -9,11 +9,12 @@ const c = @cImport({
     @cInclude("tdnferror.h");
     @cInclude("tdnfrepomd.h");
     @cInclude("solv/chksum.h");
-    @cInclude("solv/pool.h");
-    @cInclude("solv/repo.h");
+    @cInclude("solv/poolarch.h");
     @cInclude("solv/repodata.h");
-    @cInclude("solv/solvable.h");
+    @cInclude("solv/solver.h");
 });
+
+pub const libsolv = c;
 
 const model = @import("model.zig");
 const rpmpkg = @import("rpmpkg.zig");
