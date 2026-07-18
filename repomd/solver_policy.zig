@@ -67,13 +67,17 @@ pub const Prepared = struct {
 
 /// Copy a base formula and append installed-retention clauses.
 ///
-/// The returned formula still borrows the universe and repository metadata.
+/// The returned formula still borrows the universe, repository metadata, and
+/// architecture policy strings.
 pub fn prepareInstalledRetention(
     allocator: std.mem.Allocator,
     base: *const solver_rules.OwnedFormula,
 ) PrepareError!Prepared {
     const package_count = base.universe.packages.len;
     try validateBaseFormula(base);
+    if (base.architecture) |architecture| {
+        if (!architecture.allow_multilib) return error.UnsupportedPolicy;
+    }
     for (base.package_states) |state| {
         if (state.multiversion) return error.UnsupportedPolicy;
     }
@@ -164,6 +168,7 @@ pub fn prepareInstalledRetention(
     try rankCandidateGroups(
         allocator,
         base.universe,
+        base.architecture,
         candidate_groups.items,
         policy_candidates.items,
     );
@@ -278,6 +283,7 @@ pub fn prepareInstalledRetention(
         .formula = .{
             .allocator = allocator,
             .universe = base.universe,
+            .architecture = base.architecture,
             .clauses = owned_clauses,
             .literals = owned_literals,
             .weak_requests = weak_requests,
@@ -300,10 +306,13 @@ const RankedCandidate = struct {
     original_order: usize,
     installed: bool,
     priority: i64,
+    architecture_rank: ?usize,
+    architecture_tier: usize,
 };
 
 const RankingContext = struct {
     universe: *const solver_model.Universe,
+    architecture: ?solver_model.ArchitecturePolicy,
 };
 
 fn appendCandidateGroup(
@@ -383,6 +392,7 @@ fn appendCandidateGroup(
 fn rankCandidateGroups(
     allocator: std.mem.Allocator,
     universe: *const solver_model.Universe,
+    architecture: ?solver_model.ArchitecturePolicy,
     groups: []const solver_search.CandidateGroup,
     candidates: []solver_model.PackageId,
 ) error{OutOfMemory}!void {
@@ -412,7 +422,10 @@ fn rankCandidateGroups(
     defer allocator.free(group_by_package);
     const group_cursors = try allocator.alloc(usize, max_candidates);
     defer allocator.free(group_cursors);
-    const context = RankingContext{ .universe = universe };
+    const context = RankingContext{
+        .universe = universe,
+        .architecture = architecture,
+    };
 
     for (groups) |group| {
         const start: usize = @intCast(group.candidates.start);
@@ -452,6 +465,14 @@ fn rankCandidateGroups(
                     .available => repository.priority,
                     .command_line => 0,
                 },
+                .architecture_rank = if (architecture) |policy|
+                    solver_rules.architectureRank(
+                        policy.force_arch orelse policy.native_arch,
+                        package.source.nevra.arch,
+                    )
+                else
+                    null,
+                .architecture_tier = 0,
             };
         }
         const ranked = priority_ranked[0..group_candidates.len];
@@ -461,6 +482,15 @@ fn rankCandidateGroups(
             context,
             priorityCandidateLessThan,
         );
+        if (architecture != null) {
+            assignArchitectureTiers(ranked);
+            std.sort.heap(
+                RankedCandidate,
+                ranked,
+                context,
+                priorityCandidateLessThan,
+            );
+        }
         const by_version = version_ranked[0..group_candidates.len];
         @memcpy(by_version, ranked);
         std.sort.heap(
@@ -494,6 +524,38 @@ fn rankCandidateGroups(
     }
 }
 
+fn assignArchitectureTiers(candidates: []RankedCandidate) void {
+    var start: usize = 0;
+    while (start < candidates.len) {
+        var end = start + 1;
+        while (end < candidates.len and
+            candidates[end].priority == candidates[start].priority)
+        {
+            end += 1;
+        }
+
+        var best_machine_rank: ?usize = null;
+        for (candidates[start..end]) |candidate| {
+            const rank = candidate.architecture_rank orelse continue;
+            if (rank == 0) continue;
+            best_machine_rank = if (best_machine_rank) |best|
+                @min(best, rank)
+            else
+                rank;
+        }
+        if (best_machine_rank) |best| {
+            for (candidates[start..end]) |*candidate| {
+                candidate.architecture_tier =
+                    if (candidate.architecture_rank) |rank|
+                        if (rank == 0) 0 else rank - best
+                    else
+                        std.math.maxInt(usize);
+            }
+        }
+        start = end;
+    }
+}
+
 fn priorityCandidateLessThan(
     _: RankingContext,
     left: RankedCandidate,
@@ -501,6 +563,9 @@ fn priorityCandidateLessThan(
 ) bool {
     if (left.priority != right.priority) {
         return left.priority < right.priority;
+    }
+    if (left.architecture_tier != right.architecture_tier) {
+        return left.architecture_tier < right.architecture_tier;
     }
     if (left.installed != right.installed) return left.installed;
     return left.original_order < right.original_order;
@@ -514,6 +579,9 @@ fn versionCandidateLessThan(
     if (left.priority != right.priority) {
         return left.priority < right.priority;
     }
+    if (left.architecture_tier != right.architecture_tier) {
+        return left.architecture_tier < right.architecture_tier;
+    }
     const left_package = context.universe.package(left.package).?;
     const right_package = context.universe.package(right.package).?;
     const name_order = std.mem.order(
@@ -522,12 +590,14 @@ fn versionCandidateLessThan(
         right_package.source.nevra.name,
     );
     if (name_order != .eq) return name_order == .lt;
-    const arch_order = std.mem.order(
-        u8,
-        left_package.source.nevra.arch,
-        right_package.source.nevra.arch,
-    );
-    if (arch_order != .eq) return arch_order == .lt;
+    if (context.architecture == null) {
+        const arch_order = std.mem.order(
+            u8,
+            left_package.source.nevra.arch,
+            right_package.source.nevra.arch,
+        );
+        if (arch_order != .eq) return arch_order == .lt;
+    }
     const version_order = query_index.comparePackageVersions(
         left_package.source.*,
         right_package.source.*,
@@ -545,17 +615,20 @@ fn sameVersionGroup(
     if (left.priority != right.priority) {
         return false;
     }
+    if (left.architecture_tier != right.architecture_tier) {
+        return false;
+    }
     const left_package = context.universe.package(left.package).?;
     const right_package = context.universe.package(right.package).?;
     return std.mem.eql(
         u8,
         left_package.source.nevra.name,
         right_package.source.nevra.name,
-    ) and std.mem.eql(
+    ) and (context.architecture != null or std.mem.eql(
         u8,
         left_package.source.nevra.arch,
         right_package.source.nevra.arch,
-    );
+    ));
 }
 
 fn checkedClauseLiterals(
@@ -1042,21 +1115,25 @@ test "contextual ranking keeps unrelated provider names stable" {
     );
 }
 
-test "contextual ranking preserves architecture fallback order" {
+test "contextual ranking co-ranks noarch and best machine architecture" {
     var relations = [_]metadata.Relation{
+        .{ .name = "virtual-api" },
         .{ .name = "virtual-api" },
         .{ .name = "virtual-api" },
         .{ .name = "virtual-api" },
     };
     var packages = [_]metadata.Package{
+        testPackage("provider", "2"),
         testPackage("provider", "1"),
-        testPackage("provider", "9"),
+        testPackage("provider", "99"),
         testPackage("consumer", "1"),
     };
     packages[0].nevra.arch = "noarch";
+    packages[2].nevra.arch = "i686";
     packages[0].provides = .{ .start = 0, .len = 1 };
     packages[1].provides = .{ .start = 1, .len = 1 };
-    packages[2].requires = .{ .start = 2, .len = 1 };
+    packages[2].provides = .{ .start = 2, .len = 1 };
+    packages[3].requires = .{ .start = 3, .len = 1 };
     const repository = metadata.RepositoryModel{
         .packages = &packages,
         .relations = &relations,
@@ -1071,7 +1148,7 @@ test "contextual ranking preserves architecture fallback order" {
         &universe,
         .{ .jobs = &.{.{
             .action = .install,
-            .selection = .{ .package = @enumFromInt(2) },
+            .selection = .{ .package = @enumFromInt(3) },
         }} },
         testArchitecture(),
     );
@@ -1094,7 +1171,83 @@ test "contextual ranking preserves architecture fallback order" {
     }
     try std.testing.expectEqualSlices(
         solver_model.PackageId,
-        &.{ @enumFromInt(0), @enumFromInt(1) },
+        &.{ @enumFromInt(0), @enumFromInt(1), @enumFromInt(2) },
+        requirement_candidates.?,
+    );
+    var result = try prepared.solve(std.testing.allocator);
+    defer result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ true, false, false, true },
+        result.satisfiable.values,
+    );
+}
+
+test "contextual ranking honors forced architecture policy" {
+    var relations = [_]metadata.Relation{
+        .{ .name = "virtual-api" },
+        .{ .name = "virtual-api" },
+        .{ .name = "virtual-api" },
+        .{ .name = "virtual-api" },
+    };
+    var packages = [_]metadata.Package{
+        testPackage("provider", "99"),
+        testPackage("provider", "2"),
+        testPackage("provider", "1"),
+        testPackage("consumer", "1"),
+    };
+    packages[1].nevra.arch = "i686";
+    packages[2].nevra.arch = "noarch";
+    packages[0].provides = .{ .start = 0, .len = 1 };
+    packages[1].provides = .{ .start = 1, .len = 1 };
+    packages[2].provides = .{ .start = 2, .len = 1 };
+    packages[3].requires = .{ .start = 3, .len = 1 };
+    const repository = metadata.RepositoryModel{
+        .packages = &packages,
+        .relations = &relations,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &repository }},
+    );
+    defer universe.deinit();
+    const architecture = solver_model.ArchitecturePolicy{
+        .native_arch = "x86_64",
+        .force_arch = "i686",
+    };
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(3) },
+        }} },
+        architecture,
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    try std.testing.expectEqualStrings(
+        "i686",
+        prepared.formula.architecture.?.force_arch.?,
+    );
+    var requirement_candidates: ?[]const solver_model.PackageId = null;
+    for (prepared.decision_policy.groups) |group| {
+        if (std.meta.activeTag(
+            prepared.formula.clauses[group.clause_index].origin,
+        ) == .requirement) {
+            requirement_candidates = group.candidates.slice(
+                prepared.decision_policy.candidates,
+            );
+        }
+    }
+    try std.testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{ @enumFromInt(1), @enumFromInt(2) },
         requirement_candidates.?,
     );
 }
@@ -1553,6 +1706,35 @@ test "multiversion state remains an explicit policy boundary" {
         testArchitecture(),
     );
     defer base.deinit();
+    try std.testing.expectError(
+        error.UnsupportedPolicy,
+        prepareInstalledRetention(std.testing.allocator, &base),
+    );
+}
+
+test "disabled multilib remains an explicit policy boundary" {
+    var packages = [_]metadata.Package{
+        testPackage("package", "1"),
+    };
+    const repository = metadata.RepositoryModel{
+        .packages = &packages,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &repository }},
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    base.architecture = .{
+        .native_arch = "x86_64",
+        .allow_multilib = false,
+    };
     try std.testing.expectError(
         error.UnsupportedPolicy,
         prepareInstalledRetention(std.testing.allocator, &base),
