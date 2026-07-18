@@ -113,6 +113,7 @@ pub const PackageState = struct {
 pub const OwnedFormula = struct {
     allocator: std.mem.Allocator,
     universe: *const solver_model.Universe,
+    architecture: ?solver_model.ArchitecturePolicy = null,
     clauses: []const Clause,
     literals: []const Literal,
     weak_requests: []const WeakRequest,
@@ -581,6 +582,7 @@ pub fn generateBase(
     return .{
         .allocator = allocator,
         .universe = universe,
+        .architecture = architecture,
         .clauses = clauses,
         .literals = literals,
         .weak_requests = weak_requests,
@@ -1182,9 +1184,12 @@ const architecture_entries = [_]ArchitectureEntry{
     .{ .native = "e2kv4", .policy = "e2kv4:e2k" },
 };
 
-fn architectureAllows(native: []const u8, candidate: []const u8) bool {
-    if (std.mem.eql(u8, candidate, "noarch")) return true;
-    if (native.len == 0 or candidate.len == 0) return false;
+pub fn architectureRank(
+    native: []const u8,
+    candidate: []const u8,
+) ?usize {
+    if (std.mem.eql(u8, candidate, "noarch")) return 0;
+    if (native.len == 0 or candidate.len == 0) return null;
 
     var policy = native;
     for (architecture_entries) |entry| {
@@ -1194,10 +1199,16 @@ fn architectureAllows(native: []const u8, candidate: []const u8) bool {
         }
     }
     var architectures = std.mem.splitScalar(u8, policy, ':');
+    var rank: usize = 1;
     while (architectures.next()) |architecture| {
-        if (std.mem.eql(u8, architecture, candidate)) return true;
+        if (std.mem.eql(u8, architecture, candidate)) return rank;
+        rank += 1;
     }
-    return false;
+    return null;
+}
+
+fn architectureAllows(native: []const u8, candidate: []const u8) bool {
+    return architectureRank(native, candidate) != null;
 }
 
 fn appendPackageId(
@@ -1469,6 +1480,33 @@ fn versionedRelation(
         .comparison = comparison,
         .version = version,
     };
+}
+
+test "architecture rank follows libsolv policy order" {
+    try std.testing.expectEqual(
+        @as(?usize, 0),
+        architectureRank("x86_64", "noarch"),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, 1),
+        architectureRank("x86_64", "x86_64"),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, 2),
+        architectureRank("x86_64", "i686"),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, null),
+        architectureRank("x86_64", "aarch64"),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, 1),
+        architectureRank("aarch64", "aarch64"),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, null),
+        architectureRank("aarch64", "armv7hl"),
+    );
 }
 
 test "RPM provider matching treats missing releases and unversioned provides compatibly" {
