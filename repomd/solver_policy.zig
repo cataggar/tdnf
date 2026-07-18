@@ -1,16 +1,21 @@
-//! Initial package-policy preparation for the native solver.
+//! Package-policy preparation for the native solver.
 //!
 //! This slice preserves installed packages unless a same-name or explicit
-//! obsoleting replacement is selected. Candidate ranking, update jobs,
-//! allow-erasing, and cleanup policy remain separate follow-up work.
+//! obsoleting replacement is selected and ranks ordinary job and requirement
+//! candidates by repository priority and same-name package EVR. Architecture
+//! preference, common-provider ranking, update jobs, allow-erasing, and
+//! cleanup policy remain separate follow-up work.
 
 const std = @import("std");
+const query_index = @import("index.zig");
 const metadata = @import("model.zig");
 const solver_model = @import("solver_model.zig");
 const solver_rules = @import("solver_rules.zig");
 const solver_search = @import("solver_search.zig");
 
 const PackageIdList = std.array_list.Managed(solver_model.PackageId);
+const CandidateGroupList =
+    std.array_list.Managed(solver_search.CandidateGroup);
 
 pub const PrepareError = error{
     OutOfMemory,
@@ -23,8 +28,7 @@ pub const PrepareError = error{
 pub const Prepared = struct {
     allocator: std.mem.Allocator,
     formula: solver_rules.OwnedFormula,
-    decision_order: []const solver_model.PackageId,
-    preferred_values: []const bool,
+    decision_policy: solver_search.CandidateDecisionPolicy,
 
     pub fn solve(
         self: *const Prepared,
@@ -38,20 +42,24 @@ pub const Prepared = struct {
         allocator: std.mem.Allocator,
         assumptions: []const solver_rules.Literal,
     ) solver_search.SolveError!solver_search.Result {
-        return solver_search.solveWithDecisionPolicy(
+        return solver_search.solveWithCandidatePolicy(
             allocator,
             &self.formula,
             assumptions,
-            .{
-                .order = self.decision_order,
-                .preferred_values = self.preferred_values,
-            },
-        );
+            self.decision_policy,
+        ) catch |err| switch (err) {
+            error.InvalidCandidatePolicy => error.InvalidDecisionPolicy,
+            else => |solve_error| return solve_error,
+        };
     }
 
     pub fn deinit(self: *Prepared) void {
-        self.allocator.free(self.preferred_values);
-        self.allocator.free(self.decision_order);
+        self.allocator.free(self.decision_policy.candidates);
+        self.allocator.free(self.decision_policy.groups);
+        self.allocator.free(
+            self.decision_policy.fallback.preferred_values,
+        );
+        self.allocator.free(self.decision_policy.fallback.order);
         self.formula.deinit();
         self.* = undefined;
     }
@@ -77,14 +85,25 @@ pub fn prepareInstalledRetention(
     defer allocator.free(directly_erased);
     @memset(directly_erased, false);
 
-    const candidates = try allocator.alloc(PackageIdList, package_count);
-    defer allocator.free(candidates);
-    for (candidates) |*list| {
+    const replacement_candidates = try allocator.alloc(
+        PackageIdList,
+        package_count,
+    );
+    defer allocator.free(replacement_candidates);
+    for (replacement_candidates) |*list| {
         list.* = PackageIdList.init(allocator);
     }
-    defer for (candidates) |*list| list.deinit();
+    defer for (replacement_candidates) |*list| list.deinit();
 
-    for (base.clauses) |clause| {
+    var candidate_groups = CandidateGroupList.init(allocator);
+    defer candidate_groups.deinit();
+    var policy_candidates = PackageIdList.init(allocator);
+    defer policy_candidates.deinit();
+    const candidate_seen = try allocator.alloc(bool, package_count);
+    defer allocator.free(candidate_seen);
+    @memset(candidate_seen, false);
+
+    for (base.clauses, 0..) |clause, clause_index| {
         const literals = try checkedClauseLiterals(base, clause);
         switch (clause.origin) {
             .not_installable => |package_id| {
@@ -95,10 +114,14 @@ pub fn prepareInstalledRetention(
                 const left_index = try packageIndex(origin.left, package_count);
                 const right_index = try packageIndex(origin.right, package_count);
                 if (base.universe.packages[left_index].installed != null) {
-                    try candidates[left_index].append(origin.right);
+                    try replacement_candidates[left_index].append(
+                        origin.right,
+                    );
                 }
                 if (base.universe.packages[right_index].installed != null) {
-                    try candidates[right_index].append(origin.left);
+                    try replacement_candidates[right_index].append(
+                        origin.left,
+                    );
                 }
             },
             .obsoletes => |origin| {
@@ -111,24 +134,39 @@ pub fn prepareInstalledRetention(
                     package_count,
                 );
                 if (base.universe.packages[target_index].installed != null) {
-                    try candidates[target_index].append(
+                    try replacement_candidates[target_index].append(
                         origin.dependency.package,
                     );
                 }
             },
             .job => {
-                if (literals.len != 1 or literals[0].positive()) continue;
-                const package_index = try packageIndex(
-                    literals[0].package(),
-                    package_count,
-                );
-                if (base.universe.packages[package_index].installed != null) {
-                    directly_erased[package_index] = true;
+                if (literals.len == 1 and !literals[0].positive()) {
+                    const package_index = try packageIndex(
+                        literals[0].package(),
+                        package_count,
+                    );
+                    if (base.universe.packages[package_index].installed != null) {
+                        directly_erased[package_index] = true;
+                    }
                 }
             },
             .requirement, .conflict, .installed_keep => {},
         }
+        try appendCandidateGroup(
+            clause,
+            clause_index,
+            literals,
+            candidate_seen,
+            &candidate_groups,
+            &policy_candidates,
+        );
     }
+    try rankCandidateGroups(
+        allocator,
+        base.universe,
+        candidate_groups.items,
+        policy_candidates.items,
+    );
 
     var clauses = std.array_list.Managed(solver_rules.Clause).init(allocator);
     defer clauses.deinit();
@@ -147,7 +185,7 @@ pub fn prepareInstalledRetention(
             continue;
         }
 
-        const package_candidates = &candidates[package_index];
+        const package_candidates = &replacement_candidates[package_index];
         std.sort.heap(
             solver_model.PackageId,
             package_candidates.items,
@@ -214,6 +252,10 @@ pub fn prepareInstalledRetention(
         base.package_states,
     );
     errdefer allocator.free(package_states);
+    const owned_candidate_groups = try candidate_groups.toOwnedSlice();
+    errdefer allocator.free(owned_candidate_groups);
+    const owned_policy_candidates = try policy_candidates.toOwnedSlice();
+    errdefer allocator.free(owned_policy_candidates);
 
     const decision_order = try allocator.alloc(
         solver_model.PackageId,
@@ -242,9 +284,278 @@ pub fn prepareInstalledRetention(
             .weak_candidates = weak_candidates,
             .package_states = package_states,
         },
-        .decision_order = decision_order,
-        .preferred_values = preferred_values,
+        .decision_policy = .{
+            .fallback = .{
+                .order = decision_order,
+                .preferred_values = preferred_values,
+            },
+            .groups = owned_candidate_groups,
+            .candidates = owned_policy_candidates,
+        },
     };
+}
+
+const RankedCandidate = struct {
+    package: solver_model.PackageId,
+    original_order: usize,
+    installed: bool,
+    priority: i64,
+};
+
+const RankingContext = struct {
+    universe: *const solver_model.Universe,
+};
+
+fn appendCandidateGroup(
+    clause: solver_rules.Clause,
+    clause_index: usize,
+    literals: []const solver_rules.Literal,
+    seen: []bool,
+    groups: *CandidateGroupList,
+    candidates: *PackageIdList,
+) PrepareError!void {
+    const start = candidates.items.len;
+    errdefer candidates.shrinkRetainingCapacity(start);
+    defer for (literals) |literal| {
+        if (literal.positive()) {
+            seen[@intFromEnum(literal.package())] = false;
+        }
+    };
+
+    var control_count: usize = 0;
+    for (literals) |literal| {
+        const package_id = literal.package();
+        const package_index: usize = @intFromEnum(package_id);
+        if (literal.positive()) {
+            if (seen[package_index]) return error.InvalidFormula;
+            seen[package_index] = true;
+            try candidates.append(package_id);
+        } else {
+            control_count += 1;
+        }
+    }
+    switch (clause.origin) {
+        .requirement => |origin| {
+            if (control_count != 1 or
+                seen[@intFromEnum(origin.package)])
+            {
+                return error.InvalidFormula;
+            }
+            for (literals) |literal| {
+                if (!literal.positive() and
+                    literal.package() != origin.package)
+                {
+                    return error.InvalidFormula;
+                }
+            }
+        },
+        .job => {
+            if (control_count != 0) {
+                candidates.shrinkRetainingCapacity(start);
+                return;
+            }
+        },
+        else => {
+            candidates.shrinkRetainingCapacity(start);
+            return;
+        },
+    }
+
+    const candidate_count = candidates.items.len - start;
+    if (candidate_count == 0) return;
+    if (clause_index > std.math.maxInt(u32)) {
+        return error.TooManyClauses;
+    }
+    if (start > std.math.maxInt(u32) or
+        candidate_count > std.math.maxInt(u32))
+    {
+        return error.TooManyLiterals;
+    }
+    try groups.append(.{
+        .clause_index = @intCast(clause_index),
+        .candidates = .{
+            .start = @intCast(start),
+            .len = @intCast(candidate_count),
+        },
+    });
+}
+
+fn rankCandidateGroups(
+    allocator: std.mem.Allocator,
+    universe: *const solver_model.Universe,
+    groups: []const solver_search.CandidateGroup,
+    candidates: []solver_model.PackageId,
+) error{OutOfMemory}!void {
+    var max_candidates: usize = 0;
+    for (groups) |group| {
+        max_candidates = @max(
+            max_candidates,
+            @as(usize, @intCast(group.candidates.len)),
+        );
+    }
+    if (max_candidates < 2) return;
+
+    const priority_ranked = try allocator.alloc(
+        RankedCandidate,
+        max_candidates,
+    );
+    defer allocator.free(priority_ranked);
+    const version_ranked = try allocator.alloc(
+        RankedCandidate,
+        max_candidates,
+    );
+    defer allocator.free(version_ranked);
+    const group_by_package = try allocator.alloc(
+        usize,
+        universe.packages.len,
+    );
+    defer allocator.free(group_by_package);
+    const group_cursors = try allocator.alloc(usize, max_candidates);
+    defer allocator.free(group_cursors);
+    const context = RankingContext{ .universe = universe };
+
+    for (groups) |group| {
+        const start: usize = @intCast(group.candidates.start);
+        const len: usize = @intCast(group.candidates.len);
+        const group_candidates = candidates[start .. start + len];
+        var best_available_priority: ?i64 = null;
+        for (group_candidates) |package_id| {
+            const package = universe.package(package_id) orelse unreachable;
+            const repository = universe.repository(
+                package.repository,
+            ) orelse unreachable;
+            const priority: i64 = switch (repository.kind) {
+                .installed => continue,
+                .available => repository.priority,
+                .command_line => 0,
+            };
+            best_available_priority = if (best_available_priority) |best|
+                @min(best, priority)
+            else
+                priority;
+        }
+        for (group_candidates, priority_ranked[0..group_candidates.len], 0..) |
+            package_id,
+            *ranked,
+            original_order,
+        | {
+            const package = universe.package(package_id) orelse unreachable;
+            const repository = universe.repository(
+                package.repository,
+            ) orelse unreachable;
+            ranked.* = .{
+                .package = package_id,
+                .original_order = original_order,
+                .installed = repository.kind == .installed,
+                .priority = switch (repository.kind) {
+                    .installed => best_available_priority orelse 0,
+                    .available => repository.priority,
+                    .command_line => 0,
+                },
+            };
+        }
+        const ranked = priority_ranked[0..group_candidates.len];
+        std.sort.heap(
+            RankedCandidate,
+            ranked,
+            context,
+            priorityCandidateLessThan,
+        );
+        const by_version = version_ranked[0..group_candidates.len];
+        @memcpy(by_version, ranked);
+        std.sort.heap(
+            RankedCandidate,
+            by_version,
+            context,
+            versionCandidateLessThan,
+        );
+
+        var group_count: usize = 0;
+        for (by_version, 0..) |candidate, candidate_index| {
+            if (candidate_index == 0 or
+                !sameVersionGroup(
+                    context,
+                    by_version[candidate_index - 1],
+                    candidate,
+                ))
+            {
+                group_cursors[group_count] = candidate_index;
+                group_count += 1;
+            }
+            group_by_package[@intFromEnum(candidate.package)] =
+                group_count - 1;
+        }
+        for (ranked, group_candidates) |candidate, *output| {
+            const version_group =
+                group_by_package[@intFromEnum(candidate.package)];
+            output.* = by_version[group_cursors[version_group]].package;
+            group_cursors[version_group] += 1;
+        }
+    }
+}
+
+fn priorityCandidateLessThan(
+    _: RankingContext,
+    left: RankedCandidate,
+    right: RankedCandidate,
+) bool {
+    if (left.priority != right.priority) {
+        return left.priority < right.priority;
+    }
+    if (left.installed != right.installed) return left.installed;
+    return left.original_order < right.original_order;
+}
+
+fn versionCandidateLessThan(
+    context: RankingContext,
+    left: RankedCandidate,
+    right: RankedCandidate,
+) bool {
+    if (left.priority != right.priority) {
+        return left.priority < right.priority;
+    }
+    const left_package = context.universe.package(left.package).?;
+    const right_package = context.universe.package(right.package).?;
+    const name_order = std.mem.order(
+        u8,
+        left_package.source.nevra.name,
+        right_package.source.nevra.name,
+    );
+    if (name_order != .eq) return name_order == .lt;
+    const arch_order = std.mem.order(
+        u8,
+        left_package.source.nevra.arch,
+        right_package.source.nevra.arch,
+    );
+    if (arch_order != .eq) return arch_order == .lt;
+    const version_order = query_index.comparePackageVersions(
+        left_package.source.*,
+        right_package.source.*,
+    );
+    if (version_order != 0) return version_order > 0;
+    if (left.installed != right.installed) return left.installed;
+    return left.original_order < right.original_order;
+}
+
+fn sameVersionGroup(
+    context: RankingContext,
+    left: RankedCandidate,
+    right: RankedCandidate,
+) bool {
+    if (left.priority != right.priority) {
+        return false;
+    }
+    const left_package = context.universe.package(left.package).?;
+    const right_package = context.universe.package(right.package).?;
+    return std.mem.eql(
+        u8,
+        left_package.source.nevra.name,
+        right_package.source.nevra.name,
+    ) and std.mem.eql(
+        u8,
+        left_package.source.nevra.arch,
+        right_package.source.nevra.arch,
+    );
 }
 
 fn checkedClauseLiterals(
@@ -392,6 +703,562 @@ fn testPackage(
 
 fn testArchitecture() solver_model.ArchitecturePolicy {
     return .{ .native_arch = "x86_64" };
+}
+
+test "contextual install ranking applies repository priority before EVR" {
+    var worse_packages = [_]metadata.Package{
+        testPackage("package", "9"),
+    };
+    var better_packages = [_]metadata.Package{
+        testPackage("package", "1"),
+    };
+    const worse_model = metadata.RepositoryModel{
+        .packages = &worse_packages,
+    };
+    const better_model = metadata.RepositoryModel{
+        .packages = &better_packages,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{
+            .{
+                .id = "worse",
+                .model = &worse_model,
+                .priority = 90,
+            },
+            .{
+                .id = "better",
+                .model = &better_model,
+                .priority = 10,
+            },
+        },
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .name = "package" },
+        }} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        prepared.decision_policy.groups.len,
+    );
+    try std.testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{ @enumFromInt(1), @enumFromInt(0) },
+        prepared.decision_policy.groups[0].candidates.slice(
+            prepared.decision_policy.candidates,
+        ),
+    );
+    var result = try prepared.solve(std.testing.allocator);
+    defer result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, true },
+        result.satisfiable.values,
+    );
+}
+
+test "installed candidate competes by EVR with the best repository tier" {
+    var installed_packages = [_]metadata.Package{
+        testPackage("package", "1"),
+    };
+    var worse_packages = [_]metadata.Package{
+        testPackage("package", "9"),
+    };
+    var better_packages = [_]metadata.Package{
+        testPackage("package", "2"),
+    };
+    const installed_model = metadata.RepositoryModel{
+        .packages = &installed_packages,
+    };
+    const worse_model = metadata.RepositoryModel{
+        .packages = &worse_packages,
+    };
+    const better_model = metadata.RepositoryModel{
+        .packages = &better_packages,
+    };
+    const installed_states = [_]solver_model.InstalledState{
+        .{ .rpmdb_hnum = 1 },
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{
+            .{
+                .id = "@System",
+                .model = &installed_model,
+                .kind = .installed,
+                .installed_states = &installed_states,
+            },
+            .{
+                .id = "worse",
+                .model = &worse_model,
+                .priority = 90,
+            },
+            .{
+                .id = "better",
+                .model = &better_model,
+                .priority = 10,
+            },
+        },
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .name = "package" },
+        }} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    try std.testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{ @enumFromInt(2), @enumFromInt(0), @enumFromInt(1) },
+        prepared.decision_policy.groups[0].candidates.slice(
+            prepared.decision_policy.candidates,
+        ),
+    );
+    var result = try prepared.solve(std.testing.allocator);
+    defer result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, false, true },
+        result.satisfiable.values,
+    );
+}
+
+test "contextual requirement ranks package EVR not provide EVR" {
+    var relations = [_]metadata.Relation{
+        .{
+            .name = "virtual-api",
+            .comparison = .eq,
+            .version = "100",
+        },
+        .{
+            .name = "virtual-api",
+            .comparison = .eq,
+            .version = "1",
+        },
+        .{
+            .name = "virtual-api",
+            .comparison = .ge,
+            .version = "1",
+        },
+    };
+    var packages = [_]metadata.Package{
+        testPackage("provider", "1"),
+        testPackage("provider", "2"),
+        testPackage("consumer", "1"),
+    };
+    packages[0].provides = .{ .start = 0, .len = 1 };
+    packages[1].provides = .{ .start = 1, .len = 1 };
+    packages[2].requires = .{ .start = 2, .len = 1 };
+    const repository = metadata.RepositoryModel{
+        .packages = &packages,
+        .relations = &relations,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &repository }},
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(2) },
+        }} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    var requirement_candidates: ?[]const solver_model.PackageId = null;
+    for (prepared.decision_policy.groups) |group| {
+        if (std.meta.activeTag(
+            prepared.formula.clauses[group.clause_index].origin,
+        ) == .requirement) {
+            requirement_candidates = group.candidates.slice(
+                prepared.decision_policy.candidates,
+            );
+        }
+    }
+    try std.testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{ @enumFromInt(1), @enumFromInt(0) },
+        requirement_candidates.?,
+    );
+    var result = try prepared.solve(std.testing.allocator);
+    defer result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, true, true },
+        result.satisfiable.values,
+    );
+}
+
+test "contextual requirement falls back after the best provider conflicts" {
+    var relations = [_]metadata.Relation{
+        .{ .name = "virtual-api" },
+        .{ .name = "virtual-api" },
+        .{ .name = "blocker" },
+        .{ .name = "virtual-api" },
+    };
+    var packages = [_]metadata.Package{
+        testPackage("provider", "1"),
+        testPackage("provider", "2"),
+        testPackage("consumer", "1"),
+        testPackage("blocker", "1"),
+    };
+    packages[0].provides = .{ .start = 0, .len = 1 };
+    packages[1].provides = .{ .start = 1, .len = 1 };
+    packages[1].conflicts = .{ .start = 2, .len = 1 };
+    packages[2].requires = .{ .start = 3, .len = 1 };
+    const repository = metadata.RepositoryModel{
+        .packages = &packages,
+        .relations = &relations,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &repository }},
+    );
+    defer universe.deinit();
+    const jobs = [_]solver_model.Job{
+        .{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(2) },
+        },
+        .{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(3) },
+        },
+    };
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &jobs },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    var result = try prepared.solve(std.testing.allocator);
+    defer result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ true, false, true, true },
+        result.satisfiable.values,
+    );
+}
+
+test "contextual ranking keeps unrelated provider names stable" {
+    var relations = [_]metadata.Relation{
+        .{ .name = "virtual-api" },
+        .{ .name = "virtual-api" },
+        .{ .name = "virtual-api" },
+    };
+    var packages = [_]metadata.Package{
+        testPackage("z-provider", "1"),
+        testPackage("a-provider", "9"),
+        testPackage("consumer", "1"),
+    };
+    packages[0].provides = .{ .start = 0, .len = 1 };
+    packages[1].provides = .{ .start = 1, .len = 1 };
+    packages[2].requires = .{ .start = 2, .len = 1 };
+    const repository = metadata.RepositoryModel{
+        .packages = &packages,
+        .relations = &relations,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &repository }},
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(2) },
+        }} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    var requirement_candidates: ?[]const solver_model.PackageId = null;
+    for (prepared.decision_policy.groups) |group| {
+        if (std.meta.activeTag(
+            prepared.formula.clauses[group.clause_index].origin,
+        ) == .requirement) {
+            requirement_candidates = group.candidates.slice(
+                prepared.decision_policy.candidates,
+            );
+        }
+    }
+    try std.testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{ @enumFromInt(0), @enumFromInt(1) },
+        requirement_candidates.?,
+    );
+    var result = try prepared.solve(std.testing.allocator);
+    defer result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ true, false, true },
+        result.satisfiable.values,
+    );
+}
+
+test "contextual ranking preserves architecture fallback order" {
+    var relations = [_]metadata.Relation{
+        .{ .name = "virtual-api" },
+        .{ .name = "virtual-api" },
+        .{ .name = "virtual-api" },
+    };
+    var packages = [_]metadata.Package{
+        testPackage("provider", "1"),
+        testPackage("provider", "9"),
+        testPackage("consumer", "1"),
+    };
+    packages[0].nevra.arch = "noarch";
+    packages[0].provides = .{ .start = 0, .len = 1 };
+    packages[1].provides = .{ .start = 1, .len = 1 };
+    packages[2].requires = .{ .start = 2, .len = 1 };
+    const repository = metadata.RepositoryModel{
+        .packages = &packages,
+        .relations = &relations,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &repository }},
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(2) },
+        }} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    var requirement_candidates: ?[]const solver_model.PackageId = null;
+    for (prepared.decision_policy.groups) |group| {
+        if (std.meta.activeTag(
+            prepared.formula.clauses[group.clause_index].origin,
+        ) == .requirement) {
+            requirement_candidates = group.candidates.slice(
+                prepared.decision_policy.candidates,
+            );
+        }
+    }
+    try std.testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{ @enumFromInt(0), @enumFromInt(1) },
+        requirement_candidates.?,
+    );
+}
+
+test "contextual ranking maps command-line repository priority to zero" {
+    var available_packages = [_]metadata.Package{
+        testPackage("package", "9"),
+    };
+    var command_line_packages = [_]metadata.Package{
+        testPackage("package", "1"),
+    };
+    const available_model = metadata.RepositoryModel{
+        .packages = &available_packages,
+    };
+    const command_line_model = metadata.RepositoryModel{
+        .packages = &command_line_packages,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{
+            .{
+                .id = "available",
+                .model = &available_model,
+                .priority = 10,
+            },
+            .{
+                .id = "@commandline",
+                .model = &command_line_model,
+                .kind = .command_line,
+                .priority = 500,
+            },
+        },
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .name = "package" },
+        }} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    try std.testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{ @enumFromInt(1), @enumFromInt(0) },
+        prepared.decision_policy.groups[0].candidates.slice(
+            prepared.decision_policy.candidates,
+        ),
+    );
+}
+
+test "clauses without positive candidates do not create contextual groups" {
+    var relations = [_]metadata.Relation{
+        .{ .name = "missing-provider" },
+    };
+    var packages = [_]metadata.Package{
+        testPackage("consumer", "1"),
+    };
+    packages[0].requires = .{ .start = 0, .len = 1 };
+    const repository = metadata.RepositoryModel{
+        .packages = &packages,
+        .relations = &relations,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &repository }},
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .all,
+        }} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        prepared.decision_policy.groups.len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        prepared.decision_policy.candidates.len,
+    );
+
+    const valid_policy = prepared.decision_policy;
+    prepared.decision_policy = .{
+        .candidates = &.{@enumFromInt(0)},
+    };
+    try std.testing.expectError(
+        error.InvalidDecisionPolicy,
+        prepared.solve(std.testing.allocator),
+    );
+    prepared.decision_policy = valid_policy;
+}
+
+test "malformed contextual source clauses are rejected during preparation" {
+    var packages = [_]metadata.Package{
+        testPackage("one", "1"),
+        testPackage("two", "1"),
+    };
+    const repository = metadata.RepositoryModel{
+        .packages = &packages,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &repository }},
+    );
+    defer universe.deinit();
+    var states = [_]solver_rules.PackageState{ .{}, .{} };
+    const duplicate_literals = [_]solver_rules.Literal{
+        solver_rules.Literal.init(@enumFromInt(0), true),
+        solver_rules.Literal.init(@enumFromInt(0), true),
+    };
+    const duplicate_clause = [_]solver_rules.Clause{.{
+        .literals = .{ .start = 0, .len = 2 },
+        .origin = .{ .job = @enumFromInt(0) },
+    }};
+    var formula = solver_rules.OwnedFormula{
+        .allocator = std.testing.allocator,
+        .universe = &universe,
+        .clauses = &duplicate_clause,
+        .literals = &duplicate_literals,
+        .weak_requests = &.{},
+        .weak_candidates = &.{},
+        .package_states = &states,
+    };
+    try std.testing.expectError(
+        error.InvalidFormula,
+        prepareInstalledRetention(std.testing.allocator, &formula),
+    );
+
+    formula.clauses = &.{.{
+        .literals = .{ .start = 0, .len = 1 },
+        .origin = .{ .requirement = .{
+            .package = @enumFromInt(0),
+            .kind = .requires,
+            .index = 0,
+        } },
+    }};
+    formula.literals = &.{solver_rules.Literal.init(
+        @enumFromInt(1),
+        true,
+    )};
+    try std.testing.expectError(
+        error.InvalidFormula,
+        prepareInstalledRetention(std.testing.allocator, &formula),
+    );
 }
 
 test "installed orphan is retained" {
@@ -814,6 +1681,7 @@ fn allocationFailureCase(allocator: std.mem.Allocator) !void {
     var sources = [_]metadata.Package{
         testPackage("package", "1"),
         testPackage("package", "2"),
+        testPackage("package", "3"),
     };
     var packages = [_]solver_model.UniversePackage{
         .{
@@ -830,10 +1698,17 @@ fn allocationFailureCase(allocator: std.mem.Allocator) !void {
             .source = &sources[1],
             .installed = null,
         },
+        .{
+            .id = @enumFromInt(2),
+            .repository = @enumFromInt(1),
+            .repository_package_index = 1,
+            .source = &sources[2],
+            .installed = null,
+        },
     };
     var repository_models = [_]metadata.RepositoryModel{
         .{ .packages = sources[0..1] },
-        .{ .packages = sources[1..2] },
+        .{ .packages = sources[1..3] },
     };
     var repositories = [_]solver_model.UniverseRepository{
         .{
@@ -854,7 +1729,7 @@ fn allocationFailureCase(allocator: std.mem.Allocator) !void {
             .priority = 50,
             .cost = 1000,
             .source = &repository_models[1],
-            .packages = .{ .start = 1, .len = 1 },
+            .packages = .{ .start = 1, .len = 2 },
         },
     };
     var universe = solver_model.Universe{
@@ -863,11 +1738,12 @@ fn allocationFailureCase(allocator: std.mem.Allocator) !void {
         .packages = &packages,
         .input_to_repository = &.{},
     };
-    var states = [_]solver_rules.PackageState{ .{}, .{} };
+    var states = [_]solver_rules.PackageState{ .{}, .{}, .{} };
     const literals = [_]solver_rules.Literal{
         solver_rules.Literal.init(@enumFromInt(0), false),
         solver_rules.Literal.init(@enumFromInt(1), false),
         solver_rules.Literal.init(@enumFromInt(1), true),
+        solver_rules.Literal.init(@enumFromInt(2), true),
     };
     const clauses = [_]solver_rules.Clause{
         .{
@@ -880,7 +1756,7 @@ fn allocationFailureCase(allocator: std.mem.Allocator) !void {
             },
         },
         .{
-            .literals = .{ .start = 2, .len = 1 },
+            .literals = .{ .start = 2, .len = 2 },
             .origin = .{ .job = @enumFromInt(0) },
         },
     };

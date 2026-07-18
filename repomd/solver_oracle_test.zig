@@ -816,6 +816,46 @@ test "oracle deterministically chooses the best alternative provider" {
     try testing.expect(!containsSelectedName(&graph, &observation, "provider-low"));
 }
 
+test "oracle ranks same-name providers by package EVR" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(available, .{
+        .name = "provider",
+        .version = "1",
+        .provides = &.{versionedRelation("virtual-api", .eq, "100")},
+    });
+    try builder.addPackage(available, .{
+        .name = "provider",
+        .version = "2",
+        .provides = &.{versionedRelation("virtual-api", .eq, "1")},
+    });
+    try builder.addPackage(available, .{
+        .name = "consumer",
+        .requires = &.{versionedRelation("virtual-api", .ge, "1")},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .name = "consumer" },
+        }} },
+        policy(),
+    );
+    defer observation.deinit();
+
+    const selected = selectedPackageByName(
+        &graph,
+        &observation,
+        "provider",
+    ).?;
+    try testing.expectEqualStrings("2", selected.source.nevra.version);
+}
+
 test "oracle applies tdnf repository priority semantics" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     var builder = GraphBuilder.init(arena_state.allocator());
