@@ -20,11 +20,26 @@ pub const SolveError = error{
     InternalSolverFailure,
 };
 
+pub const CandidateSolveError = SolveError || error{
+    InvalidCandidatePolicy,
+};
+
 pub const DecisionPolicy = struct {
     /// Complete variable permutation in decision order.
     order: []const solver_model.PackageId = &.{},
     /// Preferred value per `PackageId`; defaults to false.
     preferred_values: []const bool = &.{},
+};
+
+pub const CandidateGroup = struct {
+    clause_index: u32,
+    candidates: solver_rules.PackageIdRange,
+};
+
+pub const CandidateDecisionPolicy = struct {
+    fallback: DecisionPolicy = .{},
+    groups: []const CandidateGroup = &.{},
+    candidates: []const solver_model.PackageId = &.{},
 };
 
 /// A complete package assignment indexed by stable `PackageId`.
@@ -68,7 +83,7 @@ pub fn solve(
     allocator: std.mem.Allocator,
     formula: *const OwnedFormula,
 ) SolveError!Result {
-    return solveInternal(allocator, formula, &.{}, .{}, null);
+    return solveWithoutCandidates(allocator, formula, &.{}, .{});
 }
 
 /// Solve every formula clause plus the supplied level-zero assumptions.
@@ -77,7 +92,7 @@ pub fn solveAssuming(
     formula: *const OwnedFormula,
     assumptions: []const Literal,
 ) SolveError!Result {
-    return solveInternal(allocator, formula, assumptions, .{}, null);
+    return solveWithoutCandidates(allocator, formula, assumptions, .{});
 }
 
 /// Solve with a complete deterministic variable order and polarity policy.
@@ -87,11 +102,26 @@ pub fn solveWithDecisionPolicy(
     assumptions: []const Literal,
     decision_policy: DecisionPolicy,
 ) SolveError!Result {
-    return solveInternal(
+    return solveWithoutCandidates(
         allocator,
         formula,
         assumptions,
         decision_policy,
+    );
+}
+
+/// Solve with contextual best-first positive candidate groups.
+pub fn solveWithCandidatePolicy(
+    allocator: std.mem.Allocator,
+    formula: *const OwnedFormula,
+    assumptions: []const Literal,
+    candidate_policy: CandidateDecisionPolicy,
+) CandidateSolveError!Result {
+    return solveInternal(
+        allocator,
+        formula,
+        assumptions,
+        candidate_policy,
         null,
     );
 }
@@ -118,6 +148,7 @@ const Statistics = struct {
     backjumps: u64 = 0,
     decision_probes: u64 = 0,
     watch_inspections: u64 = 0,
+    candidate_probes: u64 = 0,
 };
 
 const Analysis = struct {
@@ -125,9 +156,32 @@ const Analysis = struct {
     backtrack_level: u32,
 };
 
+const Decision = struct {
+    variable: usize,
+    positive: bool,
+};
+
+const CandidateOccurrence = struct {
+    group: usize,
+    candidate: bool,
+    rank: usize = 0,
+};
+
+const CandidateGroupData = struct {
+    clause: usize,
+    candidates_start: usize,
+    candidates_len: usize,
+    control_count: usize,
+    false_controls: usize = 0,
+    true_candidates: usize = 0,
+    unassigned_candidates: usize,
+    candidate_cursor: usize = 0,
+};
+
 const ClauseList = std.array_list.Managed(ClauseData);
 const LiteralList = std.array_list.Managed(Literal);
 const IndexList = std.array_list.Managed(usize);
+const OccurrenceList = std.array_list.Managed(CandidateOccurrence);
 
 const Engine = struct {
     allocator: std.mem.Allocator,
@@ -142,6 +196,11 @@ const Engine = struct {
     decision_order: []usize,
     decision_positions: []usize,
     preferred_values: []bool,
+    candidate_groups: ?[]CandidateGroupData = null,
+    candidate_packages: ?[]solver_model.PackageId = null,
+    candidate_occurrences: ?[]OccurrenceList = null,
+    candidate_heap_positions: ?[]?usize = null,
+    candidate_heap: IndexList,
     trail: LiteralList,
     trail_limits: IndexList,
     propagation_head: usize = 0,
@@ -242,6 +301,7 @@ const Engine = struct {
             .decision_order = decision_order,
             .decision_positions = decision_positions,
             .preferred_values = preferred_values,
+            .candidate_heap = IndexList.init(allocator),
             .trail = LiteralList.init(allocator),
             .trail_limits = IndexList.init(allocator),
             .normalize_scratch = LiteralList.init(allocator),
@@ -250,6 +310,20 @@ const Engine = struct {
     }
 
     fn deinit(self: *Engine) void {
+        self.candidate_heap.deinit();
+        if (self.candidate_heap_positions) |positions| {
+            self.allocator.free(positions);
+        }
+        if (self.candidate_occurrences) |occurrences| {
+            for (occurrences) |*list| list.deinit();
+            self.allocator.free(occurrences);
+        }
+        if (self.candidate_packages) |packages| {
+            self.allocator.free(packages);
+        }
+        if (self.candidate_groups) |groups| {
+            self.allocator.free(groups);
+        }
         self.analysis_scratch.deinit();
         self.normalize_scratch.deinit();
         self.trail_limits.deinit();
@@ -347,6 +421,272 @@ const Engine = struct {
         return clause_id;
     }
 
+    fn configureCandidateGroups(
+        self: *Engine,
+        formula: *const OwnedFormula,
+        clause_mapping: []const ?usize,
+        policy: CandidateDecisionPolicy,
+    ) CandidateSolveError!void {
+        if (policy.groups.len == 0) {
+            if (policy.candidates.len != 0) {
+                return error.InvalidCandidatePolicy;
+            }
+            return;
+        }
+        if (clause_mapping.len != formula.clauses.len) {
+            return error.InternalSolverFailure;
+        }
+
+        const groups = try self.allocator.alloc(
+            CandidateGroupData,
+            policy.groups.len,
+        );
+        errdefer self.allocator.free(groups);
+        const packages = try self.allocator.dupe(
+            solver_model.PackageId,
+            policy.candidates,
+        );
+        errdefer self.allocator.free(packages);
+        const positions = try self.allocator.alloc(
+            ?usize,
+            policy.groups.len,
+        );
+        errdefer self.allocator.free(positions);
+        @memset(positions, null);
+        const occurrences = try self.allocator.alloc(
+            OccurrenceList,
+            self.variable_count,
+        );
+        errdefer self.allocator.free(occurrences);
+        for (occurrences) |*list| list.* = OccurrenceList.init(self.allocator);
+        errdefer for (occurrences) |*list| list.deinit();
+
+        const used_clauses = try self.allocator.alloc(
+            bool,
+            formula.clauses.len,
+        );
+        defer self.allocator.free(used_clauses);
+        @memset(used_clauses, false);
+        const candidate_ranks = try self.allocator.alloc(
+            usize,
+            self.variable_count,
+        );
+        defer self.allocator.free(candidate_ranks);
+        @memset(candidate_ranks, std.math.maxInt(usize));
+
+        var candidate_cursor: usize = 0;
+        for (policy.groups, groups, 0..) |input, *group, group_index| {
+            const clause_index: usize = @intCast(input.clause_index);
+            if (clause_index >= formula.clauses.len or
+                used_clauses[clause_index])
+            {
+                return error.InvalidCandidatePolicy;
+            }
+            used_clauses[clause_index] = true;
+            const internal_clause = clause_mapping[clause_index] orelse
+                return error.InvalidCandidatePolicy;
+
+            const start: usize = @intCast(input.candidates.start);
+            const len: usize = @intCast(input.candidates.len);
+            if (start != candidate_cursor or
+                len == 0 or
+                len > policy.candidates.len - start)
+            {
+                return error.InvalidCandidatePolicy;
+            }
+            candidate_cursor += len;
+
+            for (policy.candidates[start .. start + len], 0..) |
+                package_id,
+                rank,
+            | {
+                const package_index: usize = @intFromEnum(package_id);
+                if (package_index >= self.variable_count or
+                    candidate_ranks[package_index] !=
+                        std.math.maxInt(usize))
+                {
+                    return error.InvalidCandidatePolicy;
+                }
+                candidate_ranks[package_index] = rank;
+            }
+
+            var positive_count: usize = 0;
+            const clause = self.clauses.items[internal_clause];
+            for (self.clauseLiterals(clause)) |literal| {
+                const variable = literalVariable(literal);
+                if (literal.positive()) {
+                    positive_count += 1;
+                    if (candidate_ranks[variable] ==
+                        std.math.maxInt(usize))
+                    {
+                        return error.InvalidCandidatePolicy;
+                    }
+                    try occurrences[variable].append(.{
+                        .group = group_index,
+                        .candidate = true,
+                        .rank = candidate_ranks[variable],
+                    });
+                } else {
+                    if (candidate_ranks[variable] !=
+                        std.math.maxInt(usize))
+                    {
+                        return error.InvalidCandidatePolicy;
+                    }
+                    try occurrences[variable].append(.{
+                        .group = group_index,
+                        .candidate = false,
+                    });
+                }
+            }
+            if (positive_count != len) return error.InvalidCandidatePolicy;
+            group.* = .{
+                .clause = internal_clause,
+                .candidates_start = start,
+                .candidates_len = len,
+                .control_count = clause.len - len,
+                .unassigned_candidates = len,
+            };
+            for (policy.candidates[start .. start + len]) |package_id| {
+                candidate_ranks[@intFromEnum(package_id)] =
+                    std.math.maxInt(usize);
+            }
+        }
+        if (candidate_cursor != policy.candidates.len) {
+            return error.InvalidCandidatePolicy;
+        }
+
+        try self.candidate_heap.ensureTotalCapacity(policy.groups.len);
+        self.candidate_groups = groups;
+        self.candidate_packages = packages;
+        self.candidate_occurrences = occurrences;
+        self.candidate_heap_positions = positions;
+        for (groups, 0..) |_, group_index| {
+            self.refreshCandidateGroup(group_index);
+        }
+    }
+
+    fn refreshCandidateGroup(self: *Engine, group_index: usize) void {
+        const groups = self.candidate_groups orelse return;
+        const positions = self.candidate_heap_positions.?;
+        const group = groups[group_index];
+        const eligible = group.false_controls == group.control_count and
+            group.true_candidates == 0 and
+            group.unassigned_candidates != 0;
+        if (eligible and positions[group_index] == null) {
+            self.candidateHeapInsert(group_index);
+        } else if (!eligible and positions[group_index] != null) {
+            self.candidateHeapRemove(group_index);
+        }
+    }
+
+    fn updateCandidateOccurrences(
+        self: *Engine,
+        variable: usize,
+        old: Value,
+        new: Value,
+    ) void {
+        const occurrences = self.candidate_occurrences orelse return;
+        const groups = self.candidate_groups.?;
+        const packages = self.candidate_packages.?;
+        for (occurrences[variable].items) |occurrence| {
+            const group = &groups[occurrence.group];
+            if (occurrence.candidate) {
+                if (old == .unassigned) group.unassigned_candidates -= 1;
+                if (new == .unassigned) group.unassigned_candidates += 1;
+                if (old == .true_value) group.true_candidates -= 1;
+                if (new == .true_value) group.true_candidates += 1;
+                if (new == .unassigned and
+                    occurrence.rank < group.candidate_cursor)
+                {
+                    group.candidate_cursor = occurrence.rank;
+                } else if (old == .unassigned and
+                    occurrence.rank == group.candidate_cursor)
+                {
+                    while (group.candidate_cursor <
+                        group.candidates_len)
+                    {
+                        const package_id = packages[
+                            group.candidates_start + group.candidate_cursor
+                        ];
+                        if (self.assignments[@intFromEnum(package_id)] ==
+                            .unassigned)
+                        {
+                            break;
+                        }
+                        group.candidate_cursor += 1;
+                    }
+                }
+            } else {
+                if (old == .true_value) group.false_controls -= 1;
+                if (new == .true_value) group.false_controls += 1;
+            }
+            self.refreshCandidateGroup(occurrence.group);
+        }
+    }
+
+    fn candidateHeapInsert(self: *Engine, group_index: usize) void {
+        const positions = self.candidate_heap_positions.?;
+        var position = self.candidate_heap.items.len;
+        self.candidate_heap.appendAssumeCapacity(group_index);
+        positions[group_index] = position;
+        while (position != 0) {
+            const parent = (position - 1) / 2;
+            if (self.candidate_heap.items[parent] < group_index) break;
+            self.candidate_heap.items[position] =
+                self.candidate_heap.items[parent];
+            positions[self.candidate_heap.items[position]] = position;
+            position = parent;
+        }
+        self.candidate_heap.items[position] = group_index;
+        positions[group_index] = position;
+    }
+
+    fn candidateHeapRemove(self: *Engine, group_index: usize) void {
+        const positions = self.candidate_heap_positions.?;
+        var position = positions[group_index].?;
+        positions[group_index] = null;
+        const replacement = self.candidate_heap.pop().?;
+        if (position == self.candidate_heap.items.len) return;
+        self.candidate_heap.items[position] = replacement;
+        positions[replacement] = position;
+
+        while (position != 0) {
+            const parent = (position - 1) / 2;
+            if (self.candidate_heap.items[parent] < replacement) break;
+            self.candidate_heap.items[position] =
+                self.candidate_heap.items[parent];
+            positions[self.candidate_heap.items[position]] = position;
+            position = parent;
+        }
+        self.candidate_heap.items[position] = replacement;
+        positions[replacement] = position;
+
+        while (true) {
+            const left = position * 2 + 1;
+            if (left >= self.candidate_heap.items.len) break;
+            const right = left + 1;
+            const child = if (right < self.candidate_heap.items.len and
+                self.candidate_heap.items[right] <
+                    self.candidate_heap.items[left])
+                right
+            else
+                left;
+            if (self.candidate_heap.items[position] <
+                self.candidate_heap.items[child])
+            {
+                break;
+            }
+            std.mem.swap(
+                usize,
+                &self.candidate_heap.items[position],
+                &self.candidate_heap.items[child],
+            );
+            positions[self.candidate_heap.items[position]] = position;
+            positions[self.candidate_heap.items[child]] = child;
+            position = child;
+        }
+    }
+
     fn initializeRoot(self: *Engine) SolveError!bool {
         if (self.has_empty_clause) {
             self.statistics.conflicts += 1;
@@ -391,12 +731,12 @@ const Engine = struct {
                 continue;
             }
 
-            const decision_variable = self.chooseDecision() orelse return true;
+            const decision = self.chooseDecision() orelse return true;
             try self.trail_limits.append(self.trail.items.len);
             self.statistics.decisions += 1;
             const decision_literal = Literal.init(
-                @enumFromInt(@as(u32, @intCast(decision_variable))),
-                self.preferred_values[decision_variable],
+                @enumFromInt(@as(u32, @intCast(decision.variable))),
+                decision.positive,
             );
             if (!try self.enqueue(decision_literal, null)) {
                 return error.InternalSolverFailure;
@@ -611,6 +951,11 @@ const Engine = struct {
             self.trail_limits.items[@as(usize, @intCast(target_level))];
         for (self.trail.items[target_trail_len..]) |literal| {
             const variable = literalVariable(literal);
+            self.updateCandidateOccurrences(
+                variable,
+                self.assignments[variable],
+                .unassigned,
+            );
             self.assignments[variable] = .unassigned;
             self.levels[variable] = 0;
             self.reasons[variable] = null;
@@ -643,18 +988,45 @@ const Engine = struct {
         self.assignments[variable] = wanted;
         self.levels[variable] = self.decisionLevel();
         self.reasons[variable] = reason;
+        self.updateCandidateOccurrences(variable, .unassigned, wanted);
         return true;
     }
 
-    fn chooseDecision(self: *Engine) ?usize {
+    fn chooseDecision(self: *Engine) ?Decision {
+        if (self.chooseCandidateDecision()) |decision| return decision;
         while (self.decision_cursor < self.assignments.len) {
             self.statistics.decision_probes += 1;
             const decision = self.decision_order[self.decision_cursor];
             if (self.assignments[decision] == .unassigned) {
                 self.decision_cursor += 1;
-                return decision;
+                return .{
+                    .variable = decision,
+                    .positive = self.preferred_values[decision],
+                };
             }
             self.decision_cursor += 1;
+        }
+        return null;
+    }
+
+    fn chooseCandidateDecision(self: *Engine) ?Decision {
+        const groups = self.candidate_groups orelse return null;
+        const packages = self.candidate_packages.?;
+        while (self.candidate_heap.items.len != 0) {
+            const group_index = self.candidate_heap.items[0];
+            const group = &groups[group_index];
+            while (group.candidate_cursor < group.candidates_len) {
+                self.statistics.candidate_probes += 1;
+                const package_id = packages[
+                    group.candidates_start + group.candidate_cursor
+                ];
+                const variable: usize = @intFromEnum(package_id);
+                if (self.assignments[variable] == .unassigned) {
+                    return .{ .variable = variable, .positive = true };
+                }
+                group.candidate_cursor += 1;
+            }
+            self.candidateHeapRemove(group_index);
         }
         return null;
     }
@@ -719,13 +1091,31 @@ const Engine = struct {
     }
 };
 
-fn solveInternal(
+fn solveWithoutCandidates(
     allocator: std.mem.Allocator,
     formula: *const OwnedFormula,
     assumptions: []const Literal,
     decision_policy: DecisionPolicy,
-    statistics: ?*Statistics,
 ) SolveError!Result {
+    return solveInternal(
+        allocator,
+        formula,
+        assumptions,
+        .{ .fallback = decision_policy },
+        null,
+    ) catch |err| switch (err) {
+        error.InvalidCandidatePolicy => unreachable,
+        else => |solve_error| return solve_error,
+    };
+}
+
+fn solveInternal(
+    allocator: std.mem.Allocator,
+    formula: *const OwnedFormula,
+    assumptions: []const Literal,
+    candidate_policy: CandidateDecisionPolicy,
+    statistics: ?*Statistics,
+) CandidateSolveError!Result {
     const variable_count = formula.universe.packages.len;
     if (formula.package_states.len != variable_count) {
         return error.InvalidFormula;
@@ -734,16 +1124,22 @@ fn solveInternal(
     var engine = try Engine.init(
         allocator,
         variable_count,
-        decision_policy,
+        candidate_policy.fallback,
     );
     defer engine.deinit();
+
+    const clause_mapping = if (candidate_policy.groups.len != 0)
+        try allocator.alloc(?usize, formula.clauses.len)
+    else
+        null;
+    defer if (clause_mapping) |mapping| allocator.free(mapping);
 
     for (formula.literals) |literal| {
         if (!validLiteral(literal, variable_count)) {
             return error.InvalidFormula;
         }
     }
-    for (formula.clauses) |clause| {
+    for (formula.clauses, 0..) |clause, clause_index| {
         const start: usize = @intCast(clause.literals.start);
         const len: usize = @intCast(clause.literals.len);
         if (start > formula.literals.len or
@@ -751,7 +1147,21 @@ fn solveInternal(
         {
             return error.InvalidFormula;
         }
-        _ = try engine.addInputClause(formula.literals[start .. start + len]);
+        const internal_clause = try engine.addInputClause(
+            formula.literals[start .. start + len],
+        );
+        if (clause_mapping) |mapping| {
+            mapping[clause_index] = internal_clause;
+        }
+    }
+    if (clause_mapping) |mapping| {
+        try engine.configureCandidateGroups(
+            formula,
+            mapping,
+            candidate_policy,
+        );
+    } else if (candidate_policy.candidates.len != 0) {
+        return error.InvalidCandidatePolicy;
     }
     for (assumptions) |assumption| {
         try engine.addAssumption(assumption);
@@ -805,7 +1215,7 @@ fn testSolve(
     literals: []const Literal,
     assumptions: []const Literal,
     statistics: ?*Statistics,
-) SolveError!Result {
+) CandidateSolveError!Result {
     return testSolvePolicy(
         allocator,
         variable_count,
@@ -825,7 +1235,27 @@ fn testSolvePolicy(
     assumptions: []const Literal,
     decision_policy: DecisionPolicy,
     statistics: ?*Statistics,
-) SolveError!Result {
+) CandidateSolveError!Result {
+    return testSolveCandidatePolicy(
+        allocator,
+        variable_count,
+        ranges,
+        literals,
+        assumptions,
+        .{ .fallback = decision_policy },
+        statistics,
+    );
+}
+
+fn testSolveCandidatePolicy(
+    allocator: std.mem.Allocator,
+    variable_count: usize,
+    ranges: []const solver_rules.LiteralRange,
+    literals: []const Literal,
+    assumptions: []const Literal,
+    candidate_policy: CandidateDecisionPolicy,
+    statistics: ?*Statistics,
+) CandidateSolveError!Result {
     const packages = try allocator.alloc(
         solver_model.UniversePackage,
         variable_count,
@@ -867,7 +1297,7 @@ fn testSolvePolicy(
         allocator,
         &formula,
         assumptions,
-        decision_policy,
+        candidate_policy,
         statistics,
     );
 }
@@ -1212,6 +1642,637 @@ test "decision policy controls complete order and preferred polarity" {
     );
 }
 
+test "contextual group chooses its best positive candidate" {
+    const literals = [_]Literal{
+        testLiteral(0, true),
+        testLiteral(1, true),
+        testLiteral(2, true),
+    };
+    const ranges = [_]solver_rules.LiteralRange{
+        .{ .start = 0, .len = 3 },
+    };
+    const candidates = [_]solver_model.PackageId{
+        @enumFromInt(1),
+        @enumFromInt(2),
+        @enumFromInt(0),
+    };
+    var result = try testSolveCandidatePolicy(
+        std.testing.allocator,
+        3,
+        &ranges,
+        &literals,
+        &.{},
+        .{
+            .groups = &.{.{
+                .clause_index = 0,
+                .candidates = .{ .start = 0, .len = 3 },
+            }},
+            .candidates = &candidates,
+        },
+        null,
+    );
+    defer result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, true, false },
+        result.satisfiable.values,
+    );
+}
+
+test "contextual requirement activates only after its owner is selected" {
+    const literals = [_]Literal{
+        testLiteral(0, false),
+        testLiteral(1, true),
+        testLiteral(2, true),
+    };
+    const ranges = [_]solver_rules.LiteralRange{
+        .{ .start = 0, .len = 3 },
+    };
+    const candidates = [_]solver_model.PackageId{
+        @enumFromInt(2),
+        @enumFromInt(1),
+    };
+    const policy = CandidateDecisionPolicy{
+        .groups = &.{.{
+            .clause_index = 0,
+            .candidates = .{ .start = 0, .len = 2 },
+        }},
+        .candidates = &candidates,
+    };
+    var inactive = try testSolveCandidatePolicy(
+        std.testing.allocator,
+        3,
+        &ranges,
+        &literals,
+        &.{},
+        policy,
+        null,
+    );
+    defer inactive.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, false, false },
+        inactive.satisfiable.values,
+    );
+
+    var active = try testSolveCandidatePolicy(
+        std.testing.allocator,
+        3,
+        &ranges,
+        &literals,
+        &.{testLiteral(0, true)},
+        policy,
+        null,
+    );
+    defer active.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ true, false, true },
+        active.satisfiable.values,
+    );
+}
+
+test "contextual group falls back after its preferred candidate conflicts" {
+    const literals = [_]Literal{
+        testLiteral(0, true),
+        testLiteral(1, true),
+        testLiteral(0, false),
+        testLiteral(2, true),
+        testLiteral(0, false),
+        testLiteral(2, false),
+    };
+    const ranges = [_]solver_rules.LiteralRange{
+        .{ .start = 0, .len = 2 },
+        .{ .start = 2, .len = 2 },
+        .{ .start = 4, .len = 2 },
+    };
+    const candidates = [_]solver_model.PackageId{
+        @enumFromInt(0),
+        @enumFromInt(1),
+    };
+    var statistics: Statistics = .{};
+    var result = try testSolveCandidatePolicy(
+        std.testing.allocator,
+        3,
+        &ranges,
+        &literals,
+        &.{},
+        .{
+            .groups = &.{.{
+                .clause_index = 0,
+                .candidates = .{ .start = 0, .len = 2 },
+            }},
+            .candidates = &candidates,
+        },
+        &statistics,
+    );
+    defer result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, true, false },
+        result.satisfiable.values,
+    );
+    try std.testing.expect(statistics.conflicts != 0);
+    try std.testing.expect(statistics.learned_clauses != 0);
+}
+
+test "contextual candidate rejection probes each rank once" {
+    const candidate_count = 64;
+    const variable_count = candidate_count * 2 - 1;
+    const clause_count = 1 + 2 * (candidate_count - 1);
+    const literal_count = candidate_count + 4 * (candidate_count - 1);
+    const literals = try std.testing.allocator.alloc(Literal, literal_count);
+    defer std.testing.allocator.free(literals);
+    const ranges = try std.testing.allocator.alloc(
+        solver_rules.LiteralRange,
+        clause_count,
+    );
+    defer std.testing.allocator.free(ranges);
+    const candidates = try std.testing.allocator.alloc(
+        solver_model.PackageId,
+        candidate_count,
+    );
+    defer std.testing.allocator.free(candidates);
+
+    for (0..candidate_count) |candidate| {
+        literals[candidate] = testLiteral(@intCast(candidate), true);
+        candidates[candidate] = @enumFromInt(candidate);
+    }
+    ranges[0] = .{ .start = 0, .len = candidate_count };
+    var next_literal: usize = candidate_count;
+    var next_clause: usize = 1;
+    for (0..candidate_count - 1) |candidate| {
+        const helper = candidate_count + candidate;
+        ranges[next_clause] = .{ .start = @intCast(next_literal), .len = 2 };
+        literals[next_literal] = testLiteral(@intCast(candidate), false);
+        literals[next_literal + 1] = testLiteral(@intCast(helper), true);
+        next_literal += 2;
+        next_clause += 1;
+
+        ranges[next_clause] = .{ .start = @intCast(next_literal), .len = 2 };
+        literals[next_literal] = testLiteral(@intCast(candidate), false);
+        literals[next_literal + 1] = testLiteral(@intCast(helper), false);
+        next_literal += 2;
+        next_clause += 1;
+    }
+
+    var statistics: Statistics = .{};
+    var result = try testSolveCandidatePolicy(
+        std.testing.allocator,
+        variable_count,
+        ranges,
+        literals,
+        &.{},
+        .{
+            .groups = &.{.{
+                .clause_index = 0,
+                .candidates = .{ .start = 0, .len = candidate_count },
+            }},
+            .candidates = candidates,
+        },
+        &statistics,
+    );
+    defer result.deinit();
+
+    for (result.satisfiable.values[0 .. candidate_count - 1]) |selected| {
+        try std.testing.expect(!selected);
+    }
+    try std.testing.expect(
+        result.satisfiable.values[candidate_count - 1],
+    );
+    try std.testing.expectEqual(
+        candidate_count - 1,
+        statistics.candidate_probes,
+    );
+}
+
+test "contextual groups use stable input priority" {
+    const literals = [_]Literal{
+        testLiteral(0, true),
+        testLiteral(1, true),
+        testLiteral(2, true),
+        testLiteral(3, true),
+        testLiteral(0, false),
+        testLiteral(2, false),
+    };
+    const ranges = [_]solver_rules.LiteralRange{
+        .{ .start = 0, .len = 2 },
+        .{ .start = 2, .len = 2 },
+        .{ .start = 4, .len = 2 },
+    };
+    const first_candidates = [_]solver_model.PackageId{
+        @enumFromInt(0),
+        @enumFromInt(1),
+        @enumFromInt(2),
+        @enumFromInt(3),
+    };
+    var first = try testSolveCandidatePolicy(
+        std.testing.allocator,
+        4,
+        &ranges,
+        &literals,
+        &.{},
+        .{
+            .groups = &.{
+                .{
+                    .clause_index = 0,
+                    .candidates = .{ .start = 0, .len = 2 },
+                },
+                .{
+                    .clause_index = 1,
+                    .candidates = .{ .start = 2, .len = 2 },
+                },
+            },
+            .candidates = &first_candidates,
+        },
+        null,
+    );
+    defer first.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ true, false, false, true },
+        first.satisfiable.values,
+    );
+
+    const second_candidates = [_]solver_model.PackageId{
+        @enumFromInt(2),
+        @enumFromInt(3),
+        @enumFromInt(0),
+        @enumFromInt(1),
+    };
+    var second = try testSolveCandidatePolicy(
+        std.testing.allocator,
+        4,
+        &ranges,
+        &literals,
+        &.{},
+        .{
+            .groups = &.{
+                .{
+                    .clause_index = 1,
+                    .candidates = .{ .start = 0, .len = 2 },
+                },
+                .{
+                    .clause_index = 0,
+                    .candidates = .{ .start = 2, .len = 2 },
+                },
+            },
+            .candidates = &second_candidates,
+        },
+        null,
+    );
+    defer second.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, true, true, false },
+        second.satisfiable.values,
+    );
+}
+
+test "contextual rankings remain local to their clauses" {
+    const literals = [_]Literal{
+        testLiteral(0, true),
+        testLiteral(1, true),
+        testLiteral(0, true),
+        testLiteral(1, true),
+    };
+    const ranges = [_]solver_rules.LiteralRange{
+        .{ .start = 0, .len = 2 },
+        .{ .start = 2, .len = 2 },
+    };
+    const first_candidates = [_]solver_model.PackageId{
+        @enumFromInt(0),
+        @enumFromInt(1),
+        @enumFromInt(1),
+        @enumFromInt(0),
+    };
+    var first = try testSolveCandidatePolicy(
+        std.testing.allocator,
+        2,
+        &ranges,
+        &literals,
+        &.{},
+        .{
+            .groups = &.{
+                .{
+                    .clause_index = 0,
+                    .candidates = .{ .start = 0, .len = 2 },
+                },
+                .{
+                    .clause_index = 1,
+                    .candidates = .{ .start = 2, .len = 2 },
+                },
+            },
+            .candidates = &first_candidates,
+        },
+        null,
+    );
+    defer first.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ true, false },
+        first.satisfiable.values,
+    );
+
+    const second_candidates = [_]solver_model.PackageId{
+        @enumFromInt(1),
+        @enumFromInt(0),
+        @enumFromInt(0),
+        @enumFromInt(1),
+    };
+    var second = try testSolveCandidatePolicy(
+        std.testing.allocator,
+        2,
+        &ranges,
+        &literals,
+        &.{},
+        .{
+            .groups = &.{
+                .{
+                    .clause_index = 1,
+                    .candidates = .{ .start = 0, .len = 2 },
+                },
+                .{
+                    .clause_index = 0,
+                    .candidates = .{ .start = 2, .len = 2 },
+                },
+            },
+            .candidates = &second_candidates,
+        },
+        null,
+    );
+    defer second.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, true },
+        second.satisfiable.values,
+    );
+}
+
+test "empty contextual policy preserves fallback model and statistics" {
+    const literals = [_]Literal{
+        testLiteral(0, true),
+        testLiteral(1, true),
+        testLiteral(0, true),
+        testLiteral(1, false),
+    };
+    const ranges = [_]solver_rules.LiteralRange{
+        .{ .start = 0, .len = 2 },
+        .{ .start = 2, .len = 2 },
+    };
+    var fallback_statistics: Statistics = .{};
+    var fallback = try testSolvePolicy(
+        std.testing.allocator,
+        2,
+        &ranges,
+        &literals,
+        &.{},
+        .{},
+        &fallback_statistics,
+    );
+    defer fallback.deinit();
+
+    var contextual_statistics: Statistics = .{};
+    var contextual = try testSolveCandidatePolicy(
+        std.testing.allocator,
+        2,
+        &ranges,
+        &literals,
+        &.{},
+        .{},
+        &contextual_statistics,
+    );
+    defer contextual.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        fallback.satisfiable.values,
+        contextual.satisfiable.values,
+    );
+    try std.testing.expectEqualDeep(
+        fallback_statistics,
+        contextual_statistics,
+    );
+}
+
+test "malformed contextual candidate groups are rejected" {
+    const literals = [_]Literal{
+        testLiteral(0, true),
+        testLiteral(1, true),
+    };
+    const ranges = [_]solver_rules.LiteralRange{
+        .{ .start = 0, .len = 2 },
+    };
+    const duplicate = [_]solver_model.PackageId{
+        @enumFromInt(0),
+        @enumFromInt(0),
+    };
+    try std.testing.expectError(
+        error.InvalidCandidatePolicy,
+        testSolveCandidatePolicy(
+            std.testing.allocator,
+            2,
+            &ranges,
+            &literals,
+            &.{},
+            .{
+                .groups = &.{.{
+                    .clause_index = 0,
+                    .candidates = .{ .start = 0, .len = 2 },
+                }},
+                .candidates = &duplicate,
+            },
+            null,
+        ),
+    );
+
+    try std.testing.expectError(
+        error.InvalidCandidatePolicy,
+        testSolveCandidatePolicy(
+            std.testing.allocator,
+            2,
+            &ranges,
+            &literals,
+            &.{},
+            .{
+                .groups = &.{.{
+                    .clause_index = 0,
+                    .candidates = .{ .start = 0, .len = 1 },
+                }},
+                .candidates = &.{@enumFromInt(0)},
+            },
+            null,
+        ),
+    );
+
+    try std.testing.expectError(
+        error.InvalidCandidatePolicy,
+        testSolveCandidatePolicy(
+            std.testing.allocator,
+            2,
+            &ranges,
+            &literals,
+            &.{},
+            .{ .candidates = &.{@enumFromInt(0)} },
+            null,
+        ),
+    );
+
+    try std.testing.expectError(
+        error.InvalidCandidatePolicy,
+        testSolveCandidatePolicy(
+            std.testing.allocator,
+            2,
+            &ranges,
+            &literals,
+            &.{},
+            .{
+                .groups = &.{.{
+                    .clause_index = 1,
+                    .candidates = .{ .start = 0, .len = 2 },
+                }},
+                .candidates = &.{ @enumFromInt(0), @enumFromInt(1) },
+            },
+            null,
+        ),
+    );
+
+    try std.testing.expectError(
+        error.InvalidCandidatePolicy,
+        testSolveCandidatePolicy(
+            std.testing.allocator,
+            2,
+            &ranges,
+            &literals,
+            &.{},
+            .{
+                .groups = &.{.{
+                    .clause_index = 0,
+                    .candidates = .{ .start = 1, .len = 2 },
+                }},
+                .candidates = &.{ @enumFromInt(0), @enumFromInt(1) },
+            },
+            null,
+        ),
+    );
+
+    try std.testing.expectError(
+        error.InvalidCandidatePolicy,
+        testSolveCandidatePolicy(
+            std.testing.allocator,
+            2,
+            &ranges,
+            &literals,
+            &.{},
+            .{
+                .groups = &.{.{
+                    .clause_index = 0,
+                    .candidates = .{ .start = 0, .len = 3 },
+                }},
+                .candidates = &.{ @enumFromInt(0), @enumFromInt(1) },
+            },
+            null,
+        ),
+    );
+
+    try std.testing.expectError(
+        error.InvalidCandidatePolicy,
+        testSolveCandidatePolicy(
+            std.testing.allocator,
+            2,
+            &ranges,
+            &literals,
+            &.{},
+            .{
+                .groups = &.{.{
+                    .clause_index = 0,
+                    .candidates = .{ .start = 0, .len = 2 },
+                }},
+                .candidates = &.{ @enumFromInt(0), @enumFromInt(2) },
+            },
+            null,
+        ),
+    );
+
+    const duplicate_ranges = [_]solver_rules.LiteralRange{
+        .{ .start = 0, .len = 2 },
+        .{ .start = 0, .len = 2 },
+    };
+    try std.testing.expectError(
+        error.InvalidCandidatePolicy,
+        testSolveCandidatePolicy(
+            std.testing.allocator,
+            2,
+            &duplicate_ranges,
+            &literals,
+            &.{},
+            .{
+                .groups = &.{
+                    .{
+                        .clause_index = 0,
+                        .candidates = .{ .start = 0, .len = 2 },
+                    },
+                    .{
+                        .clause_index = 0,
+                        .candidates = .{ .start = 2, .len = 2 },
+                    },
+                },
+                .candidates = &.{
+                    @enumFromInt(0),
+                    @enumFromInt(1),
+                    @enumFromInt(0),
+                    @enumFromInt(1),
+                },
+            },
+            null,
+        ),
+    );
+
+    const single_range = [_]solver_rules.LiteralRange{
+        .{ .start = 0, .len = 1 },
+    };
+    try std.testing.expectError(
+        error.InvalidCandidatePolicy,
+        testSolveCandidatePolicy(
+            std.testing.allocator,
+            2,
+            &single_range,
+            literals[0..1],
+            &.{},
+            .{
+                .groups = &.{.{
+                    .clause_index = 0,
+                    .candidates = .{ .start = 0, .len = 1 },
+                }},
+                .candidates = &.{ @enumFromInt(0), @enumFromInt(1) },
+            },
+            null,
+        ),
+    );
+
+    const controlled_literals = [_]Literal{
+        testLiteral(0, false),
+        testLiteral(1, true),
+    };
+    try std.testing.expectError(
+        error.InvalidCandidatePolicy,
+        testSolveCandidatePolicy(
+            std.testing.allocator,
+            2,
+            &ranges,
+            &controlled_literals,
+            &.{},
+            .{
+                .groups = &.{.{
+                    .clause_index = 0,
+                    .candidates = .{ .start = 0, .len = 2 },
+                }},
+                .candidates = &.{ @enumFromInt(0), @enumFromInt(1) },
+            },
+            null,
+        ),
+    );
+}
+
 test "first UIP learning backjumps and flips a false-first decision" {
     const literals = [_]Literal{
         testLiteral(0, true),
@@ -1439,6 +2500,106 @@ test "all two-variable clause and assumption combinations match brute force" {
     }
 }
 
+test "legal contextual groups preserve exhaustive satisfiability" {
+    var literal_storage: [6]Literal = undefined;
+    var ranges: [3]solver_rules.LiteralRange = undefined;
+    var assumptions: [2]Literal = undefined;
+    const candidates = [_]solver_model.PackageId{
+        @enumFromInt(1),
+        @enumFromInt(0),
+    };
+
+    for (0..9) |second_clause| {
+        for (0..9) |third_clause| {
+            literal_storage[0] = testLiteral(0, true);
+            literal_storage[1] = testLiteral(1, true);
+            ranges[0] = .{ .start = 0, .len = 2 };
+            var literal_count: usize = 2;
+            for ([_]usize{ second_clause, third_clause }, 1..) |
+                clause_code,
+                clause_index,
+            | {
+                const start = literal_count;
+                var code = clause_code;
+                for (0..2) |variable| {
+                    const state = code % 3;
+                    code /= 3;
+                    if (state == 0) continue;
+                    literal_storage[literal_count] = testLiteral(
+                        @intCast(variable),
+                        state == 1,
+                    );
+                    literal_count += 1;
+                }
+                ranges[clause_index] = .{
+                    .start = @intCast(start),
+                    .len = @intCast(literal_count - start),
+                };
+            }
+
+            for (0..9) |assumption_code| {
+                var code = assumption_code;
+                var assumption_count: usize = 0;
+                for (0..2) |variable| {
+                    const state = code % 3;
+                    code /= 3;
+                    if (state == 0) continue;
+                    assumptions[assumption_count] = testLiteral(
+                        @intCast(variable),
+                        state == 1,
+                    );
+                    assumption_count += 1;
+                }
+
+                const expected = bruteForceSatisfiable(
+                    2,
+                    &ranges,
+                    literal_storage[0..literal_count],
+                    assumptions[0..assumption_count],
+                );
+                var result = try testSolveCandidatePolicy(
+                    std.testing.allocator,
+                    2,
+                    &ranges,
+                    literal_storage[0..literal_count],
+                    assumptions[0..assumption_count],
+                    .{
+                        .groups = &.{.{
+                            .clause_index = 0,
+                            .candidates = .{ .start = 0, .len = 2 },
+                        }},
+                        .candidates = &candidates,
+                    },
+                    null,
+                );
+                defer result.deinit();
+                switch (result) {
+                    .satisfiable => |model| {
+                        try std.testing.expect(expected);
+                        var assignment: usize = 0;
+                        for (model.values, 0..) |selected, variable| {
+                            if (selected) {
+                                assignment |= @as(usize, 1) <<
+                                    @as(u6, @intCast(variable));
+                            }
+                        }
+                        try std.testing.expect(assignmentSatisfies(
+                            2,
+                            &ranges,
+                            literal_storage[0..literal_count],
+                            assumptions[0..assumption_count],
+                            assignment,
+                        ));
+                    },
+                    .unsatisfiable => {
+                        try std.testing.expect(!expected);
+                    },
+                }
+            }
+        }
+    }
+}
+
 fn nextTestRandom(state: *u64) u64 {
     state.* = state.* *% 6364136223846793005 +% 1442695040888963407;
     return state.*;
@@ -1576,6 +2737,27 @@ fn allocationFailureCase(allocator: std.mem.Allocator) !void {
         null,
     );
     defer unsatisfiable.deinit();
+
+    const candidates = [_]solver_model.PackageId{
+        @enumFromInt(1),
+        @enumFromInt(0),
+    };
+    var contextual = try testSolveCandidatePolicy(
+        allocator,
+        2,
+        satisfiable_ranges[0..1],
+        satisfiable_literals[0..2],
+        &.{},
+        .{
+            .groups = &.{.{
+                .clause_index = 0,
+                .candidates = .{ .start = 0, .len = 2 },
+            }},
+            .candidates = &candidates,
+        },
+        null,
+    );
+    defer contextual.deinit();
 }
 
 test "search cleans up every allocation failure" {
