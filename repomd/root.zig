@@ -22,6 +22,7 @@ pub const query_native = @import("query_native.zig");
 pub const transaction_native = @import("transaction_native.zig");
 pub const solver_model = @import("solver_model.zig");
 pub const solver_rules = @import("solver_rules.zig");
+pub const solver_search = @import("solver_search.zig");
 
 const c_header = if (builtin.is_test) @cImport({
     @cInclude("tdnfrepomd.h");
@@ -237,6 +238,7 @@ comptime {
     _ = @import("rpmpkg.zig");
     _ = @import("solvbridge.zig");
     _ = @import("solver_rules.zig");
+    _ = @import("solver_search.zig");
     _ = @import("transaction_native.zig");
     _ = @import("updateinfo.zig");
     if (!builtin.is_test) {
