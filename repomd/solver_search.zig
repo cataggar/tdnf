@@ -15,8 +15,16 @@ pub const SolveError = error{
     OutOfMemory,
     InvalidFormula,
     InvalidAssumption,
+    InvalidDecisionPolicy,
     FormulaTooLarge,
     InternalSolverFailure,
+};
+
+pub const DecisionPolicy = struct {
+    /// Complete variable permutation in decision order.
+    order: []const solver_model.PackageId = &.{},
+    /// Preferred value per `PackageId`; defaults to false.
+    preferred_values: []const bool = &.{},
 };
 
 /// A complete package assignment indexed by stable `PackageId`.
@@ -60,7 +68,7 @@ pub fn solve(
     allocator: std.mem.Allocator,
     formula: *const OwnedFormula,
 ) SolveError!Result {
-    return solveInternal(allocator, formula, &.{}, null);
+    return solveInternal(allocator, formula, &.{}, .{}, null);
 }
 
 /// Solve every formula clause plus the supplied level-zero assumptions.
@@ -69,7 +77,23 @@ pub fn solveAssuming(
     formula: *const OwnedFormula,
     assumptions: []const Literal,
 ) SolveError!Result {
-    return solveInternal(allocator, formula, assumptions, null);
+    return solveInternal(allocator, formula, assumptions, .{}, null);
+}
+
+/// Solve with a complete deterministic variable order and polarity policy.
+pub fn solveWithDecisionPolicy(
+    allocator: std.mem.Allocator,
+    formula: *const OwnedFormula,
+    assumptions: []const Literal,
+    decision_policy: DecisionPolicy,
+) SolveError!Result {
+    return solveInternal(
+        allocator,
+        formula,
+        assumptions,
+        decision_policy,
+        null,
+    );
 }
 
 const Value = enum(u2) {
@@ -115,6 +139,9 @@ const Engine = struct {
     levels: []u32,
     reasons: []?usize,
     seen: []bool,
+    decision_order: []usize,
+    decision_positions: []usize,
+    preferred_values: []bool,
     trail: LiteralList,
     trail_limits: IndexList,
     propagation_head: usize = 0,
@@ -127,6 +154,7 @@ const Engine = struct {
     fn init(
         allocator: std.mem.Allocator,
         variable_count: usize,
+        decision_policy: DecisionPolicy,
     ) SolveError!Engine {
         if (variable_count > std.math.maxInt(u32) or
             variable_count > std.math.maxInt(usize) / 2)
@@ -150,6 +178,51 @@ const Engine = struct {
         errdefer allocator.free(seen);
         @memset(seen, false);
 
+        if (decision_policy.order.len != 0 and
+            decision_policy.order.len != variable_count)
+        {
+            return error.InvalidDecisionPolicy;
+        }
+        if (decision_policy.preferred_values.len != 0 and
+            decision_policy.preferred_values.len != variable_count)
+        {
+            return error.InvalidDecisionPolicy;
+        }
+
+        const decision_order = try allocator.alloc(usize, variable_count);
+        errdefer allocator.free(decision_order);
+        const decision_positions = try allocator.alloc(usize, variable_count);
+        errdefer allocator.free(decision_positions);
+        const preferred_values = try allocator.alloc(bool, variable_count);
+        errdefer allocator.free(preferred_values);
+
+        if (decision_policy.order.len == 0) {
+            for (decision_order, decision_positions, 0..) |
+                *package,
+                *position,
+                index,
+            | {
+                package.* = index;
+                position.* = index;
+            }
+        } else {
+            for (decision_policy.order, 0..) |package_id, position| {
+                const package_index: usize = @intFromEnum(package_id);
+                if (package_index >= variable_count or seen[package_index]) {
+                    return error.InvalidDecisionPolicy;
+                }
+                seen[package_index] = true;
+                decision_order[position] = package_index;
+                decision_positions[package_index] = position;
+            }
+            @memset(seen, false);
+        }
+        if (decision_policy.preferred_values.len == 0) {
+            @memset(preferred_values, false);
+        } else {
+            @memcpy(preferred_values, decision_policy.preferred_values);
+        }
+
         const watches = try allocator.alloc(IndexList, variable_count * 2);
         errdefer allocator.free(watches);
         for (watches) |*watch| {
@@ -166,6 +239,9 @@ const Engine = struct {
             .levels = levels,
             .reasons = reasons,
             .seen = seen,
+            .decision_order = decision_order,
+            .decision_positions = decision_positions,
+            .preferred_values = preferred_values,
             .trail = LiteralList.init(allocator),
             .trail_limits = IndexList.init(allocator),
             .normalize_scratch = LiteralList.init(allocator),
@@ -179,6 +255,9 @@ const Engine = struct {
         self.trail_limits.deinit();
         self.trail.deinit();
         self.allocator.free(self.seen);
+        self.allocator.free(self.preferred_values);
+        self.allocator.free(self.decision_positions);
+        self.allocator.free(self.decision_order);
         self.allocator.free(self.reasons);
         self.allocator.free(self.levels);
         self.allocator.free(self.assignments);
@@ -317,7 +396,7 @@ const Engine = struct {
             self.statistics.decisions += 1;
             const decision_literal = Literal.init(
                 @enumFromInt(@as(u32, @intCast(decision_variable))),
-                false,
+                self.preferred_values[decision_variable],
             );
             if (!try self.enqueue(decision_literal, null)) {
                 return error.InternalSolverFailure;
@@ -535,7 +614,10 @@ const Engine = struct {
             self.assignments[variable] = .unassigned;
             self.levels[variable] = 0;
             self.reasons[variable] = null;
-            self.decision_cursor = @min(self.decision_cursor, variable);
+            self.decision_cursor = @min(
+                self.decision_cursor,
+                self.decision_positions[variable],
+            );
         }
         self.trail.shrinkRetainingCapacity(target_trail_len);
         self.trail_limits.shrinkRetainingCapacity(
@@ -567,8 +649,8 @@ const Engine = struct {
     fn chooseDecision(self: *Engine) ?usize {
         while (self.decision_cursor < self.assignments.len) {
             self.statistics.decision_probes += 1;
-            if (self.assignments[self.decision_cursor] == .unassigned) {
-                const decision = self.decision_cursor;
+            const decision = self.decision_order[self.decision_cursor];
+            if (self.assignments[decision] == .unassigned) {
                 self.decision_cursor += 1;
                 return decision;
             }
@@ -641,6 +723,7 @@ fn solveInternal(
     allocator: std.mem.Allocator,
     formula: *const OwnedFormula,
     assumptions: []const Literal,
+    decision_policy: DecisionPolicy,
     statistics: ?*Statistics,
 ) SolveError!Result {
     const variable_count = formula.universe.packages.len;
@@ -648,7 +731,11 @@ fn solveInternal(
         return error.InvalidFormula;
     }
 
-    var engine = try Engine.init(allocator, variable_count);
+    var engine = try Engine.init(
+        allocator,
+        variable_count,
+        decision_policy,
+    );
     defer engine.deinit();
 
     for (formula.literals) |literal| {
@@ -719,6 +806,26 @@ fn testSolve(
     assumptions: []const Literal,
     statistics: ?*Statistics,
 ) SolveError!Result {
+    return testSolvePolicy(
+        allocator,
+        variable_count,
+        ranges,
+        literals,
+        assumptions,
+        .{},
+        statistics,
+    );
+}
+
+fn testSolvePolicy(
+    allocator: std.mem.Allocator,
+    variable_count: usize,
+    ranges: []const solver_rules.LiteralRange,
+    literals: []const Literal,
+    assumptions: []const Literal,
+    decision_policy: DecisionPolicy,
+    statistics: ?*Statistics,
+) SolveError!Result {
     const packages = try allocator.alloc(
         solver_model.UniversePackage,
         variable_count,
@@ -760,6 +867,7 @@ fn testSolve(
         allocator,
         &formula,
         assumptions,
+        decision_policy,
         statistics,
     );
 }
@@ -1026,6 +1134,79 @@ test "assumptions constrain propagation and reject invalid literals" {
             &ranges,
             &literals,
             &.{testLiteral(2, true)},
+            null,
+        ),
+    );
+}
+
+test "decision policy controls complete order and preferred polarity" {
+    const literals = [_]Literal{
+        testLiteral(0, true),
+        testLiteral(1, true),
+        testLiteral(2, true),
+    };
+    const ranges = [_]solver_rules.LiteralRange{
+        .{ .start = 0, .len = 3 },
+    };
+    const order = [_]solver_model.PackageId{
+        @enumFromInt(2),
+        @enumFromInt(0),
+        @enumFromInt(1),
+    };
+    const preferred = [_]bool{ false, false, false };
+    var result = try testSolvePolicy(
+        std.testing.allocator,
+        3,
+        &ranges,
+        &literals,
+        &.{},
+        .{
+            .order = &order,
+            .preferred_values = &preferred,
+        },
+        null,
+    );
+    defer result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, true, false },
+        result.satisfiable.values,
+    );
+
+    const installed_preference = [_]bool{ true, false, false };
+    var preferred_result = try testSolvePolicy(
+        std.testing.allocator,
+        3,
+        &.{},
+        &.{},
+        &.{},
+        .{
+            .order = &order,
+            .preferred_values = &installed_preference,
+        },
+        null,
+    );
+    defer preferred_result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ true, false, false },
+        preferred_result.satisfiable.values,
+    );
+
+    const duplicate_order = [_]solver_model.PackageId{
+        @enumFromInt(0),
+        @enumFromInt(0),
+        @enumFromInt(2),
+    };
+    try std.testing.expectError(
+        error.InvalidDecisionPolicy,
+        testSolvePolicy(
+            std.testing.allocator,
+            3,
+            &ranges,
+            &literals,
+            &.{},
+            .{ .order = &duplicate_order },
             null,
         ),
     );
