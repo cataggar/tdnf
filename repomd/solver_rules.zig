@@ -76,6 +76,7 @@ pub const RuleOrigin = union(enum) {
         left: solver_model.PackageId,
         right: solver_model.PackageId,
     },
+    installed_keep: solver_model.PackageId,
     job: solver_model.JobId,
 };
 
@@ -1519,6 +1520,7 @@ fn findClause(
             .conflict => |value| value.dependency.package,
             .obsoletes => |value| value.dependency.package,
             .same_name => |value| value.left,
+            .installed_keep => |value| value,
             .job => continue,
         };
         if (origin_package == package) return clause;
