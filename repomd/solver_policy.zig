@@ -268,8 +268,38 @@ fn validateBaseFormula(
     {
         return error.InvalidFormula;
     }
+    var package_cursor: usize = 0;
+    for (formula.universe.repositories, 0..) |repository, repository_index| {
+        if (@intFromEnum(repository.id) != repository_index) {
+            return error.InvalidFormula;
+        }
+        const start: usize = @intCast(repository.packages.start);
+        const len: usize = @intCast(repository.packages.len);
+        if (start != package_cursor or len > package_count - start) {
+            return error.InvalidFormula;
+        }
+        for (formula.universe.packages[start .. start + len], 0..) |
+            package,
+            repository_package_index,
+        | {
+            if (package.repository != repository.id or
+                package.repository_package_index != repository_package_index)
+            {
+                return error.InvalidFormula;
+            }
+        }
+        package_cursor += len;
+    }
+    if (package_cursor != package_count) return error.InvalidFormula;
     for (formula.universe.packages, 0..) |package, package_index| {
         if (@intFromEnum(package.id) != package_index) {
+            return error.InvalidFormula;
+        }
+        const repository = formula.universe.repository(package.repository) orelse
+            return error.InvalidFormula;
+        const start: usize = @intCast(repository.packages.start);
+        const len: usize = @intCast(repository.packages.len);
+        if (package_index < start or package_index >= start + len) {
             return error.InvalidFormula;
         }
     }
@@ -663,17 +693,28 @@ test "multiversion state remains an explicit policy boundary" {
 }
 
 test "malformed package IDs and literal encodings are rejected" {
-    var source = testPackage("package", "1");
+    var sources = [_]metadata.Package{testPackage("package", "1")};
+    var source_model = metadata.RepositoryModel{ .packages = &sources };
+    var repositories = [_]solver_model.UniverseRepository{.{
+        .id = @enumFromInt(0),
+        .input_index = 0,
+        .name = "@System",
+        .kind = .installed,
+        .priority = 50,
+        .cost = 1000,
+        .source = &source_model,
+        .packages = .{ .start = 0, .len = 1 },
+    }};
     var packages = [_]solver_model.UniversePackage{.{
         .id = @enumFromInt(1),
         .repository = @enumFromInt(0),
         .repository_package_index = 0,
-        .source = &source,
+        .source = &sources[0],
         .installed = .{ .rpmdb_hnum = 1 },
     }};
     var universe = solver_model.Universe{
         .allocator = std.testing.allocator,
-        .repositories = &.{},
+        .repositories = &repositories,
         .packages = &packages,
         .input_to_repository = &.{},
     };
@@ -694,6 +735,75 @@ test "malformed package IDs and literal encodings are rejected" {
 
     packages[0].id = @enumFromInt(0);
     formula.literals = &.{@enumFromInt(std.math.maxInt(u64))};
+    try std.testing.expectError(
+        error.InvalidFormula,
+        prepareInstalledRetention(std.testing.allocator, &formula),
+    );
+}
+
+test "overlapping repository package ranges are rejected" {
+    var sources = [_]metadata.Package{
+        testPackage("one", "1"),
+        testPackage("two", "1"),
+    };
+    var repository_models = [_]metadata.RepositoryModel{
+        .{ .packages = sources[0..1] },
+        .{ .packages = sources[1..2] },
+    };
+    var repositories = [_]solver_model.UniverseRepository{
+        .{
+            .id = @enumFromInt(0),
+            .input_index = 0,
+            .name = "one",
+            .kind = .available,
+            .priority = 50,
+            .cost = 1000,
+            .source = &repository_models[0],
+            .packages = .{ .start = 0, .len = 2 },
+        },
+        .{
+            .id = @enumFromInt(1),
+            .input_index = 1,
+            .name = "two",
+            .kind = .available,
+            .priority = 50,
+            .cost = 1000,
+            .source = &repository_models[1],
+            .packages = .{ .start = 1, .len = 1 },
+        },
+    };
+    var packages = [_]solver_model.UniversePackage{
+        .{
+            .id = @enumFromInt(0),
+            .repository = @enumFromInt(0),
+            .repository_package_index = 0,
+            .source = &sources[0],
+            .installed = null,
+        },
+        .{
+            .id = @enumFromInt(1),
+            .repository = @enumFromInt(1),
+            .repository_package_index = 0,
+            .source = &sources[1],
+            .installed = null,
+        },
+    };
+    var universe = solver_model.Universe{
+        .allocator = std.testing.allocator,
+        .repositories = &repositories,
+        .packages = &packages,
+        .input_to_repository = &.{},
+    };
+    var states = [_]solver_rules.PackageState{ .{}, .{} };
+    const formula = solver_rules.OwnedFormula{
+        .allocator = std.testing.allocator,
+        .universe = &universe,
+        .clauses = &.{},
+        .literals = &.{},
+        .weak_requests = &.{},
+        .weak_candidates = &.{},
+        .package_states = &states,
+    };
     try std.testing.expectError(
         error.InvalidFormula,
         prepareInstalledRetention(std.testing.allocator, &formula),
@@ -721,9 +831,35 @@ fn allocationFailureCase(allocator: std.mem.Allocator) !void {
             .installed = null,
         },
     };
+    var repository_models = [_]metadata.RepositoryModel{
+        .{ .packages = sources[0..1] },
+        .{ .packages = sources[1..2] },
+    };
+    var repositories = [_]solver_model.UniverseRepository{
+        .{
+            .id = @enumFromInt(0),
+            .input_index = 0,
+            .name = "@System",
+            .kind = .installed,
+            .priority = 50,
+            .cost = 1000,
+            .source = &repository_models[0],
+            .packages = .{ .start = 0, .len = 1 },
+        },
+        .{
+            .id = @enumFromInt(1),
+            .input_index = 1,
+            .name = "available",
+            .kind = .available,
+            .priority = 50,
+            .cost = 1000,
+            .source = &repository_models[1],
+            .packages = .{ .start = 1, .len = 1 },
+        },
+    };
     var universe = solver_model.Universe{
         .allocator = std.testing.allocator,
-        .repositories = &.{},
+        .repositories = &repositories,
         .packages = &packages,
         .input_to_repository = &.{},
     };
