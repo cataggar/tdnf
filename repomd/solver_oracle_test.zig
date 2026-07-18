@@ -601,6 +601,71 @@ test "versioned capability without EVR matches solvbridge encoding" {
     try testing.expect(containsSelectedName(&graph, &observation, "provider"));
 }
 
+test "oracle preserves RPM missing-release and unversioned-provider matching" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(available, .{
+        .name = "self-provider",
+        .version = "1",
+        .release = "2",
+    });
+    try builder.addPackage(available, .{
+        .name = "explicit-provider",
+        .provides = &.{relation("virtual-api")},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    const jobs = [_]solver_model.Job{
+        .{
+            .action = .install,
+            .selection = .{ .capability = versionedRelation(
+                "self-provider",
+                .eq,
+                "1",
+            ) },
+        },
+        .{
+            .action = .install,
+            .selection = .{ .capability = versionedRelation(
+                "virtual-api",
+                .eq,
+                "999",
+            ) },
+        },
+    };
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &jobs },
+        policy(),
+    );
+    defer observation.deinit();
+    try testing.expect(containsSelectedName(&graph, &observation, "self-provider"));
+    try testing.expect(containsSelectedName(&graph, &observation, "explicit-provider"));
+
+    var greater_observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .capability = versionedRelation(
+                "self-provider",
+                .gt,
+                "1",
+            ) },
+        }} },
+        policy(),
+    );
+    defer greater_observation.deinit();
+    try testing.expect(!containsSelectedName(
+        &graph,
+        &greater_observation,
+        "self-provider",
+    ));
+}
+
 test "force-best preserves direct request provenance" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     var builder = GraphBuilder.init(arena_state.allocator());
