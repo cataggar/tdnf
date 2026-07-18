@@ -1039,7 +1039,7 @@ fn rpmProvideMatches(
         return true;
     }
 
-    return switch (compareEvrMatchRelease(provider, dependency)) {
+    return switch (compareRelationEvr(provider, dependency)) {
         -2 => provider_flags & relation_eq != 0,
         -1 => dependency_flags & relation_lt != 0 or
             provider_flags & relation_gt != 0,
@@ -1062,7 +1062,7 @@ fn relationFlags(comparison: metadata.CompareOp) u8 {
     };
 }
 
-fn compareEvrMatchRelease(
+pub fn compareRelationEvr(
     left: metadata.Relation,
     right: metadata.Relation,
 ) i32 {
