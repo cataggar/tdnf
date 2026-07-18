@@ -42,6 +42,139 @@ pub const CandidateDecisionPolicy = struct {
     candidates: []const solver_model.PackageId = &.{},
 };
 
+const IncrementalState = enum {
+    ready,
+    preferred_completion,
+    unsatisfiable,
+    finished,
+};
+
+/// Persistent deterministic search used for optional package decisions.
+///
+/// `solveHard` stops once every hard clause is satisfied by the current
+/// assignments plus the fallback policy's preferred values. Callers may then
+/// try additional positive package decisions without rebuilding the solver.
+pub const IncrementalSolver = struct {
+    engine: Engine,
+    state: IncrementalState = .ready,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        formula: *const OwnedFormula,
+        assumptions: []const Literal,
+        candidate_policy: CandidateDecisionPolicy,
+    ) CandidateSolveError!IncrementalSolver {
+        return .{
+            .engine = try initializeEngine(
+                allocator,
+                formula,
+                assumptions,
+                candidate_policy,
+                true,
+            ),
+        };
+    }
+
+    pub fn deinit(self: *IncrementalSolver) void {
+        self.engine.deinit();
+        self.* = undefined;
+    }
+
+    pub fn solveHard(self: *IncrementalSolver) SolveError!bool {
+        if (self.state != .ready) return error.InternalSolverFailure;
+        if (!try self.engine.run(.preferred_completion)) {
+            self.state = .unsatisfiable;
+            return false;
+        }
+        self.state = .preferred_completion;
+        return true;
+    }
+
+    /// Return the current preferred completion value after `solveHard`.
+    pub fn selected(
+        self: *const IncrementalSolver,
+        package_id: solver_model.PackageId,
+    ) ?bool {
+        if (self.state != .preferred_completion) return null;
+        const variable: usize = @intFromEnum(package_id);
+        if (variable >= self.engine.variable_count) return null;
+        return switch (self.engine.assignments[variable]) {
+            .true_value => true,
+            .false_value => false,
+            .unassigned => self.engine.preferred_values[variable],
+        };
+    }
+
+    /// Try selecting one optional package on the live hard-solver trail.
+    ///
+    /// A rejected decision is a normal result; learned clauses and any
+    /// necessary backtracking remain in the session.
+    pub fn trySelect(
+        self: *IncrementalSolver,
+        package_id: solver_model.PackageId,
+    ) SolveError!bool {
+        if (self.state != .preferred_completion) {
+            return error.InternalSolverFailure;
+        }
+        const variable: usize = @intFromEnum(package_id);
+        if (variable >= self.engine.variable_count) {
+            return error.InvalidAssumption;
+        }
+        switch (self.engine.assignments[variable]) {
+            .true_value => {
+                try self.engine.protectLiteral(
+                    Literal.init(package_id, true),
+                );
+                return true;
+            },
+            .false_value => return false,
+            .unassigned => {},
+        }
+
+        try self.engine.trail_limits.append(self.engine.trail.items.len);
+        self.engine.statistics.decisions += 1;
+        if (!try self.engine.enqueue(Literal.init(package_id, true), null)) {
+            return false;
+        }
+        if (!try self.engine.run(.preferred_completion)) {
+            return error.InternalSolverFailure;
+        }
+        const selected_value = self.selected(package_id) orelse
+            return error.InternalSolverFailure;
+        if (selected_value) {
+            try self.engine.protectLiteral(Literal.init(package_id, true));
+        }
+        return selected_value;
+    }
+
+    /// Materialize the remaining preferred values into a complete model.
+    pub fn finish(self: *IncrementalSolver) SolveError!Result {
+        switch (self.state) {
+            .ready => {
+                if (!try self.engine.run(.complete)) {
+                    self.state = .finished;
+                    return .{ .unsatisfiable = {} };
+                }
+            },
+            .preferred_completion => {
+                if (!try self.engine.run(.complete)) {
+                    return error.InternalSolverFailure;
+                }
+            },
+            .unsatisfiable => {
+                self.state = .finished;
+                return .{ .unsatisfiable = {} };
+            },
+            .finished => return error.InternalSolverFailure,
+        }
+        if (!self.engine.validateModel()) {
+            return error.InternalSolverFailure;
+        }
+        self.state = .finished;
+        return .{ .satisfiable = try self.engine.makeModel() };
+    }
+};
+
 /// A complete package assignment indexed by stable `PackageId`.
 pub const Model = struct {
     allocator: std.mem.Allocator,
@@ -161,6 +294,11 @@ const Decision = struct {
     positive: bool,
 };
 
+const RunMode = enum {
+    preferred_completion,
+    complete,
+};
+
 const CandidateOccurrence = struct {
     group: usize,
     candidate: bool,
@@ -186,9 +324,14 @@ const OccurrenceList = std.array_list.Managed(CandidateOccurrence);
 const Engine = struct {
     allocator: std.mem.Allocator,
     variable_count: usize,
+    track_preferred_completion: bool,
     clauses: ClauseList,
     literals: LiteralList,
     watches: []IndexList,
+    literal_occurrences: []IndexList,
+    clause_true_counts: IndexList,
+    clause_preferred_counts: IndexList,
+    preferred_satisfied_clauses: usize = 0,
     assignments: []Value,
     levels: []u32,
     reasons: []?usize,
@@ -208,12 +351,14 @@ const Engine = struct {
     normalize_scratch: LiteralList,
     analysis_scratch: LiteralList,
     has_empty_clause: bool = false,
+    root_initialized: bool = false,
     statistics: Statistics = .{},
 
     fn init(
         allocator: std.mem.Allocator,
         variable_count: usize,
         decision_policy: DecisionPolicy,
+        track_preferred_completion: bool,
     ) SolveError!Engine {
         if (variable_count > std.math.maxInt(u32) or
             variable_count > std.math.maxInt(usize) / 2)
@@ -287,13 +432,25 @@ const Engine = struct {
         for (watches) |*watch| {
             watch.* = IndexList.init(allocator);
         }
+        const literal_occurrences = try allocator.alloc(
+            IndexList,
+            if (track_preferred_completion) variable_count * 2 else 0,
+        );
+        errdefer allocator.free(literal_occurrences);
+        for (literal_occurrences) |*occurrences| {
+            occurrences.* = IndexList.init(allocator);
+        }
 
         return .{
             .allocator = allocator,
             .variable_count = variable_count,
+            .track_preferred_completion = track_preferred_completion,
             .clauses = ClauseList.init(allocator),
             .literals = LiteralList.init(allocator),
             .watches = watches,
+            .literal_occurrences = literal_occurrences,
+            .clause_true_counts = IndexList.init(allocator),
+            .clause_preferred_counts = IndexList.init(allocator),
             .assignments = assignments,
             .levels = levels,
             .reasons = reasons,
@@ -335,6 +492,12 @@ const Engine = struct {
         self.allocator.free(self.reasons);
         self.allocator.free(self.levels);
         self.allocator.free(self.assignments);
+        self.clause_preferred_counts.deinit();
+        self.clause_true_counts.deinit();
+        for (self.literal_occurrences) |*occurrences| {
+            occurrences.deinit();
+        }
+        self.allocator.free(self.literal_occurrences);
         for (self.watches) |*watch| {
             watch.deinit();
         }
@@ -398,6 +561,46 @@ const Engine = struct {
             .scan_cursor = if (input_literals.len > 2) 2 else 0,
         });
         errdefer _ = self.clauses.pop();
+
+        if (self.track_preferred_completion) {
+            var true_count: usize = 0;
+            var preferred_count: usize = 0;
+            for (input_literals) |literal| {
+                switch (self.literalValue(literal)) {
+                    .true_value => true_count += 1,
+                    .unassigned => {
+                        const variable = literalVariable(literal);
+                        if (literal.positive() ==
+                            self.preferred_values[variable])
+                        {
+                            preferred_count += 1;
+                        }
+                    },
+                    .false_value => {},
+                }
+            }
+            try self.clause_true_counts.append(true_count);
+            errdefer _ = self.clause_true_counts.pop();
+            try self.clause_preferred_counts.append(preferred_count);
+            errdefer _ = self.clause_preferred_counts.pop();
+            const preferred_satisfied =
+                true_count != 0 or preferred_count != 0;
+            if (preferred_satisfied) self.preferred_satisfied_clauses += 1;
+            errdefer if (preferred_satisfied) {
+                self.preferred_satisfied_clauses -= 1;
+            };
+
+            var occurrences_added: usize = 0;
+            errdefer for (input_literals[0..occurrences_added]) |literal| {
+                _ = self.literal_occurrences[literalIndex(literal)].pop();
+            };
+            for (input_literals) |literal| {
+                try self.literal_occurrences[literalIndex(literal)].append(
+                    clause_id,
+                );
+                occurrences_added += 1;
+            }
+        }
 
         if (input_literals.len == 0) {
             self.has_empty_clause = true;
@@ -707,8 +910,16 @@ const Engine = struct {
         return true;
     }
 
-    fn run(self: *Engine) SolveError!bool {
-        if (!try self.initializeRoot()) return false;
+    fn run(self: *Engine, mode: RunMode) SolveError!bool {
+        if (mode == .preferred_completion and
+            !self.track_preferred_completion)
+        {
+            return error.InternalSolverFailure;
+        }
+        if (!self.root_initialized) {
+            self.root_initialized = true;
+            if (!try self.initializeRoot()) return false;
+        }
 
         while (true) {
             if (try self.propagate()) |conflict_clause| {
@@ -731,7 +942,16 @@ const Engine = struct {
                 continue;
             }
 
-            const decision = self.chooseDecision() orelse return true;
+            const decision = switch (mode) {
+                .preferred_completion => self.chooseCandidateDecision() orelse
+                    if (self.preferred_satisfied_clauses ==
+                        self.clauses.items.len)
+                        return true
+                    else
+                        self.chooseFallbackDecision() orelse
+                            return error.InternalSolverFailure,
+                .complete => self.chooseDecision() orelse return true,
+            };
             try self.trail_limits.append(self.trail.items.len);
             self.statistics.decisions += 1;
             const decision_literal = Literal.init(
@@ -949,8 +1169,17 @@ const Engine = struct {
 
         const target_trail_len =
             self.trail_limits.items[@as(usize, @intCast(target_level))];
+        var retained_trail_len = target_trail_len;
         for (self.trail.items[target_trail_len..]) |literal| {
             const variable = literalVariable(literal);
+            if (self.levels[variable] <= target_level) {
+                self.trail.items[retained_trail_len] = literal;
+                retained_trail_len += 1;
+                continue;
+            }
+            if (self.track_preferred_completion) {
+                self.removeAssignmentCounts(literal);
+            }
             self.updateCandidateOccurrences(
                 variable,
                 self.assignments[variable],
@@ -964,7 +1193,7 @@ const Engine = struct {
                 self.decision_positions[variable],
             );
         }
-        self.trail.shrinkRetainingCapacity(target_trail_len);
+        self.trail.shrinkRetainingCapacity(retained_trail_len);
         self.trail_limits.shrinkRetainingCapacity(
             @as(usize, @intCast(target_level)),
         );
@@ -985,6 +1214,9 @@ const Engine = struct {
         if (assignment != .unassigned) return assignment == wanted;
 
         try self.trail.append(literal);
+        if (self.track_preferred_completion) {
+            self.addAssignmentCounts(literal);
+        }
         self.assignments[variable] = wanted;
         self.levels[variable] = self.decisionLevel();
         self.reasons[variable] = reason;
@@ -994,6 +1226,10 @@ const Engine = struct {
 
     fn chooseDecision(self: *Engine) ?Decision {
         if (self.chooseCandidateDecision()) |decision| return decision;
+        return self.chooseFallbackDecision();
+    }
+
+    fn chooseFallbackDecision(self: *Engine) ?Decision {
         while (self.decision_cursor < self.assignments.len) {
             self.statistics.decision_probes += 1;
             const decision = self.decision_order[self.decision_cursor];
@@ -1048,6 +1284,91 @@ const Engine = struct {
             else
                 .true_value,
         };
+    }
+
+    fn clausePreferredSatisfied(
+        self: *const Engine,
+        clause_id: usize,
+    ) bool {
+        return self.clause_true_counts.items[clause_id] != 0 or
+            self.clause_preferred_counts.items[clause_id] != 0;
+    }
+
+    fn updatePreferredSatisfiedCount(
+        self: *Engine,
+        clause_id: usize,
+        was_satisfied: bool,
+    ) void {
+        const is_satisfied = self.clausePreferredSatisfied(clause_id);
+        if (was_satisfied == is_satisfied) return;
+        if (is_satisfied) {
+            self.preferred_satisfied_clauses += 1;
+        } else {
+            self.preferred_satisfied_clauses -= 1;
+        }
+    }
+
+    fn addAssignmentCounts(self: *Engine, literal: Literal) void {
+        for (self.literal_occurrences[literalIndex(literal)].items) |
+            clause_id,
+        | {
+            const was_satisfied = self.clausePreferredSatisfied(clause_id);
+            self.clause_true_counts.items[clause_id] += 1;
+            self.updatePreferredSatisfiedCount(clause_id, was_satisfied);
+        }
+        const variable = literalVariable(literal);
+        const preferred_literal = Literal.init(
+            @enumFromInt(@as(u32, @intCast(variable))),
+            self.preferred_values[variable],
+        );
+        for (self.literal_occurrences[
+            literalIndex(preferred_literal)
+        ].items) |clause_id| {
+            const was_satisfied = self.clausePreferredSatisfied(clause_id);
+            std.debug.assert(
+                self.clause_preferred_counts.items[clause_id] != 0,
+            );
+            self.clause_preferred_counts.items[clause_id] -= 1;
+            self.updatePreferredSatisfiedCount(clause_id, was_satisfied);
+        }
+    }
+
+    fn removeAssignmentCounts(self: *Engine, literal: Literal) void {
+        for (self.literal_occurrences[literalIndex(literal)].items) |
+            clause_id,
+        | {
+            const was_satisfied = self.clausePreferredSatisfied(clause_id);
+            std.debug.assert(self.clause_true_counts.items[clause_id] != 0);
+            self.clause_true_counts.items[clause_id] -= 1;
+            self.updatePreferredSatisfiedCount(clause_id, was_satisfied);
+        }
+        const variable = literalVariable(literal);
+        const preferred_literal = Literal.init(
+            @enumFromInt(@as(u32, @intCast(variable))),
+            self.preferred_values[variable],
+        );
+        for (self.literal_occurrences[
+            literalIndex(preferred_literal)
+        ].items) |clause_id| {
+            const was_satisfied = self.clausePreferredSatisfied(clause_id);
+            self.clause_preferred_counts.items[clause_id] += 1;
+            self.updatePreferredSatisfiedCount(clause_id, was_satisfied);
+        }
+    }
+
+    fn protectLiteral(
+        self: *Engine,
+        literal: Literal,
+    ) SolveError!void {
+        const variable = literalVariable(literal);
+        if (self.literalValue(literal) != .true_value) {
+            return error.InternalSolverFailure;
+        }
+        if (self.levels[variable] == 0) return;
+
+        const unit_clause = try self.addClause(&.{literal});
+        self.levels[variable] = 0;
+        self.reasons[variable] = unit_clause;
     }
 
     fn clauseLiterals(
@@ -1116,6 +1437,29 @@ fn solveInternal(
     candidate_policy: CandidateDecisionPolicy,
     statistics: ?*Statistics,
 ) CandidateSolveError!Result {
+    var engine = try initializeEngine(
+        allocator,
+        formula,
+        assumptions,
+        candidate_policy,
+        false,
+    );
+    defer engine.deinit();
+
+    const satisfiable = try engine.run(.complete);
+    if (statistics) |out| out.* = engine.statistics;
+    if (!satisfiable) return .{ .unsatisfiable = {} };
+    if (!engine.validateModel()) return error.InternalSolverFailure;
+    return .{ .satisfiable = try engine.makeModel() };
+}
+
+fn initializeEngine(
+    allocator: std.mem.Allocator,
+    formula: *const OwnedFormula,
+    assumptions: []const Literal,
+    candidate_policy: CandidateDecisionPolicy,
+    track_preferred_completion: bool,
+) CandidateSolveError!Engine {
     const variable_count = formula.universe.packages.len;
     if (formula.package_states.len != variable_count) {
         return error.InvalidFormula;
@@ -1125,8 +1469,9 @@ fn solveInternal(
         allocator,
         variable_count,
         candidate_policy.fallback,
+        track_preferred_completion,
     );
-    defer engine.deinit();
+    errdefer engine.deinit();
 
     const clause_mapping = if (candidate_policy.groups.len != 0)
         try allocator.alloc(?usize, formula.clauses.len)
@@ -1166,12 +1511,7 @@ fn solveInternal(
     for (assumptions) |assumption| {
         try engine.addAssumption(assumption);
     }
-
-    const satisfiable = try engine.run();
-    if (statistics) |out| out.* = engine.statistics;
-    if (!satisfiable) return .{ .unsatisfiable = {} };
-    if (!engine.validateModel()) return error.InternalSolverFailure;
-    return .{ .satisfiable = try engine.makeModel() };
+    return engine;
 }
 
 fn validLiteral(literal: Literal, variable_count: usize) bool {
@@ -1302,6 +1642,60 @@ fn testSolveCandidatePolicy(
     );
 }
 
+fn testIncrementalSolve(
+    allocator: std.mem.Allocator,
+    variable_count: usize,
+    ranges: []const solver_rules.LiteralRange,
+    literals: []const Literal,
+    assumptions: []const Literal,
+) CandidateSolveError!Result {
+    const packages = try allocator.alloc(
+        solver_model.UniversePackage,
+        variable_count,
+    );
+    defer allocator.free(packages);
+    const states = try allocator.alloc(
+        solver_rules.PackageState,
+        variable_count,
+    );
+    defer allocator.free(states);
+    @memset(states, .{});
+    const clauses = try allocator.alloc(solver_rules.Clause, ranges.len);
+    defer allocator.free(clauses);
+    for (ranges, clauses, 0..) |range, *clause, clause_index| {
+        clause.* = .{
+            .literals = range,
+            .origin = .{
+                .job = @enumFromInt(@as(u32, @intCast(clause_index))),
+            },
+        };
+    }
+    var universe = solver_model.Universe{
+        .allocator = allocator,
+        .repositories = &.{},
+        .packages = packages,
+        .input_to_repository = &.{},
+    };
+    const formula = OwnedFormula{
+        .allocator = allocator,
+        .universe = &universe,
+        .clauses = clauses,
+        .literals = literals,
+        .weak_requests = &.{},
+        .weak_candidates = &.{},
+        .package_states = states,
+    };
+    var session = try IncrementalSolver.init(
+        allocator,
+        &formula,
+        assumptions,
+        .{},
+    );
+    defer session.deinit();
+    _ = try session.solveHard();
+    return session.finish();
+}
+
 fn assignmentSatisfies(
     variable_count: usize,
     ranges: []const solver_rules.LiteralRange,
@@ -1371,10 +1765,27 @@ fn expectResultMatchesBruteForce(
         null,
     );
     defer result.deinit();
+    var incremental = try testIncrementalSolve(
+        std.testing.allocator,
+        variable_count,
+        ranges,
+        literals,
+        assumptions,
+    );
+    defer incremental.deinit();
 
     switch (result) {
         .satisfiable => |model| {
             try std.testing.expect(expected);
+            const incremental_model = switch (incremental) {
+                .satisfiable => |value| value,
+                .unsatisfiable => return error.TestUnexpectedResult,
+            };
+            try std.testing.expectEqualSlices(
+                bool,
+                model.values,
+                incremental_model.values,
+            );
             var assignment: usize = 0;
             for (model.values, 0..) |selected, variable| {
                 if (selected) {
@@ -1390,7 +1801,12 @@ fn expectResultMatchesBruteForce(
                 assignment,
             ));
         },
-        .unsatisfiable => try std.testing.expect(!expected),
+        .unsatisfiable => {
+            try std.testing.expect(!expected);
+            try std.testing.expect(
+                std.meta.activeTag(incremental) == .unsatisfiable,
+            );
+        },
     }
 }
 
@@ -2691,6 +3107,201 @@ test "wide clauses and unconstrained decisions advance linearly" {
     );
 }
 
+test "incremental optional decisions preserve the hard provider choice" {
+    var packages: [3]solver_model.UniversePackage = undefined;
+    var states = [_]solver_rules.PackageState{.{}} ** 3;
+    var universe = solver_model.Universe{
+        .allocator = std.testing.allocator,
+        .repositories = &.{},
+        .packages = &packages,
+        .input_to_repository = &.{},
+    };
+    const literals = [_]Literal{
+        testLiteral(0, true),
+        testLiteral(1, true),
+        testLiteral(0, false),
+        testLiteral(2, false),
+    };
+    const clauses = [_]solver_rules.Clause{
+        .{
+            .literals = .{ .start = 0, .len = 2 },
+            .origin = .{ .job = @enumFromInt(0) },
+        },
+        .{
+            .literals = .{ .start = 2, .len = 2 },
+            .origin = .{ .job = @enumFromInt(1) },
+        },
+    };
+    const formula = OwnedFormula{
+        .allocator = std.testing.allocator,
+        .universe = &universe,
+        .clauses = &clauses,
+        .literals = &literals,
+        .weak_requests = &.{},
+        .weak_candidates = &.{},
+        .package_states = &states,
+    };
+    var session = try IncrementalSolver.init(
+        std.testing.allocator,
+        &formula,
+        &.{},
+        .{
+            .groups = &.{.{
+                .clause_index = 0,
+                .candidates = .{ .start = 0, .len = 2 },
+            }},
+            .candidates = &.{ @enumFromInt(0), @enumFromInt(1) },
+        },
+    );
+    defer session.deinit();
+
+    try std.testing.expect(try session.solveHard());
+    try std.testing.expect(session.selected(@enumFromInt(0)).?);
+    try std.testing.expect(!session.selected(@enumFromInt(1)).?);
+    try std.testing.expect(!try session.trySelect(@enumFromInt(2)));
+    try std.testing.expect(session.selected(@enumFromInt(0)).?);
+    try std.testing.expect(!session.selected(@enumFromInt(1)).?);
+
+    var result = try session.finish();
+    defer result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ true, false, false },
+        result.satisfiable.values,
+    );
+}
+
+test "incremental optional packages activate contextual requirements" {
+    var packages: [3]solver_model.UniversePackage = undefined;
+    var states = [_]solver_rules.PackageState{.{}} ** 3;
+    var universe = solver_model.Universe{
+        .allocator = std.testing.allocator,
+        .repositories = &.{},
+        .packages = &packages,
+        .input_to_repository = &.{},
+    };
+    const literals = [_]Literal{
+        testLiteral(0, true),
+        testLiteral(1, false),
+        testLiteral(2, true),
+    };
+    const clauses = [_]solver_rules.Clause{
+        .{
+            .literals = .{ .start = 0, .len = 1 },
+            .origin = .{ .job = @enumFromInt(0) },
+        },
+        .{
+            .literals = .{ .start = 1, .len = 2 },
+            .origin = .{ .requirement = .{
+                .package = @enumFromInt(1),
+                .kind = .requires,
+                .index = 0,
+            } },
+        },
+    };
+    const formula = OwnedFormula{
+        .allocator = std.testing.allocator,
+        .universe = &universe,
+        .clauses = &clauses,
+        .literals = &literals,
+        .weak_requests = &.{},
+        .weak_candidates = &.{},
+        .package_states = &states,
+    };
+    var session = try IncrementalSolver.init(
+        std.testing.allocator,
+        &formula,
+        &.{},
+        .{
+            .groups = &.{.{
+                .clause_index = 1,
+                .candidates = .{ .start = 0, .len = 1 },
+            }},
+            .candidates = &.{@enumFromInt(2)},
+        },
+    );
+    defer session.deinit();
+
+    try std.testing.expect(try session.solveHard());
+    try std.testing.expect(session.selected(@enumFromInt(0)).?);
+    try std.testing.expect(!session.selected(@enumFromInt(1)).?);
+    try std.testing.expect(!session.selected(@enumFromInt(2)).?);
+    try std.testing.expect(try session.trySelect(@enumFromInt(1)));
+    try std.testing.expect(session.selected(@enumFromInt(2)).?);
+
+    var result = try session.finish();
+    defer result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ true, true, true },
+        result.satisfiable.values,
+    );
+}
+
+test "rejected optional decisions preserve earlier accepted selections" {
+    var packages: [4]solver_model.UniversePackage = undefined;
+    var states = [_]solver_rules.PackageState{.{}} ** 4;
+    var universe = solver_model.Universe{
+        .allocator = std.testing.allocator,
+        .repositories = &.{},
+        .packages = &packages,
+        .input_to_repository = &.{},
+    };
+    const literals = [_]Literal{
+        testLiteral(0, false),
+        testLiteral(1, true),
+        testLiteral(2, false),
+        testLiteral(3, true),
+        testLiteral(2, false),
+        testLiteral(3, false),
+    };
+    const clauses = [_]solver_rules.Clause{
+        .{
+            .literals = .{ .start = 0, .len = 2 },
+            .origin = .{ .job = @enumFromInt(0) },
+        },
+        .{
+            .literals = .{ .start = 2, .len = 2 },
+            .origin = .{ .job = @enumFromInt(1) },
+        },
+        .{
+            .literals = .{ .start = 4, .len = 2 },
+            .origin = .{ .job = @enumFromInt(2) },
+        },
+    };
+    const formula = OwnedFormula{
+        .allocator = std.testing.allocator,
+        .universe = &universe,
+        .clauses = &clauses,
+        .literals = &literals,
+        .weak_requests = &.{},
+        .weak_candidates = &.{},
+        .package_states = &states,
+    };
+    var session = try IncrementalSolver.init(
+        std.testing.allocator,
+        &formula,
+        &.{},
+        .{},
+    );
+    defer session.deinit();
+
+    try std.testing.expect(try session.solveHard());
+    try std.testing.expect(try session.trySelect(@enumFromInt(0)));
+    try std.testing.expect(session.selected(@enumFromInt(1)).?);
+    try std.testing.expect(!try session.trySelect(@enumFromInt(2)));
+    try std.testing.expect(session.selected(@enumFromInt(0)).?);
+    try std.testing.expect(session.selected(@enumFromInt(1)).?);
+
+    var result = try session.finish();
+    defer result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ true, true, false, false },
+        result.satisfiable.values,
+    );
+}
+
 fn allocationFailureCase(allocator: std.mem.Allocator) !void {
     const satisfiable_literals = [_]Literal{
         testLiteral(0, true),
@@ -2758,6 +3369,45 @@ fn allocationFailureCase(allocator: std.mem.Allocator) !void {
         null,
     );
     defer contextual.deinit();
+
+    var packages: [2]solver_model.UniversePackage = undefined;
+    var states = [_]solver_rules.PackageState{.{}} ** 2;
+    var universe = solver_model.Universe{
+        .allocator = allocator,
+        .repositories = &.{},
+        .packages = &packages,
+        .input_to_repository = &.{},
+    };
+    const incremental_clauses = [_]solver_rules.Clause{.{
+        .literals = .{ .start = 0, .len = 2 },
+        .origin = .{ .job = @enumFromInt(0) },
+    }};
+    const incremental = OwnedFormula{
+        .allocator = allocator,
+        .universe = &universe,
+        .clauses = &incremental_clauses,
+        .literals = satisfiable_literals[0..2],
+        .weak_requests = &.{},
+        .weak_candidates = &.{},
+        .package_states = &states,
+    };
+    var session = try IncrementalSolver.init(
+        allocator,
+        &incremental,
+        &.{},
+        .{
+            .groups = &.{.{
+                .clause_index = 0,
+                .candidates = .{ .start = 0, .len = 2 },
+            }},
+            .candidates = &candidates,
+        },
+    );
+    defer session.deinit();
+    if (!try session.solveHard()) return error.TestUnexpectedResult;
+    _ = try session.trySelect(@enumFromInt(0));
+    var incremental_result = try session.finish();
+    defer incremental_result.deinit();
 }
 
 test "search cleans up every allocation failure" {
