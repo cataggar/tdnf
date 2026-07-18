@@ -17,6 +17,9 @@ const PackageSpec = struct {
     conflicts: []const metadata.Relation = &.{},
     obsoletes: []const metadata.Relation = &.{},
     recommends: []const metadata.Relation = &.{},
+    suggests: []const metadata.Relation = &.{},
+    supplements: []const metadata.Relation = &.{},
+    enhances: []const metadata.Relation = &.{},
 };
 
 const RepoBuild = struct {
@@ -86,6 +89,9 @@ const GraphBuilder = struct {
             .{ .kind = .conflicts, .relations = spec.conflicts },
             .{ .kind = .obsoletes, .relations = spec.obsoletes },
             .{ .kind = .recommends, .relations = spec.recommends },
+            .{ .kind = .suggests, .relations = spec.suggests },
+            .{ .kind = .supplements, .relations = spec.supplements },
+            .{ .kind = .enhances, .relations = spec.enhances },
         }) |entry| {
             package.rangePtr(entry.kind).* = .{
                 .start = repo.relations.items.len,
@@ -1395,6 +1401,276 @@ test "oracle weak dependency policy is observable" {
     );
     defer without_weak.deinit();
     try testing.expect(!containsSelectedName(&graph, &without_weak, "addon"));
+}
+
+test "oracle weak pruning prefers the best machine architecture" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(available, .{
+        .name = "addon",
+        .version = "99",
+        .arch = "i686",
+    });
+    try builder.addPackage(available, .{
+        .name = "addon",
+        .version = "1",
+        .arch = "x86_64",
+    });
+    try builder.addPackage(available, .{
+        .name = "application",
+        .recommends = &.{relation("addon")},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .name = "application" },
+        }} },
+        policy(),
+    );
+    defer observation.deinit();
+
+    const selected = selectedPackageByName(&graph, &observation, "addon").?;
+    try testing.expectEqualStrings("x86_64", selected.source.nevra.arch);
+}
+
+test "oracle weak pruning removes one-way obsoleted providers" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(available, .{
+        .name = "old-addon",
+        .provides = &.{relation("addon-api")},
+    });
+    try builder.addPackage(available, .{
+        .name = "replacement-addon",
+        .provides = &.{relation("addon-api")},
+        .obsoletes = &.{relation("old-addon")},
+    });
+    try builder.addPackage(available, .{
+        .name = "application",
+        .recommends = &.{relation("addon-api")},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .name = "application" },
+        }} },
+        policy(),
+    );
+    defer observation.deinit();
+
+    try testing.expect(containsSelectedName(
+        &graph,
+        &observation,
+        "replacement-addon",
+    ));
+    try testing.expect(!containsSelectedName(
+        &graph,
+        &observation,
+        "old-addon",
+    ));
+}
+
+test "oracle weak pruning preserves mutual obsoletes cycles" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(available, .{
+        .name = "first-addon",
+        .provides = &.{relation("addon-api")},
+        .obsoletes = &.{relation("second-addon")},
+    });
+    try builder.addPackage(available, .{
+        .name = "second-addon",
+        .provides = &.{relation("addon-api")},
+        .obsoletes = &.{relation("first-addon")},
+    });
+    try builder.addPackage(available, .{
+        .name = "application",
+        .recommends = &.{relation("addon-api")},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .name = "application" },
+        }} },
+        policy(),
+    );
+    defer observation.deinit();
+
+    try testing.expect(
+        containsSelectedName(&graph, &observation, "first-addon") or
+            containsSelectedName(&graph, &observation, "second-addon"),
+    );
+}
+
+test "oracle installs supplements for newly selected conditions" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(available, .{
+        .name = "addon",
+        .supplements = &.{relation("application")},
+    });
+    try builder.addPackage(available, .{ .name = "application" });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .name = "application" },
+        }} },
+        policy(),
+    );
+    defer observation.deinit();
+
+    try testing.expect(containsSelectedName(&graph, &observation, "addon"));
+    try testing.expectEqual(
+        solver_model.TransactionReason.weak_dependency,
+        actionForName(&graph, &observation, "addon").?.reason,
+    );
+}
+
+test "oracle suggestions order conflicting active supplements" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(available, .{
+        .name = "first-addon",
+        .conflicts = &.{relation("preferred-addon")},
+        .supplements = &.{relation("application")},
+    });
+    try builder.addPackage(available, .{
+        .name = "preferred-addon",
+        .supplements = &.{relation("application")},
+    });
+    try builder.addPackage(available, .{
+        .name = "application",
+        .suggests = &.{relation("preferred-addon")},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .name = "application" },
+        }} },
+        policy(),
+    );
+    defer observation.deinit();
+
+    try testing.expect(containsSelectedName(
+        &graph,
+        &observation,
+        "preferred-addon",
+    ));
+    try testing.expect(!containsSelectedName(
+        &graph,
+        &observation,
+        "first-addon",
+    ));
+}
+
+test "oracle suppresses old installed weak dependencies by default" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{
+        .name = "application",
+        .recommends = &.{relation("recommended-addon")},
+    });
+    try builder.addPackage(available, .{ .name = "requested" });
+    try builder.addPackage(available, .{ .name = "recommended-addon" });
+    try builder.addPackage(available, .{
+        .name = "supplement-addon",
+        .supplements = &.{relation("application")},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .name = "requested" },
+        }} },
+        policy(),
+    );
+    defer observation.deinit();
+
+    try testing.expect(!containsSelectedName(
+        &graph,
+        &observation,
+        "recommended-addon",
+    ));
+    try testing.expect(!containsSelectedName(
+        &graph,
+        &observation,
+        "supplement-addon",
+    ));
+}
+
+test "oracle suggestions and enhances do not directly install packages" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(available, .{ .name = "suggested-addon" });
+    try builder.addPackage(available, .{
+        .name = "enhanced-addon",
+        .enhances = &.{relation("application")},
+    });
+    try builder.addPackage(available, .{
+        .name = "application",
+        .suggests = &.{relation("suggested-addon")},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .name = "application" },
+        }} },
+        policy(),
+    );
+    defer observation.deinit();
+
+    try testing.expect(!containsSelectedName(
+        &graph,
+        &observation,
+        "suggested-addon",
+    ));
+    try testing.expect(!containsSelectedName(
+        &graph,
+        &observation,
+        "enhanced-addon",
+    ));
 }
 
 const SplitMix64 = struct {

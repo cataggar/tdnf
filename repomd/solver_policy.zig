@@ -17,6 +17,28 @@ const PackageIdList = std.array_list.Managed(solver_model.PackageId);
 const CandidateGroupList =
     std.array_list.Managed(solver_search.CandidateGroup);
 
+pub const WeakOptions = struct {
+    enabled: bool = true,
+    add_already_recommended: bool = false,
+};
+
+pub const AcceptedWeak = struct {
+    package: solver_model.PackageId,
+    dependency: solver_rules.DependencyRef,
+};
+
+pub const WeakResult = struct {
+    allocator: std.mem.Allocator,
+    result: solver_search.Result,
+    accepted: []const AcceptedWeak,
+
+    pub fn deinit(self: *WeakResult) void {
+        self.allocator.free(self.accepted);
+        self.result.deinit();
+        self.* = undefined;
+    }
+};
+
 pub const PrepareError = error{
     OutOfMemory,
     InvalidFormula,
@@ -48,8 +70,60 @@ pub const Prepared = struct {
             assumptions,
             self.decision_policy,
         ) catch |err| switch (err) {
-            error.InvalidCandidatePolicy => error.InvalidDecisionPolicy,
+            error.InvalidCandidatePolicy => return error.InvalidDecisionPolicy,
             else => |solve_error| return solve_error,
+        };
+    }
+
+    /// Resolve ordinary recommends and supplements after the hard solution.
+    ///
+    /// Suggestions and enhances remain ordering metadata and do not directly
+    /// install packages.
+    pub fn solveWeak(
+        self: *const Prepared,
+        allocator: std.mem.Allocator,
+        options: WeakOptions,
+    ) solver_search.SolveError!WeakResult {
+        return self.solveWeakAssuming(allocator, &.{}, options);
+    }
+
+    pub fn solveWeakAssuming(
+        self: *const Prepared,
+        allocator: std.mem.Allocator,
+        assumptions: []const solver_rules.Literal,
+        options: WeakOptions,
+    ) solver_search.SolveError!WeakResult {
+        var session = solver_search.IncrementalSolver.init(
+            allocator,
+            &self.formula,
+            assumptions,
+            self.decision_policy,
+        ) catch |err| switch (err) {
+            error.InvalidCandidatePolicy => return error.InvalidDecisionPolicy,
+            else => |solve_error| return solve_error,
+        };
+        defer session.deinit();
+
+        var accepted = std.array_list.Managed(AcceptedWeak).init(allocator);
+        defer accepted.deinit();
+        if (try session.solveHard() and options.enabled) {
+            try resolveWeakRequests(
+                allocator,
+                &self.formula,
+                &session,
+                options,
+                &accepted,
+            );
+        }
+        const result = try session.finish();
+        errdefer {
+            var owned_result = result;
+            owned_result.deinit();
+        }
+        return .{
+            .allocator = allocator,
+            .result = result,
+            .accepted = try accepted.toOwnedSlice(),
         };
     }
 
@@ -252,6 +326,26 @@ pub fn prepareInstalledRetention(
         base.weak_candidates,
     );
     errdefer allocator.free(weak_candidates);
+    var weak_candidate_groups = CandidateGroupList.init(allocator);
+    defer weak_candidate_groups.deinit();
+    for (weak_requests) |request| {
+        if (request.direction == .forward and
+            request.dependency.kind == .recommends and
+            request.candidates.len != 0)
+        {
+            try weak_candidate_groups.append(.{
+                .clause_index = 0,
+                .candidates = request.candidates,
+            });
+        }
+    }
+    try rankCandidateGroups(
+        allocator,
+        base.universe,
+        base.architecture,
+        weak_candidate_groups.items,
+        weak_candidates,
+    );
     const package_states = try allocator.dupe(
         solver_rules.PackageState,
         base.package_states,
@@ -337,6 +431,662 @@ const RankingContext = struct {
     universe: *const solver_model.Universe,
     architecture: ?solver_model.ArchitecturePolicy,
 };
+
+const WeakDfsFrame = struct {
+    package: solver_model.PackageId,
+    next_target: usize = 0,
+};
+
+const WeakObsoleteGraph = struct {
+    allocator: std.mem.Allocator,
+    targets: []PackageIdList,
+    sources: []PackageIdList,
+    active: []bool,
+    visited: []bool,
+    component: []usize,
+    component_incoming: []bool,
+    finish_order: PackageIdList,
+    node_stack: PackageIdList,
+    dfs_stack: std.array_list.Managed(WeakDfsFrame),
+
+    fn init(
+        allocator: std.mem.Allocator,
+        formula: *const solver_rules.OwnedFormula,
+    ) error{OutOfMemory}!WeakObsoleteGraph {
+        const package_count = formula.universe.packages.len;
+        const targets = try allocator.alloc(PackageIdList, package_count);
+        errdefer allocator.free(targets);
+        for (targets) |*list| list.* = PackageIdList.init(allocator);
+        errdefer for (targets) |*list| list.deinit();
+        const sources = try allocator.alloc(PackageIdList, package_count);
+        errdefer allocator.free(sources);
+        for (sources) |*list| list.* = PackageIdList.init(allocator);
+        errdefer for (sources) |*list| list.deinit();
+        for (formula.clauses) |clause| {
+            switch (clause.origin) {
+                .obsoletes => |origin| {
+                    const source = formula.universe.package(
+                        origin.dependency.package,
+                    ).?;
+                    const target = formula.universe.package(origin.target).?;
+                    if (std.mem.eql(
+                        u8,
+                        source.source.nevra.name,
+                        target.source.nevra.name,
+                    )) {
+                        continue;
+                    }
+                    try targets[
+                        @intFromEnum(
+                            origin.dependency.package,
+                        )
+                    ].append(origin.target);
+                    try sources[@intFromEnum(origin.target)].append(
+                        origin.dependency.package,
+                    );
+                },
+                else => {},
+            }
+        }
+
+        const active = try allocator.alloc(bool, package_count);
+        errdefer allocator.free(active);
+        const visited = try allocator.alloc(bool, package_count);
+        errdefer allocator.free(visited);
+        const component = try allocator.alloc(usize, package_count);
+        errdefer allocator.free(component);
+        const component_incoming = try allocator.alloc(bool, package_count);
+        errdefer allocator.free(component_incoming);
+        var finish_order = PackageIdList.init(allocator);
+        errdefer finish_order.deinit();
+        try finish_order.ensureTotalCapacity(package_count);
+        var node_stack = PackageIdList.init(allocator);
+        errdefer node_stack.deinit();
+        try node_stack.ensureTotalCapacity(package_count);
+        var dfs_stack = std.array_list.Managed(WeakDfsFrame).init(allocator);
+        errdefer dfs_stack.deinit();
+        try dfs_stack.ensureTotalCapacity(package_count);
+        return .{
+            .allocator = allocator,
+            .targets = targets,
+            .sources = sources,
+            .active = active,
+            .visited = visited,
+            .component = component,
+            .component_incoming = component_incoming,
+            .finish_order = finish_order,
+            .node_stack = node_stack,
+            .dfs_stack = dfs_stack,
+        };
+    }
+
+    fn deinit(self: *WeakObsoleteGraph) void {
+        self.dfs_stack.deinit();
+        self.node_stack.deinit();
+        self.finish_order.deinit();
+        self.allocator.free(self.component_incoming);
+        self.allocator.free(self.component);
+        self.allocator.free(self.visited);
+        self.allocator.free(self.active);
+        for (self.sources) |*list| list.deinit();
+        self.allocator.free(self.sources);
+        for (self.targets) |*list| list.deinit();
+        self.allocator.free(self.targets);
+        self.* = undefined;
+    }
+
+    fn prune(
+        self: *WeakObsoleteGraph,
+        candidates: []solver_model.PackageId,
+    ) usize {
+        if (candidates.len < 2) return candidates.len;
+        @memset(self.active, false);
+        @memset(self.visited, false);
+        @memset(self.component, std.math.maxInt(usize));
+        @memset(self.component_incoming, false);
+        self.finish_order.clearRetainingCapacity();
+        self.node_stack.clearRetainingCapacity();
+        self.dfs_stack.clearRetainingCapacity();
+        for (candidates) |candidate| {
+            self.active[@intFromEnum(candidate)] = true;
+        }
+
+        for (candidates) |root| {
+            if (self.visited[@intFromEnum(root)]) continue;
+            self.visited[@intFromEnum(root)] = true;
+            self.dfs_stack.appendAssumeCapacity(.{ .package = root });
+            while (self.dfs_stack.items.len != 0) {
+                const frame = &self.dfs_stack.items[
+                    self.dfs_stack.items.len - 1
+                ];
+                const edges = self.targets[
+                    @intFromEnum(
+                        frame.package,
+                    )
+                ].items;
+                var descended = false;
+                while (frame.next_target < edges.len) {
+                    const target = edges[frame.next_target];
+                    frame.next_target += 1;
+                    const target_index: usize = @intFromEnum(target);
+                    if (!self.active[target_index] or
+                        self.visited[target_index])
+                    {
+                        continue;
+                    }
+                    self.visited[target_index] = true;
+                    self.dfs_stack.appendAssumeCapacity(.{
+                        .package = target,
+                    });
+                    descended = true;
+                    break;
+                }
+                if (descended) continue;
+                self.finish_order.appendAssumeCapacity(frame.package);
+                _ = self.dfs_stack.pop();
+            }
+        }
+
+        var component_count: usize = 0;
+        var finish_index = self.finish_order.items.len;
+        while (finish_index != 0) {
+            finish_index -= 1;
+            const root = self.finish_order.items[finish_index];
+            if (self.component[@intFromEnum(root)] !=
+                std.math.maxInt(usize))
+            {
+                continue;
+            }
+            self.component[@intFromEnum(root)] = component_count;
+            self.node_stack.appendAssumeCapacity(root);
+            while (self.node_stack.items.len != 0) {
+                const package = self.node_stack.pop().?;
+                for (self.sources[@intFromEnum(package)].items) |source| {
+                    const source_index: usize = @intFromEnum(source);
+                    if (!self.active[source_index] or
+                        self.component[source_index] !=
+                            std.math.maxInt(usize))
+                    {
+                        continue;
+                    }
+                    self.component[source_index] = component_count;
+                    self.node_stack.appendAssumeCapacity(source);
+                }
+            }
+            component_count += 1;
+        }
+
+        for (candidates) |source| {
+            const source_component = self.component[@intFromEnum(source)];
+            for (self.targets[@intFromEnum(source)].items) |target| {
+                if (!self.active[@intFromEnum(target)]) continue;
+                const target_component =
+                    self.component[@intFromEnum(target)];
+                if (source_component != target_component) {
+                    self.component_incoming[target_component] = true;
+                }
+            }
+        }
+        var write_index: usize = 0;
+        for (candidates) |candidate| {
+            const candidate_component =
+                self.component[@intFromEnum(candidate)];
+            if (self.component_incoming[candidate_component]) continue;
+            candidates[write_index] = candidate;
+            write_index += 1;
+        }
+        return write_index;
+    }
+};
+
+fn resolveWeakRequests(
+    allocator: std.mem.Allocator,
+    formula: *const solver_rules.OwnedFormula,
+    session: *solver_search.IncrementalSolver,
+    options: WeakOptions,
+    accepted: *std.array_list.Managed(AcceptedWeak),
+) solver_search.SolveError!void {
+    const package_count = formula.universe.packages.len;
+    const probed = try allocator.alloc(bool, package_count);
+    defer allocator.free(probed);
+    @memset(probed, false);
+    const not_installable = try allocator.alloc(bool, package_count);
+    defer allocator.free(not_installable);
+    @memset(not_installable, false);
+    for (formula.clauses) |clause| {
+        switch (clause.origin) {
+            .not_installable => |package_id| {
+                not_installable[@intFromEnum(package_id)] = true;
+            },
+            else => {},
+        }
+    }
+    const old_versions = try allocator.alloc(bool, package_count);
+    defer allocator.free(old_versions);
+    @memset(old_versions, false);
+    try identifyOldVersions(allocator, formula.universe, old_versions);
+    var obsolete_graph = try WeakObsoleteGraph.init(allocator, formula);
+    defer obsolete_graph.deinit();
+    const pool_seen = try allocator.alloc(bool, package_count);
+    defer allocator.free(pool_seen);
+    const eligible = try allocator.alloc(bool, package_count);
+    defer allocator.free(eligible);
+    const preferred = try allocator.alloc(bool, package_count);
+    defer allocator.free(preferred);
+    const active_recommendations = try allocator.alloc(
+        bool,
+        formula.weak_requests.len,
+    );
+    defer allocator.free(active_recommendations);
+    const supplement_dependencies = try allocator.alloc(
+        ?solver_rules.DependencyRef,
+        package_count,
+    );
+    defer allocator.free(supplement_dependencies);
+    var weak_pool = PackageIdList.init(allocator);
+    defer weak_pool.deinit();
+    var supplements = PackageIdList.init(allocator);
+    defer supplements.deinit();
+    var recommendation_candidates = PackageIdList.init(allocator);
+    defer recommendation_candidates.deinit();
+    var common_candidates = CommonCandidateList.init(allocator);
+    defer common_candidates.deinit();
+    var common_provides = CommonProvideList.init(allocator);
+    defer common_provides.deinit();
+
+    while (true) {
+        var changed = false;
+        weak_pool.clearRetainingCapacity();
+        supplements.clearRetainingCapacity();
+        @memset(pool_seen, false);
+        @memset(active_recommendations, false);
+        @memset(supplement_dependencies, null);
+
+        for (formula.weak_requests) |request| {
+            if (request.direction != .reverse or
+                request.dependency.kind != .supplements or
+                session.selected(request.owner).?)
+            {
+                continue;
+            }
+            const owner_index: usize = @intFromEnum(request.owner);
+            if (not_installable[owner_index] or
+                !supplementActive(formula, request, session, options))
+            {
+                continue;
+            }
+            if (!pool_seen[owner_index]) {
+                pool_seen[owner_index] = true;
+                try weak_pool.append(request.owner);
+                try supplements.append(request.owner);
+            }
+            if (supplement_dependencies[owner_index] == null) {
+                supplement_dependencies[owner_index] = request.dependency;
+            }
+        }
+
+        for (formula.weak_requests, 0..) |request, request_index| {
+            if (request.direction != .forward or
+                request.dependency.kind != .recommends or
+                !session.selected(request.owner).?)
+            {
+                continue;
+            }
+            const owner = formula.universe.package(request.owner).?;
+            if (!options.add_already_recommended and
+                owner.installed != null)
+            {
+                continue;
+            }
+            const candidates = formula.weakCandidates(request);
+            if (request.system_satisfied or
+                anySelected(candidates, session))
+            {
+                continue;
+            }
+            active_recommendations[request_index] = true;
+            for (candidates) |candidate| {
+                const candidate_index: usize = @intFromEnum(candidate);
+                if (not_installable[candidate_index] or
+                    pool_seen[candidate_index])
+                {
+                    continue;
+                }
+                pool_seen[candidate_index] = true;
+                try weak_pool.append(candidate);
+            }
+        }
+        if (weak_pool.items.len == 0) break;
+
+        weak_pool.shrinkRetainingCapacity(
+            pruneWeakPool(
+                formula.universe,
+                formula.architecture,
+                &obsolete_graph,
+                weak_pool.items,
+            ),
+        );
+        @memset(eligible, false);
+        for (weak_pool.items) |candidate| {
+            eligible[@intFromEnum(candidate)] = true;
+        }
+        var write_index: usize = 0;
+        for (supplements.items) |candidate| {
+            const candidate_index: usize = @intFromEnum(candidate);
+            if (!eligible[candidate_index] or probed[candidate_index]) {
+                continue;
+            }
+            supplements.items[write_index] = candidate;
+            write_index += 1;
+        }
+        supplements.shrinkRetainingCapacity(write_index);
+        if (supplements.items.len > 1) {
+            try rankSupplementCandidates(
+                formula.universe,
+                formula.architecture,
+                supplements.items,
+                old_versions,
+                &common_candidates,
+                &common_provides,
+            );
+        }
+        markWeakPreferred(formula, session, preferred);
+        std.sort.block(
+            solver_model.PackageId,
+            supplements.items,
+            preferred,
+            weakPreferredLessThan,
+        );
+        for (supplements.items) |candidate| {
+            const candidate_index: usize = @intFromEnum(candidate);
+            probed[candidate_index] = true;
+            if (!try session.trySelect(candidate)) continue;
+            try accepted.append(.{
+                .package = candidate,
+                .dependency = supplement_dependencies[candidate_index].?,
+            });
+            changed = true;
+        }
+
+        markWeakPreferred(formula, session, preferred);
+        for (formula.weak_requests, 0..) |request, request_index| {
+            if (!active_recommendations[request_index] or
+                !session.selected(request.owner).?)
+            {
+                continue;
+            }
+            const candidates = formula.weakCandidates(request);
+            if (request.system_satisfied or
+                anySelected(candidates, session))
+            {
+                continue;
+            }
+            recommendation_candidates.clearRetainingCapacity();
+            for (candidates) |candidate| {
+                const candidate_index: usize = @intFromEnum(candidate);
+                if (!eligible[candidate_index] or probed[candidate_index]) {
+                    continue;
+                }
+                try recommendation_candidates.append(candidate);
+            }
+            std.sort.block(
+                solver_model.PackageId,
+                recommendation_candidates.items,
+                preferred,
+                weakPreferredLessThan,
+            );
+            for (recommendation_candidates.items) |candidate| {
+                const candidate_index: usize = @intFromEnum(candidate);
+                probed[candidate_index] = true;
+                if (!try session.trySelect(candidate)) continue;
+                try accepted.append(.{
+                    .package = candidate,
+                    .dependency = request.dependency,
+                });
+                changed = true;
+                break;
+            }
+        }
+
+        if (!changed) break;
+    }
+
+    var write_index: usize = 0;
+    for (accepted.items) |entry| {
+        if (!session.selected(entry.package).?) continue;
+        accepted.items[write_index] = entry;
+        write_index += 1;
+    }
+    accepted.shrinkRetainingCapacity(write_index);
+}
+
+fn rankSupplementCandidates(
+    universe: *const solver_model.Universe,
+    architecture: ?solver_model.ArchitecturePolicy,
+    candidates: []solver_model.PackageId,
+    old_versions: []const bool,
+    ranked: *CommonCandidateList,
+    provides: *CommonProvideList,
+) error{OutOfMemory}!void {
+    if (architecture == null) return;
+    ranked.clearRetainingCapacity();
+    provides.clearRetainingCapacity();
+    for (candidates, 0..) |candidate, original_order| {
+        try ranked.append(.{
+            .package = candidate,
+            .original_order = original_order,
+            .old_version = old_versions[@intFromEnum(candidate)],
+            .installed_name = false,
+        });
+    }
+    std.sort.block(
+        CommonCandidate,
+        ranked.items,
+        {},
+        currentVersionLessThan,
+    );
+    for (ranked.items, 0..) |*candidate, original_order| {
+        candidate.original_order = original_order;
+    }
+    try collectCommonProvides(universe, ranked.items, provides);
+    std.sort.heap(
+        CommonProvide,
+        provides.items,
+        {},
+        commonProvideLessThan,
+    );
+    scoreCommonProvides(ranked.items, provides.items, universe);
+    std.sort.heap(
+        CommonCandidate,
+        ranked.items,
+        {},
+        commonCandidateLessThan,
+    );
+    for (ranked.items, candidates) |candidate, *output| {
+        output.* = candidate.package;
+    }
+}
+
+fn pruneWeakPool(
+    universe: *const solver_model.Universe,
+    architecture: ?solver_model.ArchitecturePolicy,
+    obsolete_graph: *WeakObsoleteGraph,
+    candidates: []solver_model.PackageId,
+) usize {
+    var best_priority: ?i64 = null;
+    for (candidates) |candidate| {
+        const package = universe.package(candidate).?;
+        if (package.installed != null) continue;
+        const priority = globalRepositoryPriority(universe, package.*);
+        best_priority = if (best_priority) |best|
+            @min(best, priority)
+        else
+            priority;
+    }
+    var write_index: usize = 0;
+    for (candidates) |candidate| {
+        const package = universe.package(candidate).?;
+        if (package.installed == null and
+            best_priority != null and
+            globalRepositoryPriority(universe, package.*) != best_priority.?)
+        {
+            continue;
+        }
+        candidates[write_index] = candidate;
+        write_index += 1;
+    }
+    if (architecture) |policy| {
+        const target_architecture =
+            policy.force_arch orelse policy.native_arch;
+        var best_machine_rank: ?usize = null;
+        for (candidates[0..write_index]) |candidate| {
+            const package = universe.package(candidate).?;
+            const rank = solver_rules.architectureRank(
+                target_architecture,
+                package.source.nevra.arch,
+            ) orelse continue;
+            if (rank == 0) continue;
+            best_machine_rank = if (best_machine_rank) |best|
+                @min(best, rank)
+            else
+                rank;
+        }
+        if (best_machine_rank) |best| {
+            const priority_count = write_index;
+            write_index = 0;
+            for (candidates[0..priority_count]) |candidate| {
+                const package = universe.package(candidate).?;
+                const rank = solver_rules.architectureRank(
+                    target_architecture,
+                    package.source.nevra.arch,
+                ) orelse continue;
+                if (rank != 0 and rank != best) continue;
+                candidates[write_index] = candidate;
+                write_index += 1;
+            }
+        }
+    }
+    const retained = candidates[0..write_index];
+    std.sort.heap(
+        solver_model.PackageId,
+        retained,
+        universe,
+        weakVersionLessThan,
+    );
+    write_index = 0;
+    for (retained, 0..) |candidate, candidate_index| {
+        if (candidate_index != 0) {
+            const package = universe.package(candidate).?;
+            const previous = universe.package(retained[candidate_index - 1]).?;
+            if (std.mem.eql(
+                u8,
+                package.source.nevra.name,
+                previous.source.nevra.name,
+            )) {
+                continue;
+            }
+        }
+        candidates[write_index] = candidate;
+        write_index += 1;
+    }
+    return obsolete_graph.prune(candidates[0..write_index]);
+}
+
+fn weakVersionLessThan(
+    universe: *const solver_model.Universe,
+    left: solver_model.PackageId,
+    right: solver_model.PackageId,
+) bool {
+    const left_package = universe.package(left).?;
+    const right_package = universe.package(right).?;
+    const name_order = std.mem.order(
+        u8,
+        left_package.source.nevra.name,
+        right_package.source.nevra.name,
+    );
+    if (name_order != .eq) return name_order == .lt;
+    const version_order = query_index.comparePackageVersions(
+        left_package.source.*,
+        right_package.source.*,
+    );
+    if (version_order != 0) return version_order > 0;
+    if ((left_package.installed != null) !=
+        (right_package.installed != null))
+    {
+        return left_package.installed != null;
+    }
+    return @intFromEnum(left) < @intFromEnum(right);
+}
+
+fn markWeakPreferred(
+    formula: *const solver_rules.OwnedFormula,
+    session: *const solver_search.IncrementalSolver,
+    preferred: []bool,
+) void {
+    @memset(preferred, false);
+    for (formula.universe.packages) |package| {
+        if (package.installed != null) {
+            preferred[@intFromEnum(package.id)] = true;
+        }
+    }
+    for (formula.weak_requests) |request| {
+        switch (request.dependency.kind) {
+            .suggests => {
+                if (!session.selected(request.owner).?) continue;
+                for (formula.weakCandidates(request)) |candidate| {
+                    preferred[@intFromEnum(candidate)] = true;
+                }
+            },
+            .enhances => {
+                if (request.system_satisfied or
+                    anySelected(formula.weakCandidates(request), session))
+                {
+                    preferred[@intFromEnum(request.owner)] = true;
+                }
+            },
+            else => {},
+        }
+    }
+}
+
+fn weakPreferredLessThan(
+    preferred: []const bool,
+    left: solver_model.PackageId,
+    right: solver_model.PackageId,
+) bool {
+    return preferred[@intFromEnum(left)] and
+        !preferred[@intFromEnum(right)];
+}
+
+fn supplementActive(
+    formula: *const solver_rules.OwnedFormula,
+    request: solver_rules.WeakRequest,
+    session: *const solver_search.IncrementalSolver,
+    options: WeakOptions,
+) bool {
+    if (request.system_satisfied and options.add_already_recommended) {
+        return true;
+    }
+    for (formula.weakCandidates(request)) |candidate| {
+        if (!session.selected(candidate).?) continue;
+        if (options.add_already_recommended or
+            formula.universe.package(candidate).?.installed == null)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn anySelected(
+    candidates: []const solver_model.PackageId,
+    session: *const solver_search.IncrementalSolver,
+) bool {
+    for (candidates) |candidate| {
+        if (session.selected(candidate).?) return true;
+    }
+    return false;
+}
 
 fn appendCandidateGroup(
     clause: solver_rules.Clause,
@@ -581,6 +1331,7 @@ fn rankCandidateGroups(
             &common_names,
             old_versions,
             &installed_names,
+            true,
         );
     }
 }
@@ -597,6 +1348,7 @@ fn rankCommonProvides(
     names: *std.StringHashMap(void),
     old_versions: []const bool,
     installed_names: *const std.StringHashMap(void),
+    promote_installed_names: bool,
 ) error{OutOfMemory}!void {
     if (architecture == null) return;
     var bucket_start: usize = 0;
@@ -661,36 +1413,7 @@ fn rankCommonProvides(
         for (frontier.items, 0..) |*candidate, original_order| {
             candidate.original_order = original_order;
         }
-        for (frontier.items, 0..) |candidate, candidate_index| {
-            const package = universe.package(
-                candidate.package,
-            ) orelse unreachable;
-            const self_provide = packageSelfProvide(package.source.*);
-            var has_self_provide = false;
-            for (package.relationEntries(universe, .provides)) |relation| {
-                if (equivalentSelfProvide(relation, self_provide)) {
-                    has_self_provide = true;
-                }
-                if (!comparableCommonProvide(relation)) continue;
-                try provides.append(.{
-                    .candidate_index = candidate_index,
-                    .relation = relation,
-                    .strict_less = relation.comparison == .lt,
-                    .ordinal = provides.items.len,
-                });
-            }
-            if (!has_self_provide and
-                !sourceArchitecture(package.source.nevra.arch) and
-                comparableCommonProvide(self_provide))
-            {
-                try provides.append(.{
-                    .candidate_index = candidate_index,
-                    .relation = self_provide,
-                    .strict_less = false,
-                    .ordinal = provides.items.len,
-                });
-            }
-        }
+        try collectCommonProvides(universe, frontier.items, provides);
         std.sort.heap(
             CommonProvide,
             provides.items,
@@ -704,12 +1427,14 @@ fn rankCommonProvides(
             {},
             commonCandidateLessThan,
         );
-        std.sort.block(
-            CommonCandidate,
-            frontier.items,
-            {},
-            installedNameLessThan,
-        );
+        if (promote_installed_names) {
+            std.sort.block(
+                CommonCandidate,
+                frontier.items,
+                {},
+                installedNameLessThan,
+            );
+        }
 
         var output = bucket_start;
         for (frontier.items) |candidate| {
@@ -721,6 +1446,43 @@ fn rankCommonProvides(
             output += 1;
         }
         bucket_start = bucket_end;
+    }
+}
+
+fn collectCommonProvides(
+    universe: *const solver_model.Universe,
+    candidates: []const CommonCandidate,
+    provides: *CommonProvideList,
+) error{OutOfMemory}!void {
+    for (candidates, 0..) |candidate, candidate_index| {
+        const package = universe.package(
+            candidate.package,
+        ) orelse unreachable;
+        const self_provide = packageSelfProvide(package.source.*);
+        var has_self_provide = false;
+        for (package.relationEntries(universe, .provides)) |relation| {
+            if (equivalentSelfProvide(relation, self_provide)) {
+                has_self_provide = true;
+            }
+            if (!comparableCommonProvide(relation)) continue;
+            try provides.append(.{
+                .candidate_index = candidate_index,
+                .relation = relation,
+                .strict_less = relation.comparison == .lt,
+                .ordinal = provides.items.len,
+            });
+        }
+        if (!has_self_provide and
+            !sourceArchitecture(package.source.nevra.arch) and
+            comparableCommonProvide(self_provide))
+        {
+            try provides.append(.{
+                .candidate_index = candidate_index,
+                .relation = self_provide,
+                .strict_less = false,
+                .ordinal = provides.items.len,
+            });
+        }
     }
 }
 
@@ -1182,7 +1944,29 @@ fn validateBaseFormula(
     }
     for (formula.weak_requests) |request| {
         _ = try packageIndex(request.owner, package_count);
-        _ = try packageIndex(request.dependency.package, package_count);
+        if (request.dependency.package != request.owner) {
+            return error.InvalidFormula;
+        }
+        const owner = formula.universe.package(request.owner).?;
+        const relations = switch (request.direction) {
+            .forward => switch (request.dependency.kind) {
+                .recommends, .suggests => owner.relationEntries(
+                    formula.universe,
+                    request.dependency.kind,
+                ),
+                else => return error.InvalidFormula,
+            },
+            .reverse => switch (request.dependency.kind) {
+                .supplements, .enhances => owner.relationEntries(
+                    formula.universe,
+                    request.dependency.kind,
+                ),
+                else => return error.InvalidFormula,
+            },
+        };
+        if (request.dependency.index >= relations.len) {
+            return error.InvalidFormula;
+        }
         const start: usize = @intCast(request.candidates.start);
         const len: usize = @intCast(request.candidates.len);
         if (start > formula.weak_candidates.len or
@@ -1229,6 +2013,19 @@ fn testPackage(
 
 fn testArchitecture() solver_model.ArchitecturePolicy {
     return .{ .native_arch = "x86_64" };
+}
+
+fn versionedTestRelation(
+    name: []const u8,
+    comparison: metadata.CompareOp,
+    version: []const u8,
+) metadata.Relation {
+    return .{
+        .name = name,
+        .flags = "versioned",
+        .comparison = comparison,
+        .version = version,
+    };
 }
 
 test "contextual install ranking applies repository priority before EVR" {
@@ -2106,6 +2903,772 @@ test "newer package outside the candidate queue demotes an old provider" {
         &.{ @enumFromInt(1), @enumFromInt(0) },
         requirement_candidates.?,
     );
+}
+
+test "weak recommendations are optional and policy controlled" {
+    var relations = [_]metadata.Relation{
+        .{ .name = "addon" },
+    };
+    var packages = [_]metadata.Package{
+        testPackage("addon", "1"),
+        testPackage("application", "1"),
+    };
+    packages[1].recommends = .{ .start = 0, .len = 1 };
+    const repository = metadata.RepositoryModel{
+        .packages = &packages,
+        .relations = &relations,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &repository }},
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(1) },
+        }} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    var enabled = try prepared.solveWeak(
+        std.testing.allocator,
+        .{},
+    );
+    defer enabled.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ true, true },
+        enabled.result.satisfiable.values,
+    );
+    try std.testing.expectEqual(@as(usize, 1), enabled.accepted.len);
+    try std.testing.expectEqual(
+        @as(solver_model.PackageId, @enumFromInt(0)),
+        enabled.accepted[0].package,
+    );
+    try std.testing.expectEqual(
+        metadata.DependencyKind.recommends,
+        enabled.accepted[0].dependency.kind,
+    );
+
+    var disabled = try prepared.solveWeak(
+        std.testing.allocator,
+        .{ .enabled = false },
+    );
+    defer disabled.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, true },
+        disabled.result.satisfiable.values,
+    );
+    try std.testing.expectEqual(@as(usize, 0), disabled.accepted.len);
+}
+
+test "installed owners do not add old recommendations by default" {
+    var installed_relations = [_]metadata.Relation{
+        .{ .name = "addon" },
+    };
+    var installed_packages = [_]metadata.Package{
+        testPackage("application", "1"),
+    };
+    installed_packages[0].recommends = .{ .start = 0, .len = 1 };
+    const installed_model = metadata.RepositoryModel{
+        .packages = &installed_packages,
+        .relations = &installed_relations,
+    };
+    const installed_states = [_]solver_model.InstalledState{
+        .{ .rpmdb_hnum = 1 },
+    };
+    var available_packages = [_]metadata.Package{
+        testPackage("addon", "1"),
+    };
+    const available_model = metadata.RepositoryModel{
+        .packages = &available_packages,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{
+            .{
+                .id = "@System",
+                .model = &installed_model,
+                .kind = .installed,
+                .installed_states = &installed_states,
+            },
+            .{ .id = "available", .model = &available_model },
+        },
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    var default_result = try prepared.solveWeak(
+        std.testing.allocator,
+        .{},
+    );
+    defer default_result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ true, false },
+        default_result.result.satisfiable.values,
+    );
+
+    var add_existing = try prepared.solveWeak(
+        std.testing.allocator,
+        .{ .add_already_recommended = true },
+    );
+    defer add_existing.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ true, true },
+        add_existing.result.satisfiable.values,
+    );
+}
+
+test "weak recommendation falls back after its best provider conflicts" {
+    var relations = [_]metadata.Relation{
+        versionedTestRelation("addon-api", .eq, "2"),
+        .{ .name = "blocker" },
+        versionedTestRelation("addon-api", .eq, "1"),
+        versionedTestRelation("addon-api", .ge, "1"),
+    };
+    var packages = [_]metadata.Package{
+        testPackage("best-addon", "1"),
+        testPackage("fallback-addon", "1"),
+        testPackage("blocker", "1"),
+        testPackage("application", "1"),
+    };
+    packages[0].provides = .{ .start = 0, .len = 1 };
+    packages[0].conflicts = .{ .start = 1, .len = 1 };
+    packages[1].provides = .{ .start = 2, .len = 1 };
+    packages[3].recommends = .{ .start = 3, .len = 1 };
+    const repository = metadata.RepositoryModel{
+        .packages = &packages,
+        .relations = &relations,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &repository }},
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{
+            .{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(2) },
+            },
+            .{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(3) },
+            },
+        } },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    var result = try prepared.solveWeak(std.testing.allocator, .{});
+    defer result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, true, true, true },
+        result.result.satisfiable.values,
+    );
+    try std.testing.expectEqual(
+        @as(solver_model.PackageId, @enumFromInt(1)),
+        result.accepted[0].package,
+    );
+}
+
+test "weak recommendations do not cross repository or version pruning" {
+    var preferred_relations = [_]metadata.Relation{
+        versionedTestRelation("addon-api", .eq, "2"),
+        .{ .name = "blocker" },
+        versionedTestRelation("addon-api", .ge, "1"),
+    };
+    var preferred_packages = [_]metadata.Package{
+        testPackage("best-addon", "2"),
+        testPackage("blocker", "1"),
+        testPackage("application", "1"),
+    };
+    preferred_packages[0].provides = .{ .start = 0, .len = 1 };
+    preferred_packages[0].conflicts = .{ .start = 1, .len = 1 };
+    preferred_packages[2].recommends = .{ .start = 2, .len = 1 };
+    const preferred_model = metadata.RepositoryModel{
+        .packages = &preferred_packages,
+        .relations = &preferred_relations,
+    };
+    var fallback_relations = [_]metadata.Relation{
+        versionedTestRelation("addon-api", .eq, "1"),
+    };
+    var fallback_packages = [_]metadata.Package{
+        testPackage("fallback-addon", "1"),
+    };
+    fallback_packages[0].provides = .{ .start = 0, .len = 1 };
+    const fallback_model = metadata.RepositoryModel{
+        .packages = &fallback_packages,
+        .relations = &fallback_relations,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{
+            .{
+                .id = "preferred",
+                .model = &preferred_model,
+                .priority = 10,
+            },
+            .{
+                .id = "fallback",
+                .model = &fallback_model,
+                .priority = 50,
+            },
+        },
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{
+            .{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(1) },
+            },
+            .{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(2) },
+            },
+        } },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    var result = try prepared.solveWeak(std.testing.allocator, .{});
+    defer result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, true, true, false },
+        result.result.satisfiable.values,
+    );
+    try std.testing.expectEqual(@as(usize, 0), result.accepted.len);
+
+    var same_name_relations = [_]metadata.Relation{
+        .{ .name = "blocker" },
+        .{ .name = "addon" },
+    };
+    var same_name_packages = [_]metadata.Package{
+        testPackage("addon", "2"),
+        testPackage("addon", "1"),
+        testPackage("blocker", "1"),
+        testPackage("application", "1"),
+    };
+    same_name_packages[0].conflicts = .{ .start = 0, .len = 1 };
+    same_name_packages[3].recommends = .{ .start = 1, .len = 1 };
+    const same_name_model = metadata.RepositoryModel{
+        .packages = &same_name_packages,
+        .relations = &same_name_relations,
+    };
+    var same_name_universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &same_name_model }},
+    );
+    defer same_name_universe.deinit();
+    var same_name_base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &same_name_universe,
+        .{ .jobs = &.{
+            .{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(2) },
+            },
+            .{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(3) },
+            },
+        } },
+        testArchitecture(),
+    );
+    defer same_name_base.deinit();
+    var same_name_prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &same_name_base,
+    );
+    defer same_name_prepared.deinit();
+
+    var same_name_result = try same_name_prepared.solveWeak(
+        std.testing.allocator,
+        .{},
+    );
+    defer same_name_result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, false, true, true },
+        same_name_result.result.satisfiable.values,
+    );
+}
+
+test "rejected weak candidates remain in later pruning frontiers" {
+    var preferred_relations = [_]metadata.Relation{
+        versionedTestRelation("addon-api", .eq, "2"),
+        .{ .name = "blocker" },
+        versionedTestRelation("addon-api", .ge, "1"),
+        .{ .name = "good-addon" },
+    };
+    var preferred_packages = [_]metadata.Package{
+        testPackage("best-addon", "1"),
+        testPackage("good-addon", "1"),
+        testPackage("blocker", "1"),
+        testPackage("application", "1"),
+    };
+    preferred_packages[0].provides = .{ .start = 0, .len = 1 };
+    preferred_packages[0].conflicts = .{ .start = 1, .len = 1 };
+    preferred_packages[3].recommends = .{ .start = 2, .len = 2 };
+    const preferred_model = metadata.RepositoryModel{
+        .packages = &preferred_packages,
+        .relations = &preferred_relations,
+    };
+    var fallback_relations = [_]metadata.Relation{
+        versionedTestRelation("addon-api", .eq, "1"),
+    };
+    var fallback_packages = [_]metadata.Package{
+        testPackage("fallback-addon", "1"),
+    };
+    fallback_packages[0].provides = .{ .start = 0, .len = 1 };
+    const fallback_model = metadata.RepositoryModel{
+        .packages = &fallback_packages,
+        .relations = &fallback_relations,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{
+            .{
+                .id = "preferred",
+                .model = &preferred_model,
+                .priority = 10,
+            },
+            .{
+                .id = "fallback",
+                .model = &fallback_model,
+                .priority = 50,
+            },
+        },
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{
+            .{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(2) },
+            },
+            .{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(3) },
+            },
+        } },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    var result = try prepared.solveWeak(std.testing.allocator, .{});
+    defer result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, true, true, true, false },
+        result.result.satisfiable.values,
+    );
+    try std.testing.expectEqual(@as(usize, 1), result.accepted.len);
+    try std.testing.expectEqual(
+        @as(solver_model.PackageId, @enumFromInt(1)),
+        result.accepted[0].package,
+    );
+}
+
+test "weak pruning applies architecture and obsoletes policy" {
+    var architecture_relations = [_]metadata.Relation{
+        .{ .name = "addon" },
+    };
+    var architecture_packages = [_]metadata.Package{
+        testPackage("addon", "1"),
+        testPackage("addon", "99"),
+        testPackage("application", "1"),
+    };
+    architecture_packages[1].nevra.arch = "i686";
+    architecture_packages[2].recommends = .{ .start = 0, .len = 1 };
+    const architecture_model = metadata.RepositoryModel{
+        .packages = &architecture_packages,
+        .relations = &architecture_relations,
+    };
+    var architecture_universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &architecture_model }},
+    );
+    defer architecture_universe.deinit();
+    var architecture_base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &architecture_universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(2) },
+        }} },
+        testArchitecture(),
+    );
+    defer architecture_base.deinit();
+    var architecture_prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &architecture_base,
+    );
+    defer architecture_prepared.deinit();
+
+    var architecture_result = try architecture_prepared.solveWeak(
+        std.testing.allocator,
+        .{},
+    );
+    defer architecture_result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ true, false, true },
+        architecture_result.result.satisfiable.values,
+    );
+
+    var obsolete_relations = [_]metadata.Relation{
+        .{ .name = "addon-api" },
+        .{ .name = "old-addon" },
+        .{ .name = "addon-api" },
+        .{ .name = "addon-api" },
+    };
+    var obsolete_packages = [_]metadata.Package{
+        testPackage("replacement-addon", "1"),
+        testPackage("old-addon", "1"),
+        testPackage("application", "1"),
+    };
+    obsolete_packages[0].provides = .{ .start = 0, .len = 1 };
+    obsolete_packages[0].obsoletes = .{ .start = 1, .len = 1 };
+    obsolete_packages[1].provides = .{ .start = 2, .len = 1 };
+    obsolete_packages[2].recommends = .{ .start = 3, .len = 1 };
+    const obsolete_model = metadata.RepositoryModel{
+        .packages = &obsolete_packages,
+        .relations = &obsolete_relations,
+    };
+    var obsolete_universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &obsolete_model }},
+    );
+    defer obsolete_universe.deinit();
+    var obsolete_base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &obsolete_universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(2) },
+        }} },
+        testArchitecture(),
+    );
+    defer obsolete_base.deinit();
+    var obsolete_prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &obsolete_base,
+    );
+    defer obsolete_prepared.deinit();
+
+    var obsolete_result = try obsolete_prepared.solveWeak(
+        std.testing.allocator,
+        .{},
+    );
+    defer obsolete_result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ true, false, true },
+        obsolete_result.result.satisfiable.values,
+    );
+}
+
+test "weak obsoletes pruning preserves mutual replacement cycles" {
+    var relations = [_]metadata.Relation{
+        .{ .name = "addon-api" },
+        .{ .name = "second-addon" },
+        .{ .name = "addon-api" },
+        .{ .name = "first-addon" },
+        .{ .name = "addon-api" },
+    };
+    var packages = [_]metadata.Package{
+        testPackage("first-addon", "1"),
+        testPackage("second-addon", "1"),
+        testPackage("application", "1"),
+    };
+    packages[0].provides = .{ .start = 0, .len = 1 };
+    packages[0].obsoletes = .{ .start = 1, .len = 1 };
+    packages[1].provides = .{ .start = 2, .len = 1 };
+    packages[1].obsoletes = .{ .start = 3, .len = 1 };
+    packages[2].recommends = .{ .start = 4, .len = 1 };
+    const repository = metadata.RepositoryModel{
+        .packages = &packages,
+        .relations = &relations,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &repository }},
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(2) },
+        }} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    var result = try prepared.solveWeak(std.testing.allocator, .{});
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.accepted.len);
+    try std.testing.expect(
+        result.result.satisfiable.values[0] or
+            result.result.satisfiable.values[1],
+    );
+}
+
+test "weak supplements require a newly selected condition by default" {
+    var available_relations = [_]metadata.Relation{
+        .{ .name = "application" },
+    };
+    var available_packages = [_]metadata.Package{
+        testPackage("addon", "1"),
+        testPackage("application", "1"),
+    };
+    available_packages[0].supplements = .{ .start = 0, .len = 1 };
+    const available_model = metadata.RepositoryModel{
+        .packages = &available_packages,
+        .relations = &available_relations,
+    };
+    var available_universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &available_model }},
+    );
+    defer available_universe.deinit();
+    var available_base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &available_universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(1) },
+        }} },
+        testArchitecture(),
+    );
+    defer available_base.deinit();
+    var available_prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &available_base,
+    );
+    defer available_prepared.deinit();
+
+    var selected = try available_prepared.solveWeak(
+        std.testing.allocator,
+        .{},
+    );
+    defer selected.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ true, true },
+        selected.result.satisfiable.values,
+    );
+    try std.testing.expectEqual(
+        metadata.DependencyKind.supplements,
+        selected.accepted[0].dependency.kind,
+    );
+
+    var installed_packages = [_]metadata.Package{
+        testPackage("application", "1"),
+    };
+    const installed_model = metadata.RepositoryModel{
+        .packages = &installed_packages,
+    };
+    const installed_states = [_]solver_model.InstalledState{
+        .{ .rpmdb_hnum = 1 },
+    };
+    var installed_universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{
+            .{
+                .id = "@System",
+                .model = &installed_model,
+                .kind = .installed,
+                .installed_states = &installed_states,
+            },
+            .{ .id = "available", .model = &available_model },
+        },
+    );
+    defer installed_universe.deinit();
+    var installed_base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &installed_universe,
+        .{ .jobs = &.{} },
+        testArchitecture(),
+    );
+    defer installed_base.deinit();
+    var installed_prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &installed_base,
+    );
+    defer installed_prepared.deinit();
+
+    var suppressed = try installed_prepared.solveWeak(
+        std.testing.allocator,
+        .{},
+    );
+    defer suppressed.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ true, false, false },
+        suppressed.result.satisfiable.values,
+    );
+}
+
+test "suggestions order conflicting active supplements" {
+    var relations = [_]metadata.Relation{
+        .{ .name = "application" },
+        .{ .name = "preferred-addon" },
+        .{ .name = "application" },
+        .{ .name = "preferred-addon" },
+    };
+    var packages = [_]metadata.Package{
+        testPackage("first-addon", "1"),
+        testPackage("preferred-addon", "1"),
+        testPackage("application", "1"),
+    };
+    packages[0].supplements = .{ .start = 0, .len = 1 };
+    packages[0].conflicts = .{ .start = 1, .len = 1 };
+    packages[1].supplements = .{ .start = 2, .len = 1 };
+    packages[2].suggests = .{ .start = 3, .len = 1 };
+    const repository = metadata.RepositoryModel{
+        .packages = &packages,
+        .relations = &relations,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &repository }},
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(2) },
+        }} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    var result = try prepared.solveWeak(std.testing.allocator, .{});
+    defer result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, true, true },
+        result.result.satisfiable.values,
+    );
+    try std.testing.expectEqual(
+        @as(solver_model.PackageId, @enumFromInt(1)),
+        result.accepted[0].package,
+    );
+}
+
+test "weak recommendation closure ignores suggestions and enhances" {
+    var relations = [_]metadata.Relation{
+        .{ .name = "helper" },
+        .{ .name = "addon" },
+        .{ .name = "suggested" },
+        .{ .name = "application" },
+    };
+    var packages = [_]metadata.Package{
+        testPackage("helper", "1"),
+        testPackage("addon", "1"),
+        testPackage("suggested", "1"),
+        testPackage("enhanced", "1"),
+        testPackage("application", "1"),
+    };
+    packages[1].recommends = .{ .start = 0, .len = 1 };
+    packages[3].enhances = .{ .start = 3, .len = 1 };
+    packages[4].recommends = .{ .start = 1, .len = 1 };
+    packages[4].suggests = .{ .start = 2, .len = 1 };
+    const repository = metadata.RepositoryModel{
+        .packages = &packages,
+        .relations = &relations,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &repository }},
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(4) },
+        }} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    var result = try prepared.solveWeak(std.testing.allocator, .{});
+    defer result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ true, true, false, false, true },
+        result.result.satisfiable.values,
+    );
+    try std.testing.expectEqual(@as(usize, 2), result.accepted.len);
 }
 
 test "contextual requirement falls back after the best provider conflicts" {
@@ -3136,6 +4699,8 @@ fn allocationFailureCase(allocator: std.mem.Allocator) !void {
     defer prepared.deinit();
     var result = try prepared.solve(allocator);
     defer result.deinit();
+    var weak_result = try prepared.solveWeak(allocator, .{});
+    defer weak_result.deinit();
 }
 
 test "policy preparation cleans up every allocation failure" {
