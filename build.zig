@@ -1205,6 +1205,37 @@ pub fn build(b: *Build) void {
 
     {
         const test_mod = b.createModule(.{
+            .root_source_file = b.path("repomd/solver_oracle_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "sqlite", .module = sqlite_dep.module("sqlite") },
+            },
+        });
+        test_mod.addImport("xml", xml_mod);
+        test_mod.addImport("rpm_header", rpmzig_header_mod);
+        test_mod.addImport("rpm_pkgfile", rpmzig_pkgfile_mod);
+        test_mod.addImport("rpmdb_test", rpmzig_rpmdb_test_mod);
+        test_mod.addIncludePath(b.path("include"));
+        test_mod.addIncludePath(b.path("rpmzig"));
+        addLibsolvCoreIncludes(
+            test_mod,
+            libsolv_include,
+            libsolv_flat_include,
+        );
+        test_mod.addObjectFile(libsolv.getEmittedBin());
+        const tests = b.addTest(.{ .root_module = test_mod });
+        const run_tests = b.addRunArtifact(tests);
+        const oracle_test_step = b.step(
+            "libsolv-oracle-test",
+            "Run the opt-in canonical libsolv solver oracle tests",
+        );
+        oracle_test_step.dependOn(&run_tests.step);
+    }
+
+    {
+        const test_mod = b.createModule(.{
             .root_source_file = b.path("plugins/metalink/xml.zig"),
             .target = target,
             .optimize = optimize,

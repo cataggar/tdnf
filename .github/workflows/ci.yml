@@ -52,7 +52,9 @@ jobs:
           sudo ./scripts/smoke-rpmzig.sh ./out
 
       - name: Zig unit tests
-        run: zig build test --prefix ./out
+        run: |
+          zig build test --prefix ./out
+          zig build libsolv-oracle-test --prefix ./out
 
       - name: Build (ReleaseSafe)
         run: |
