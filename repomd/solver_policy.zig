@@ -2,9 +2,9 @@
 //!
 //! This slice preserves installed packages unless a same-name or explicit
 //! obsoleting replacement is selected and ranks ordinary job and requirement
-//! candidates by repository priority and same-name package EVR. Architecture
-//! preference, common-provider ranking, update jobs, allow-erasing, and
-//! cleanup policy remain separate follow-up work.
+//! candidates by repository priority, architecture, same-name package EVR,
+//! and common versioned provides. Update jobs, allow-erasing, recommendation
+//! policy, and cleanup policy remain separate follow-up work.
 
 const std = @import("std");
 const query_index = @import("index.zig");
@@ -310,6 +310,22 @@ const RankedCandidate = struct {
     architecture_tier: usize,
 };
 
+const CommonCandidate = struct {
+    package: solver_model.PackageId,
+    original_order: usize,
+    badness: usize = 0,
+};
+
+const CommonProvide = struct {
+    candidate_index: usize,
+    relation: metadata.Relation,
+    strict_less: bool,
+    ordinal: usize,
+};
+
+const CommonCandidateList = std.array_list.Managed(CommonCandidate);
+const CommonProvideList = std.array_list.Managed(CommonProvide);
+
 const RankingContext = struct {
     universe: *const solver_model.Universe,
     architecture: ?solver_model.ArchitecturePolicy,
@@ -422,6 +438,14 @@ fn rankCandidateGroups(
     defer allocator.free(group_by_package);
     const group_cursors = try allocator.alloc(usize, max_candidates);
     defer allocator.free(group_cursors);
+    var common_candidates = CommonCandidateList.init(allocator);
+    defer common_candidates.deinit();
+    var common_fallbacks = PackageIdList.init(allocator);
+    defer common_fallbacks.deinit();
+    var common_provides = CommonProvideList.init(allocator);
+    defer common_provides.deinit();
+    var common_names = std.StringHashMap(void).init(allocator);
+    defer common_names.deinit();
     const context = RankingContext{
         .universe = universe,
         .architecture = architecture,
@@ -521,7 +545,281 @@ fn rankCandidateGroups(
             output.* = by_version[group_cursors[version_group]].package;
             group_cursors[version_group] += 1;
         }
+        for (ranked) |candidate| {
+            group_by_package[@intFromEnum(candidate.package)] =
+                candidate.architecture_tier;
+        }
+        try rankCommonProvides(
+            universe,
+            architecture,
+            group_candidates,
+            best_available_priority,
+            group_by_package,
+            &common_candidates,
+            &common_fallbacks,
+            &common_provides,
+            &common_names,
+        );
     }
+}
+
+fn rankCommonProvides(
+    universe: *const solver_model.Universe,
+    architecture: ?solver_model.ArchitecturePolicy,
+    candidates: []solver_model.PackageId,
+    best_available_priority: ?i64,
+    architecture_tiers: []const usize,
+    frontier: *CommonCandidateList,
+    fallbacks: *PackageIdList,
+    provides: *CommonProvideList,
+    names: *std.StringHashMap(void),
+) error{OutOfMemory}!void {
+    if (architecture == null) return;
+    var bucket_start: usize = 0;
+    while (bucket_start < candidates.len) {
+        const first = universe.package(
+            candidates[bucket_start],
+        ) orelse unreachable;
+        const bucket_priority = candidatePriority(
+            universe,
+            first.*,
+            best_available_priority,
+        );
+        const bucket_architecture =
+            architecture_tiers[@intFromEnum(first.id)];
+        var bucket_end = bucket_start + 1;
+        while (bucket_end < candidates.len) : (bucket_end += 1) {
+            const package = universe.package(
+                candidates[bucket_end],
+            ) orelse unreachable;
+            if (candidatePriority(
+                universe,
+                package.*,
+                best_available_priority,
+            ) != bucket_priority or
+                architecture_tiers[@intFromEnum(package.id)] !=
+                    bucket_architecture)
+            {
+                break;
+            }
+        }
+
+        frontier.clearRetainingCapacity();
+        fallbacks.clearRetainingCapacity();
+        provides.clearRetainingCapacity();
+        names.clearRetainingCapacity();
+        for (candidates[bucket_start..bucket_end], 0..) |
+            package_id,
+            original_order,
+        | {
+            const package = universe.package(package_id) orelse unreachable;
+            const entry = try names.getOrPut(package.source.nevra.name);
+            if (entry.found_existing) {
+                try fallbacks.append(package_id);
+            } else {
+                try frontier.append(.{
+                    .package = package_id,
+                    .original_order = original_order,
+                });
+            }
+        }
+
+        for (frontier.items, 0..) |candidate, candidate_index| {
+            const package = universe.package(
+                candidate.package,
+            ) orelse unreachable;
+            const self_provide = packageSelfProvide(package.source.*);
+            var has_self_provide = false;
+            for (package.relationEntries(universe, .provides)) |relation| {
+                if (equivalentSelfProvide(relation, self_provide)) {
+                    has_self_provide = true;
+                }
+                if (!comparableCommonProvide(relation)) continue;
+                try provides.append(.{
+                    .candidate_index = candidate_index,
+                    .relation = relation,
+                    .strict_less = relation.comparison == .lt,
+                    .ordinal = provides.items.len,
+                });
+            }
+            if (!has_self_provide and
+                !sourceArchitecture(package.source.nevra.arch) and
+                comparableCommonProvide(self_provide))
+            {
+                try provides.append(.{
+                    .candidate_index = candidate_index,
+                    .relation = self_provide,
+                    .strict_less = false,
+                    .ordinal = provides.items.len,
+                });
+            }
+        }
+        std.sort.heap(
+            CommonProvide,
+            provides.items,
+            {},
+            commonProvideLessThan,
+        );
+        scoreCommonProvides(frontier.items, provides.items, universe);
+        std.sort.heap(
+            CommonCandidate,
+            frontier.items,
+            {},
+            commonCandidateLessThan,
+        );
+
+        var output = bucket_start;
+        for (frontier.items) |candidate| {
+            candidates[output] = candidate.package;
+            output += 1;
+        }
+        for (fallbacks.items) |package_id| {
+            candidates[output] = package_id;
+            output += 1;
+        }
+        bucket_start = bucket_end;
+    }
+}
+
+fn candidatePriority(
+    universe: *const solver_model.Universe,
+    package: solver_model.UniversePackage,
+    best_available_priority: ?i64,
+) i64 {
+    const repository = universe.repository(
+        package.repository,
+    ) orelse unreachable;
+    return switch (repository.kind) {
+        .installed => best_available_priority orelse 0,
+        .available => repository.priority,
+        .command_line => 0,
+    };
+}
+
+fn comparableCommonProvide(relation: metadata.Relation) bool {
+    if (relation.flags == null or relation.version == null) return false;
+    switch (relation.comparison) {
+        .eq, .le, .lt => {},
+        .none, .gt, .ge => return false,
+    }
+    if (relation.comparison != .eq or
+        relation.epoch != null or
+        relation.release != null)
+    {
+        return true;
+    }
+    const version = relation.version.?;
+    if (version.len < 4) return true;
+    for (version) |character| {
+        if (!std.ascii.isDigit(character) and
+            !(character >= 'a' and character <= 'f'))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn packageSelfProvide(package: metadata.Package) metadata.Relation {
+    return .{
+        .name = package.nevra.name,
+        .flags = "EQ",
+        .comparison = .eq,
+        .epoch = package.nevra.epoch,
+        .version = package.nevra.version,
+        .release = if (package.nevra.release.len == 0)
+            null
+        else
+            package.nevra.release,
+    };
+}
+
+fn equivalentSelfProvide(
+    relation: metadata.Relation,
+    self_provide: metadata.Relation,
+) bool {
+    return relation.flags != null and
+        relation.comparison == .eq and
+        std.mem.eql(u8, relation.name, self_provide.name) and
+        solver_rules.compareRelationEvr(relation, self_provide) == 0;
+}
+
+fn sourceArchitecture(architecture: []const u8) bool {
+    return std.mem.eql(u8, architecture, "src") or
+        std.mem.eql(u8, architecture, "nosrc");
+}
+
+fn commonProvideLessThan(
+    _: void,
+    left: CommonProvide,
+    right: CommonProvide,
+) bool {
+    const name_order = std.mem.order(
+        u8,
+        left.relation.name,
+        right.relation.name,
+    );
+    if (name_order != .eq) return name_order == .lt;
+    const evr_order = solver_rules.compareRelationEvr(
+        left.relation,
+        right.relation,
+    );
+    if (evr_order != 0) return evr_order > 0;
+    if (left.strict_less != right.strict_less) {
+        return !left.strict_less;
+    }
+    return left.ordinal < right.ordinal;
+}
+
+fn commonProvideValuePrecedes(
+    left: CommonProvide,
+    right: CommonProvide,
+) bool {
+    const evr_order = solver_rules.compareRelationEvr(
+        left.relation,
+        right.relation,
+    );
+    if (evr_order != 0) return evr_order == 1;
+    return !left.strict_less and right.strict_less;
+}
+
+fn scoreCommonProvides(
+    candidates: []CommonCandidate,
+    provides: []const CommonProvide,
+    universe: *const solver_model.Universe,
+) void {
+    var badness: usize = 0;
+    for (provides, 0..) |provide, index| {
+        if (index == 0 or
+            !std.mem.eql(
+                u8,
+                provides[index - 1].relation.name,
+                provide.relation.name,
+            ))
+        {
+            badness = 0;
+        } else if (provide.candidate_index !=
+            provides[index - 1].candidate_index and
+            commonProvideValuePrecedes(provides[index - 1], provide))
+        {
+            badness +|= 1;
+        }
+        candidates[provide.candidate_index].badness +|= badness;
+    }
+    for (candidates) |*candidate| {
+        if (universe.package(candidate.package).?.installed != null) {
+            candidate.badness = 0;
+        }
+    }
+}
+
+fn commonCandidateLessThan(
+    _: void,
+    left: CommonCandidate,
+    right: CommonCandidate,
+) bool {
+    if (left.badness != right.badness) return left.badness < right.badness;
+    return left.original_order < right.original_order;
 }
 
 fn assignArchitectureTiers(candidates: []RankedCandidate) void {
@@ -923,16 +1221,19 @@ test "contextual requirement ranks package EVR not provide EVR" {
     var relations = [_]metadata.Relation{
         .{
             .name = "virtual-api",
+            .flags = "versioned",
             .comparison = .eq,
             .version = "100",
         },
         .{
             .name = "virtual-api",
+            .flags = "versioned",
             .comparison = .eq,
             .version = "1",
         },
         .{
             .name = "virtual-api",
+            .flags = "versioned",
             .comparison = .ge,
             .version = "1",
         },
@@ -991,6 +1292,446 @@ test "contextual requirement ranks package EVR not provide EVR" {
         bool,
         &.{ false, true, true },
         result.satisfiable.values,
+    );
+}
+
+test "contextual ranking uses common provide EVR across package names" {
+    var relations = [_]metadata.Relation{
+        .{
+            .name = "virtual-api",
+            .flags = "versioned",
+            .comparison = .eq,
+            .version = "1",
+        },
+        .{
+            .name = "virtual-api",
+            .flags = "versioned",
+            .comparison = .eq,
+            .version = "2",
+        },
+        .{
+            .name = "virtual-api",
+            .flags = "versioned",
+            .comparison = .ge,
+            .version = "1",
+        },
+    };
+    var packages = [_]metadata.Package{
+        testPackage("old-nevra", "99"),
+        testPackage("new-nevra", "1"),
+        testPackage("consumer", "1"),
+    };
+    packages[0].provides = .{ .start = 0, .len = 1 };
+    packages[1].provides = .{ .start = 1, .len = 1 };
+    packages[2].requires = .{ .start = 2, .len = 1 };
+    const repository = metadata.RepositoryModel{
+        .packages = &packages,
+        .relations = &relations,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &repository }},
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(2) },
+        }} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    var requirement_candidates: ?[]const solver_model.PackageId = null;
+    for (prepared.decision_policy.groups) |group| {
+        if (std.meta.activeTag(
+            prepared.formula.clauses[group.clause_index].origin,
+        ) == .requirement) {
+            requirement_candidates = group.candidates.slice(
+                prepared.decision_policy.candidates,
+            );
+        }
+    }
+    try std.testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{ @enumFromInt(1), @enumFromInt(0) },
+        requirement_candidates.?,
+    );
+    var result = try prepared.solve(std.testing.allocator);
+    defer result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, true, true },
+        result.satisfiable.values,
+    );
+}
+
+test "common provide ranking is not limited to the required capability" {
+    var relations = [_]metadata.Relation{
+        .{ .name = "virtual-api" },
+        .{
+            .name = "shared-abi",
+            .flags = "versioned",
+            .comparison = .eq,
+            .version = "1",
+        },
+        .{ .name = "virtual-api" },
+        .{
+            .name = "shared-abi",
+            .flags = "versioned",
+            .comparison = .eq,
+            .version = "2",
+        },
+        .{ .name = "virtual-api" },
+    };
+    var packages = [_]metadata.Package{
+        testPackage("first-provider", "1"),
+        testPackage("second-provider", "1"),
+        testPackage("consumer", "1"),
+    };
+    packages[0].provides = .{ .start = 0, .len = 2 };
+    packages[1].provides = .{ .start = 2, .len = 2 };
+    packages[2].requires = .{ .start = 4, .len = 1 };
+    const repository = metadata.RepositoryModel{
+        .packages = &packages,
+        .relations = &relations,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &repository }},
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(2) },
+        }} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    var requirement_candidates: ?[]const solver_model.PackageId = null;
+    for (prepared.decision_policy.groups) |group| {
+        if (std.meta.activeTag(
+            prepared.formula.clauses[group.clause_index].origin,
+        ) == .requirement) {
+            requirement_candidates = group.candidates.slice(
+                prepared.decision_policy.candidates,
+            );
+        }
+    }
+    try std.testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{ @enumFromInt(1), @enumFromInt(0) },
+        requirement_candidates.?,
+    );
+}
+
+test "common provide ranking includes implicit package self provides" {
+    var relations = [_]metadata.Relation{
+        .{ .name = "virtual-api" },
+        .{ .name = "virtual-api" },
+        .{
+            .name = "alpha-provider",
+            .flags = "versioned",
+            .comparison = .eq,
+            .version = "2",
+        },
+        .{ .name = "virtual-api" },
+    };
+    var packages = [_]metadata.Package{
+        testPackage("alpha-provider", "1"),
+        testPackage("beta-provider", "1"),
+        testPackage("consumer", "1"),
+    };
+    packages[0].provides = .{ .start = 0, .len = 1 };
+    packages[1].provides = .{ .start = 1, .len = 2 };
+    packages[2].requires = .{ .start = 3, .len = 1 };
+    const repository = metadata.RepositoryModel{
+        .packages = &packages,
+        .relations = &relations,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &repository }},
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(2) },
+        }} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    var requirement_candidates: ?[]const solver_model.PackageId = null;
+    for (prepared.decision_policy.groups) |group| {
+        if (std.meta.activeTag(
+            prepared.formula.clauses[group.clause_index].origin,
+        ) == .requirement) {
+            requirement_candidates = group.candidates.slice(
+                prepared.decision_policy.candidates,
+            );
+        }
+    }
+    try std.testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{ @enumFromInt(1), @enumFromInt(0) },
+        requirement_candidates.?,
+    );
+}
+
+test "explicit package self provides are not scored twice" {
+    var relations = [_]metadata.Relation{
+        .{ .name = "virtual-api" },
+        .{
+            .name = "alpha-provider",
+            .flags = "versioned",
+            .comparison = .eq,
+            .version = "2",
+            .release = "1",
+        },
+        .{ .name = "virtual-api" },
+        .{
+            .name = "charlie-provider",
+            .flags = "versioned",
+            .comparison = .eq,
+            .version = "2",
+            .release = "1",
+        },
+        .{ .name = "virtual-api" },
+        .{
+            .name = "alpha-provider",
+            .flags = "versioned",
+            .comparison = .eq,
+            .version = "1",
+            .release = "1",
+        },
+        .{ .name = "virtual-api" },
+        .{ .name = "virtual-api" },
+    };
+    var packages = [_]metadata.Package{
+        testPackage("bravo-provider", "1"),
+        testPackage("delta-provider", "1"),
+        testPackage("alpha-provider", "1"),
+        testPackage("charlie-provider", "1"),
+        testPackage("consumer", "1"),
+    };
+    packages[0].provides = .{ .start = 0, .len = 2 };
+    packages[1].provides = .{ .start = 2, .len = 2 };
+    packages[2].provides = .{ .start = 4, .len = 2 };
+    packages[3].provides = .{ .start = 6, .len = 1 };
+    packages[4].requires = .{ .start = 7, .len = 1 };
+    const repository = metadata.RepositoryModel{
+        .packages = &packages,
+        .relations = &relations,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &repository }},
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(4) },
+        }} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    var requirement_candidates: ?[]const solver_model.PackageId = null;
+    for (prepared.decision_policy.groups) |group| {
+        if (std.meta.activeTag(
+            prepared.formula.clauses[group.clause_index].origin,
+        ) == .requirement) {
+            requirement_candidates = group.candidates.slice(
+                prepared.decision_policy.candidates,
+            );
+        }
+    }
+    try std.testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{
+            @enumFromInt(0),
+            @enumFromInt(1),
+            @enumFromInt(2),
+            @enumFromInt(3),
+        },
+        requirement_candidates.?,
+    );
+}
+
+test "synthetic self provides exclude source architectures" {
+    try std.testing.expect(sourceArchitecture("src"));
+    try std.testing.expect(sourceArchitecture("nosrc"));
+    try std.testing.expect(!sourceArchitecture("noarch"));
+    try std.testing.expect(!sourceArchitecture("x86_64"));
+}
+
+test "common provide ranking ignores hexadecimal equality hashes" {
+    var relations = [_]metadata.Relation{
+        .{ .name = "virtual-api" },
+        .{
+            .name = "shared-abi",
+            .flags = "versioned",
+            .comparison = .eq,
+            .version = "1",
+        },
+        .{ .name = "virtual-api" },
+        .{
+            .name = "shared-abi",
+            .flags = "versioned",
+            .comparison = .eq,
+            .version = "deadbeef",
+        },
+        .{ .name = "virtual-api" },
+    };
+    var packages = [_]metadata.Package{
+        testPackage("first-provider", "1"),
+        testPackage("second-provider", "1"),
+        testPackage("consumer", "1"),
+    };
+    packages[0].provides = .{ .start = 0, .len = 2 };
+    packages[1].provides = .{ .start = 2, .len = 2 };
+    packages[2].requires = .{ .start = 4, .len = 1 };
+    const repository = metadata.RepositoryModel{
+        .packages = &packages,
+        .relations = &relations,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &repository }},
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(2) },
+        }} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    var requirement_candidates: ?[]const solver_model.PackageId = null;
+    for (prepared.decision_policy.groups) |group| {
+        if (std.meta.activeTag(
+            prepared.formula.clauses[group.clause_index].origin,
+        ) == .requirement) {
+            requirement_candidates = group.candidates.slice(
+                prepared.decision_policy.candidates,
+            );
+        }
+    }
+    try std.testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{ @enumFromInt(0), @enumFromInt(1) },
+        requirement_candidates.?,
+    );
+}
+
+test "common provide badness ignores missing-release boundaries" {
+    var relations = [_]metadata.Relation{
+        .{ .name = "virtual-api" },
+        .{
+            .name = "shared-abi",
+            .flags = "versioned",
+            .comparison = .eq,
+            .version = "1",
+        },
+        .{ .name = "virtual-api" },
+        .{
+            .name = "shared-abi",
+            .flags = "versioned",
+            .comparison = .eq,
+            .version = "1",
+            .release = "1",
+        },
+        .{ .name = "virtual-api" },
+    };
+    var packages = [_]metadata.Package{
+        testPackage("first-provider", "1"),
+        testPackage("second-provider", "1"),
+        testPackage("consumer", "1"),
+    };
+    packages[0].provides = .{ .start = 0, .len = 2 };
+    packages[1].provides = .{ .start = 2, .len = 2 };
+    packages[2].requires = .{ .start = 4, .len = 1 };
+    const repository = metadata.RepositoryModel{
+        .packages = &packages,
+        .relations = &relations,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &repository }},
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(2) },
+        }} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    var requirement_candidates: ?[]const solver_model.PackageId = null;
+    for (prepared.decision_policy.groups) |group| {
+        if (std.meta.activeTag(
+            prepared.formula.clauses[group.clause_index].origin,
+        ) == .requirement) {
+            requirement_candidates = group.candidates.slice(
+                prepared.decision_policy.candidates,
+            );
+        }
+    }
+    try std.testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{ @enumFromInt(0), @enumFromInt(1) },
+        requirement_candidates.?,
     );
 }
 
@@ -1358,6 +2099,53 @@ test "clauses without positive candidates do not create contextual groups" {
         prepared.solve(std.testing.allocator),
     );
     prepared.decision_policy = valid_policy;
+}
+
+test "formula without architecture policy preserves raw architecture order" {
+    var packages = [_]metadata.Package{
+        testPackage("provider", "1"),
+        testPackage("provider", "2"),
+        testPackage("unrelated", "1"),
+    };
+    packages[1].nevra.arch = "noarch";
+    const repository = metadata.RepositoryModel{
+        .packages = &packages,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &repository }},
+    );
+    defer universe.deinit();
+    var states = [_]solver_rules.PackageState{ .{}, .{}, .{} };
+    const literals = [_]solver_rules.Literal{
+        solver_rules.Literal.init(@enumFromInt(0), true),
+        solver_rules.Literal.init(@enumFromInt(1), true),
+        solver_rules.Literal.init(@enumFromInt(2), true),
+    };
+    const clauses = [_]solver_rules.Clause{.{
+        .literals = .{ .start = 0, .len = 3 },
+        .origin = .{ .job = @enumFromInt(0) },
+    }};
+    const formula = solver_rules.OwnedFormula{
+        .allocator = std.testing.allocator,
+        .universe = &universe,
+        .clauses = &clauses,
+        .literals = &literals,
+        .weak_requests = &.{},
+        .weak_candidates = &.{},
+        .package_states = &states,
+    };
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &formula,
+    );
+    defer prepared.deinit();
+
+    try std.testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{ @enumFromInt(0), @enumFromInt(1), @enumFromInt(2) },
+        prepared.decision_policy.candidates,
+    );
 }
 
 test "malformed contextual source clauses are rejected during preparation" {
@@ -1860,11 +2648,27 @@ test "overlapping repository package ranges are rejected" {
 }
 
 fn allocationFailureCase(allocator: std.mem.Allocator) !void {
+    var available_relations = [_]metadata.Relation{
+        .{
+            .name = "shared-abi",
+            .flags = "versioned",
+            .comparison = .eq,
+            .version = "1",
+        },
+        .{
+            .name = "shared-abi",
+            .flags = "versioned",
+            .comparison = .eq,
+            .version = "2",
+        },
+    };
     var sources = [_]metadata.Package{
         testPackage("package", "1"),
-        testPackage("package", "2"),
-        testPackage("package", "3"),
+        testPackage("provider-one", "2"),
+        testPackage("provider-two", "3"),
     };
+    sources[1].provides = .{ .start = 0, .len = 1 };
+    sources[2].provides = .{ .start = 1, .len = 1 };
     var packages = [_]solver_model.UniversePackage{
         .{
             .id = @enumFromInt(0),
@@ -1890,7 +2694,10 @@ fn allocationFailureCase(allocator: std.mem.Allocator) !void {
     };
     var repository_models = [_]metadata.RepositoryModel{
         .{ .packages = sources[0..1] },
-        .{ .packages = sources[1..3] },
+        .{
+            .packages = sources[1..3],
+            .relations = &available_relations,
+        },
     };
     var repositories = [_]solver_model.UniverseRepository{
         .{
@@ -1945,6 +2752,7 @@ fn allocationFailureCase(allocator: std.mem.Allocator) !void {
     const base = solver_rules.OwnedFormula{
         .allocator = std.testing.allocator,
         .universe = &universe,
+        .architecture = testArchitecture(),
         .clauses = &clauses,
         .literals = &literals,
         .weak_requests = &.{},

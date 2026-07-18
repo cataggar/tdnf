@@ -786,12 +786,12 @@ test "oracle deterministically chooses the best alternative provider" {
     const available = try builder.addRepo("available", .available, 50);
     try builder.addPackage(available, .{
         .name = "provider-low",
-        .version = "1",
+        .version = "99",
         .provides = &.{versionedRelation("virtual-api", .eq, "1")},
     });
     try builder.addPackage(available, .{
         .name = "provider-high",
-        .version = "2",
+        .version = "1",
         .provides = &.{versionedRelation("virtual-api", .eq, "2")},
     });
     try builder.addPackage(available, .{
@@ -814,6 +814,99 @@ test "oracle deterministically chooses the best alternative provider" {
 
     try testing.expect(containsSelectedName(&graph, &observation, "provider-high"));
     try testing.expect(!containsSelectedName(&graph, &observation, "provider-low"));
+}
+
+test "oracle common-provider ordering considers unrelated capabilities" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(available, .{
+        .name = "first-provider",
+        .provides = &.{
+            relation("virtual-api"),
+            versionedRelation("shared-abi", .eq, "1"),
+        },
+    });
+    try builder.addPackage(available, .{
+        .name = "second-provider",
+        .provides = &.{
+            relation("virtual-api"),
+            versionedRelation("shared-abi", .eq, "2"),
+        },
+    });
+    try builder.addPackage(available, .{
+        .name = "consumer",
+        .requires = &.{relation("virtual-api")},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .name = "consumer" },
+        }} },
+        policy(),
+    );
+    defer observation.deinit();
+
+    try testing.expect(containsSelectedName(
+        &graph,
+        &observation,
+        "second-provider",
+    ));
+    try testing.expect(!containsSelectedName(
+        &graph,
+        &observation,
+        "first-provider",
+    ));
+}
+
+test "oracle common-provider ordering includes self provides" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(available, .{
+        .name = "alpha-provider",
+        .provides = &.{relation("virtual-api")},
+    });
+    try builder.addPackage(available, .{
+        .name = "beta-provider",
+        .provides = &.{
+            relation("virtual-api"),
+            versionedRelation("alpha-provider", .eq, "2"),
+        },
+    });
+    try builder.addPackage(available, .{
+        .name = "consumer",
+        .requires = &.{relation("virtual-api")},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .name = "consumer" },
+        }} },
+        policy(),
+    );
+    defer observation.deinit();
+
+    try testing.expect(containsSelectedName(
+        &graph,
+        &observation,
+        "beta-provider",
+    ));
+    try testing.expect(!containsSelectedName(
+        &graph,
+        &observation,
+        "alpha-provider",
+    ));
 }
 
 test "oracle ranks same-name providers by package EVR" {
