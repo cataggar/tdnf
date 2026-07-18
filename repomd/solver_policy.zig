@@ -314,6 +314,8 @@ const CommonCandidate = struct {
     package: solver_model.PackageId,
     original_order: usize,
     badness: usize = 0,
+    old_version: bool,
+    installed_name: bool,
 };
 
 const CommonProvide = struct {
@@ -325,6 +327,11 @@ const CommonProvide = struct {
 
 const CommonCandidateList = std.array_list.Managed(CommonCandidate);
 const CommonProvideList = std.array_list.Managed(CommonProvide);
+
+const UniverseVersionCandidate = struct {
+    package: solver_model.PackageId,
+    priority: i64,
+};
 
 const RankingContext = struct {
     universe: *const solver_model.Universe,
@@ -446,6 +453,19 @@ fn rankCandidateGroups(
     defer common_provides.deinit();
     var common_names = std.StringHashMap(void).init(allocator);
     defer common_names.deinit();
+    var installed_names = std.StringHashMap(void).init(allocator);
+    defer installed_names.deinit();
+    const old_versions = try allocator.alloc(bool, universe.packages.len);
+    defer allocator.free(old_versions);
+    @memset(old_versions, false);
+    if (architecture != null) {
+        try identifyOldVersions(allocator, universe, old_versions);
+        for (universe.packages) |package| {
+            if (package.installed != null) {
+                try installed_names.put(package.source.nevra.name, {});
+            }
+        }
+    }
     const context = RankingContext{
         .universe = universe,
         .architecture = architecture,
@@ -559,6 +579,8 @@ fn rankCandidateGroups(
             &common_fallbacks,
             &common_provides,
             &common_names,
+            old_versions,
+            &installed_names,
         );
     }
 }
@@ -573,6 +595,8 @@ fn rankCommonProvides(
     fallbacks: *PackageIdList,
     provides: *CommonProvideList,
     names: *std.StringHashMap(void),
+    old_versions: []const bool,
+    installed_names: *const std.StringHashMap(void),
 ) error{OutOfMemory}!void {
     if (architecture == null) return;
     var bucket_start: usize = 0;
@@ -620,10 +644,23 @@ fn rankCommonProvides(
                 try frontier.append(.{
                     .package = package_id,
                     .original_order = original_order,
+                    .old_version = old_versions[@intFromEnum(package_id)],
+                    .installed_name = installed_names.contains(
+                        package.source.nevra.name,
+                    ),
                 });
             }
         }
 
+        std.sort.block(
+            CommonCandidate,
+            frontier.items,
+            {},
+            currentVersionLessThan,
+        );
+        for (frontier.items, 0..) |*candidate, original_order| {
+            candidate.original_order = original_order;
+        }
         for (frontier.items, 0..) |candidate, candidate_index| {
             const package = universe.package(
                 candidate.package,
@@ -667,6 +704,12 @@ fn rankCommonProvides(
             {},
             commonCandidateLessThan,
         );
+        std.sort.block(
+            CommonCandidate,
+            frontier.items,
+            {},
+            installedNameLessThan,
+        );
 
         var output = bucket_start;
         for (frontier.items) |candidate| {
@@ -679,6 +722,74 @@ fn rankCommonProvides(
         }
         bucket_start = bucket_end;
     }
+}
+
+fn identifyOldVersions(
+    allocator: std.mem.Allocator,
+    universe: *const solver_model.Universe,
+    old_versions: []bool,
+) error{OutOfMemory}!void {
+    const ranked = try allocator.alloc(
+        UniverseVersionCandidate,
+        universe.packages.len,
+    );
+    defer allocator.free(ranked);
+    for (universe.packages, ranked) |package, *candidate| {
+        candidate.* = .{
+            .package = package.id,
+            .priority = globalRepositoryPriority(universe, package),
+        };
+    }
+    std.sort.heap(
+        UniverseVersionCandidate,
+        ranked,
+        universe,
+        universeVersionLessThan,
+    );
+
+    var group_start: usize = 0;
+    while (group_start < ranked.len) {
+        const best = ranked[group_start];
+        const best_package = universe.package(best.package).?;
+        var group_end = group_start + 1;
+        while (group_end < ranked.len) : (group_end += 1) {
+            const package = universe.package(ranked[group_end].package).?;
+            if (!std.mem.eql(
+                u8,
+                package.source.nevra.name,
+                best_package.source.nevra.name,
+            ) or !std.mem.eql(
+                u8,
+                package.source.nevra.arch,
+                best_package.source.nevra.arch,
+            )) {
+                break;
+            }
+        }
+        for (ranked[group_start..group_end]) |candidate| {
+            const package = universe.package(candidate.package).?;
+            if (package.installed != null) continue;
+            old_versions[@intFromEnum(candidate.package)] =
+                candidate.priority > best.priority or
+                (candidate.priority == best.priority and
+                    query_index.comparePackageVersions(
+                        best_package.source.*,
+                        package.source.*,
+                    ) > 0);
+        }
+        group_start = group_end;
+    }
+}
+
+fn globalRepositoryPriority(
+    universe: *const solver_model.Universe,
+    package: solver_model.UniversePackage,
+) i64 {
+    const repository = universe.repository(package.repository).?;
+    return switch (repository.kind) {
+        .installed, .command_line => 0,
+        .available => repository.priority,
+    };
 }
 
 fn candidatePriority(
@@ -694,6 +805,50 @@ fn candidatePriority(
         .available => repository.priority,
         .command_line => 0,
     };
+}
+
+fn universeVersionLessThan(
+    universe: *const solver_model.Universe,
+    left: UniverseVersionCandidate,
+    right: UniverseVersionCandidate,
+) bool {
+    const left_package = universe.package(left.package).?;
+    const right_package = universe.package(right.package).?;
+    const name_order = std.mem.order(
+        u8,
+        left_package.source.nevra.name,
+        right_package.source.nevra.name,
+    );
+    if (name_order != .eq) return name_order == .lt;
+    const arch_order = std.mem.order(
+        u8,
+        left_package.source.nevra.arch,
+        right_package.source.nevra.arch,
+    );
+    if (arch_order != .eq) return arch_order == .lt;
+    if (left.priority != right.priority) return left.priority < right.priority;
+    const version_order = query_index.comparePackageVersions(
+        left_package.source.*,
+        right_package.source.*,
+    );
+    if (version_order != 0) return version_order > 0;
+    return @intFromEnum(left.package) < @intFromEnum(right.package);
+}
+
+fn currentVersionLessThan(
+    _: void,
+    left: CommonCandidate,
+    right: CommonCandidate,
+) bool {
+    return !left.old_version and right.old_version;
+}
+
+fn installedNameLessThan(
+    _: void,
+    left: CommonCandidate,
+    right: CommonCandidate,
+) bool {
+    return left.installed_name and !right.installed_name;
 }
 
 fn comparableCommonProvide(relation: metadata.Relation) bool {
@@ -1731,6 +1886,224 @@ test "common provide badness ignores missing-release boundaries" {
     try std.testing.expectEqualSlices(
         solver_model.PackageId,
         &.{ @enumFromInt(0), @enumFromInt(1) },
+        requirement_candidates.?,
+    );
+}
+
+test "installed package names move matching available providers to front" {
+    var installed_packages = [_]metadata.Package{
+        testPackage("sticky-provider", "1"),
+    };
+    const installed_model = metadata.RepositoryModel{
+        .packages = &installed_packages,
+    };
+    const installed_states = [_]solver_model.InstalledState{
+        .{ .rpmdb_hnum = 1 },
+    };
+    var relations = [_]metadata.Relation{
+        .{ .name = "virtual-api" },
+        .{
+            .name = "shared-abi",
+            .flags = "versioned",
+            .comparison = .eq,
+            .version = "2",
+        },
+        .{ .name = "virtual-api" },
+        .{
+            .name = "shared-abi",
+            .flags = "versioned",
+            .comparison = .eq,
+            .version = "1",
+        },
+        .{ .name = "virtual-api" },
+    };
+    var available_packages = [_]metadata.Package{
+        testPackage("other-provider", "1"),
+        testPackage("sticky-provider", "2"),
+        testPackage("consumer", "1"),
+    };
+    available_packages[0].provides = .{ .start = 0, .len = 2 };
+    available_packages[1].provides = .{ .start = 2, .len = 2 };
+    available_packages[2].requires = .{ .start = 4, .len = 1 };
+    const available_model = metadata.RepositoryModel{
+        .packages = &available_packages,
+        .relations = &relations,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{
+            .{
+                .id = "@System",
+                .model = &installed_model,
+                .kind = .installed,
+                .installed_states = &installed_states,
+            },
+            .{ .id = "available", .model = &available_model },
+        },
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(3) },
+        }} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    var requirement_candidates: ?[]const solver_model.PackageId = null;
+    for (prepared.decision_policy.groups) |group| {
+        if (std.meta.activeTag(
+            prepared.formula.clauses[group.clause_index].origin,
+        ) == .requirement) {
+            requirement_candidates = group.candidates.slice(
+                prepared.decision_policy.candidates,
+            );
+        }
+    }
+    try std.testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{ @enumFromInt(2), @enumFromInt(1) },
+        requirement_candidates.?,
+    );
+}
+
+test "installed-name movement leaves old same-name versions as fallbacks" {
+    var installed_packages = [_]metadata.Package{
+        testPackage("sticky-provider", "1"),
+    };
+    const installed_model = metadata.RepositoryModel{
+        .packages = &installed_packages,
+    };
+    const installed_states = [_]solver_model.InstalledState{
+        .{ .rpmdb_hnum = 1 },
+    };
+    var relations = [_]metadata.Relation{
+        .{ .name = "virtual-api" },
+        .{ .name = "virtual-api" },
+        .{ .name = "virtual-api" },
+        .{ .name = "virtual-api" },
+    };
+    var available_packages = [_]metadata.Package{
+        testPackage("other-provider", "1"),
+        testPackage("sticky-provider", "2"),
+        testPackage("sticky-provider", "3"),
+        testPackage("consumer", "1"),
+    };
+    available_packages[0].provides = .{ .start = 0, .len = 1 };
+    available_packages[1].provides = .{ .start = 1, .len = 1 };
+    available_packages[2].provides = .{ .start = 2, .len = 1 };
+    available_packages[3].requires = .{ .start = 3, .len = 1 };
+    const available_model = metadata.RepositoryModel{
+        .packages = &available_packages,
+        .relations = &relations,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{
+            .{
+                .id = "@System",
+                .model = &installed_model,
+                .kind = .installed,
+                .installed_states = &installed_states,
+            },
+            .{ .id = "available", .model = &available_model },
+        },
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(4) },
+        }} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    var requirement_candidates: ?[]const solver_model.PackageId = null;
+    for (prepared.decision_policy.groups) |group| {
+        if (std.meta.activeTag(
+            prepared.formula.clauses[group.clause_index].origin,
+        ) == .requirement) {
+            requirement_candidates = group.candidates.slice(
+                prepared.decision_policy.candidates,
+            );
+        }
+    }
+    try std.testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{ @enumFromInt(3), @enumFromInt(1), @enumFromInt(2) },
+        requirement_candidates.?,
+    );
+}
+
+test "newer package outside the candidate queue demotes an old provider" {
+    var relations = [_]metadata.Relation{
+        .{ .name = "virtual-api" },
+        .{ .name = "virtual-api" },
+        .{ .name = "virtual-api" },
+    };
+    var packages = [_]metadata.Package{
+        testPackage("versioned-provider", "1"),
+        testPackage("other-provider", "1"),
+        testPackage("versioned-provider", "2"),
+        testPackage("consumer", "1"),
+    };
+    packages[0].provides = .{ .start = 0, .len = 1 };
+    packages[1].provides = .{ .start = 1, .len = 1 };
+    packages[3].requires = .{ .start = 2, .len = 1 };
+    const repository = metadata.RepositoryModel{
+        .packages = &packages,
+        .relations = &relations,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &repository }},
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(3) },
+        }} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    var requirement_candidates: ?[]const solver_model.PackageId = null;
+    for (prepared.decision_policy.groups) |group| {
+        if (std.meta.activeTag(
+            prepared.formula.clauses[group.clause_index].origin,
+        ) == .requirement) {
+            requirement_candidates = group.candidates.slice(
+                prepared.decision_policy.candidates,
+            );
+        }
+    }
+    try std.testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{ @enumFromInt(1), @enumFromInt(0) },
         requirement_candidates.?,
     );
 }

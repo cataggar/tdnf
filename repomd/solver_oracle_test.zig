@@ -909,6 +909,161 @@ test "oracle common-provider ordering includes self provides" {
     ));
 }
 
+test "oracle moves providers with installed package names to front" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{
+        .name = "sticky-provider",
+        .version = "1",
+    });
+    try builder.addPackage(available, .{
+        .name = "other-provider",
+        .provides = &.{
+            relation("virtual-api"),
+            versionedRelation("shared-abi", .eq, "2"),
+        },
+    });
+    try builder.addPackage(available, .{
+        .name = "sticky-provider",
+        .version = "2",
+        .provides = &.{
+            relation("virtual-api"),
+            versionedRelation("shared-abi", .eq, "1"),
+        },
+    });
+    try builder.addPackage(available, .{
+        .name = "consumer",
+        .requires = &.{relation("virtual-api")},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .name = "consumer" },
+        }} },
+        policy(),
+    );
+    defer observation.deinit();
+
+    const selected = selectedPackageByName(
+        &graph,
+        &observation,
+        "sticky-provider",
+    ).?;
+    try testing.expectEqualStrings("2", selected.source.nevra.version);
+    try testing.expect(!containsSelectedName(
+        &graph,
+        &observation,
+        "other-provider",
+    ));
+}
+
+test "oracle demotes old providers using packages outside the candidate queue" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(available, .{
+        .name = "versioned-provider",
+        .version = "1",
+        .provides = &.{relation("virtual-api")},
+    });
+    try builder.addPackage(available, .{
+        .name = "other-provider",
+        .provides = &.{relation("virtual-api")},
+    });
+    try builder.addPackage(available, .{
+        .name = "versioned-provider",
+        .version = "2",
+    });
+    try builder.addPackage(available, .{
+        .name = "consumer",
+        .requires = &.{relation("virtual-api")},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .name = "consumer" },
+        }} },
+        policy(),
+    );
+    defer observation.deinit();
+
+    try testing.expect(containsSelectedName(
+        &graph,
+        &observation,
+        "other-provider",
+    ));
+    try testing.expect(!containsSelectedName(
+        &graph,
+        &observation,
+        "versioned-provider",
+    ));
+}
+
+test "oracle installed-name movement ignores provide aliases" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{
+        .name = "installed-anchor",
+        .provides = &.{relation("aliased-provider")},
+    });
+    try builder.addPackage(available, .{
+        .name = "other-provider",
+        .provides = &.{
+            relation("virtual-api"),
+            versionedRelation("shared-abi", .eq, "2"),
+        },
+    });
+    try builder.addPackage(available, .{
+        .name = "aliased-provider",
+        .provides = &.{
+            relation("virtual-api"),
+            versionedRelation("shared-abi", .eq, "1"),
+        },
+    });
+    try builder.addPackage(available, .{
+        .name = "consumer",
+        .requires = &.{relation("virtual-api")},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .name = "consumer" },
+        }} },
+        policy(),
+    );
+    defer observation.deinit();
+
+    try testing.expect(containsSelectedName(
+        &graph,
+        &observation,
+        "other-provider",
+    ));
+    try testing.expect(!containsSelectedName(
+        &graph,
+        &observation,
+        "aliased-provider",
+    ));
+}
+
 test "oracle ranks same-name providers by package EVR" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     var builder = GraphBuilder.init(arena_state.allocator());
