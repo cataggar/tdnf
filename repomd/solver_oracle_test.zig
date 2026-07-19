@@ -12,6 +12,7 @@ const PackageSpec = struct {
     version: []const u8 = "1",
     release: []const u8 = "1",
     arch: []const u8 = "x86_64",
+    vendor: ?[]const u8 = null,
     provides: []const metadata.Relation = &.{},
     requires: []const metadata.Relation = &.{},
     conflicts: []const metadata.Relation = &.{},
@@ -78,6 +79,7 @@ const GraphBuilder = struct {
                 .is_pkgid = true,
             },
             .location = .{ .href = spec.name },
+            .rpm = .{ .vendor = spec.vendor },
         };
 
         inline for ([_]struct {
@@ -1245,6 +1247,481 @@ test "oracle records upgrade prior and newly required dependency" {
     const action = actionForName(&graph, &observation, "application").?;
     try testing.expectEqual(solver_model.ActionKind.upgrade, action.kind);
     try testing.expectEqual(@as(u32, 0), @intFromEnum(action.prior.?));
+}
+
+test "oracle exact replacement actions follow EVR rather than request label" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{ .name = "package", .version = "2" });
+    try builder.addPackage(available, .{ .name = "package", .version = "1" });
+    try builder.addPackage(available, .{ .name = "package", .version = "2" });
+    try builder.addPackage(available, .{ .name = "package", .version = "3" });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var downgrade = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .downgrade,
+            .selection = .{ .package = @enumFromInt(1) },
+        }} },
+        policy(),
+    );
+    defer downgrade.deinit();
+    try testing.expectEqual(
+        solver_model.ActionKind.downgrade,
+        actionForName(&graph, &downgrade, "package").?.kind,
+    );
+
+    var reinstall = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .reinstall,
+            .selection = .{ .package = @enumFromInt(2) },
+        }} },
+        policy(),
+    );
+    defer reinstall.deinit();
+    try testing.expectEqual(
+        solver_model.ActionKind.reinstall,
+        actionForName(&graph, &reinstall, "package").?.kind,
+    );
+
+    var mislabeled = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .downgrade,
+            .selection = .{ .package = @enumFromInt(3) },
+        }} },
+        policy(),
+    );
+    defer mislabeled.deinit();
+    try testing.expectEqual(
+        solver_model.ActionKind.upgrade,
+        actionForName(&graph, &mislabeled, "package").?.kind,
+    );
+}
+
+test "oracle distro sync downgrades to preferred repo and keeps orphans" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const preferred = try builder.addRepo("preferred", .available, 10);
+    const fallback = try builder.addRepo("fallback", .available, 90);
+    try builder.addPackage(installed, .{ .name = "package", .version = "3" });
+    try builder.addPackage(installed, .{ .name = "orphan" });
+    try builder.addPackage(preferred, .{ .name = "package", .version = "1" });
+    try builder.addPackage(fallback, .{ .name = "package", .version = "4" });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .dist_sync,
+            .selection = .all,
+        }} },
+        policy(),
+    );
+    defer observation.deinit();
+
+    const selected = selectedPackageByName(
+        &graph,
+        &observation,
+        "package",
+    ).?;
+    try testing.expectEqualStrings("1", selected.source.nevra.version);
+    try testing.expect(containsSelectedName(&graph, &observation, "orphan"));
+    try testing.expectEqual(
+        solver_model.ActionKind.downgrade,
+        actionForName(&graph, &observation, "package").?.kind,
+    );
+}
+
+test "oracle force best prevents distro sync version fallback" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{ .name = "package", .version = "3" });
+    try builder.addPackage(available, .{
+        .name = "package",
+        .version = "2",
+        .requires = &.{relation("missing-capability")},
+    });
+    try builder.addPackage(available, .{
+        .name = "package",
+        .version = "1",
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var fallback = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .dist_sync,
+            .selection = .all,
+        }} },
+        policy(),
+    );
+    defer fallback.deinit();
+    try testing.expectEqualStrings(
+        "1",
+        selectedPackageByName(
+            &graph,
+            &fallback,
+            "package",
+        ).?.source.nevra.version,
+    );
+
+    var best_policy = policy();
+    best_policy.best = true;
+    var best = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .dist_sync,
+            .selection = .all,
+        }} },
+        best_policy,
+    );
+    defer best.deinit();
+    try testing.expect(best.outcome.problems.len != 0);
+}
+
+test "oracle distro sync retains preferred fallback obsoleters" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const preferred = try builder.addRepo("preferred", .available, 10);
+    const fallback = try builder.addRepo("fallback", .available, 90);
+    try builder.addPackage(installed, .{ .name = "old-package" });
+    try builder.addPackage(preferred, .{
+        .name = "replacement",
+        .obsoletes = &.{relation("old-package")},
+    });
+    try builder.addPackage(fallback, .{
+        .name = "old-package",
+        .version = "2",
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .dist_sync,
+            .selection = .all,
+        }} },
+        policy(),
+    );
+    defer observation.deinit();
+
+    try testing.expect(containsSelectedName(
+        &graph,
+        &observation,
+        "replacement",
+    ));
+    try testing.expect(!containsSelectedName(
+        &graph,
+        &observation,
+        "old-package",
+    ));
+}
+
+test "oracle distro sync replaces equal EVR packages with changed vendor" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{
+        .name = "package",
+        .vendor = "old-vendor",
+    });
+    try builder.addPackage(available, .{
+        .name = "package",
+        .vendor = "new-vendor",
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .dist_sync,
+            .selection = .all,
+        }} },
+        policy(),
+    );
+    defer observation.deinit();
+
+    const selected = selectedPackageByName(
+        &graph,
+        &observation,
+        "package",
+    ).?;
+    try testing.expectEqualStrings(
+        "new-vendor",
+        selected.source.rpm.vendor.?,
+    );
+    try testing.expectEqual(
+        solver_model.ActionKind.reinstall,
+        actionForName(&graph, &observation, "package").?.kind,
+    );
+}
+
+test "oracle distro sync preserves product identity exceptions" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{
+        .name = "product:package",
+        .vendor = "old-vendor",
+    });
+    try builder.addPackage(available, .{
+        .name = "product:package",
+        .vendor = "new-vendor",
+    });
+    try builder.addPackage(available, .{ .name = "requested" });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{
+            .{
+                .action = .dist_sync,
+                .selection = .all,
+            },
+            .{
+                .action = .install,
+                .selection = .{ .name = "requested" },
+            },
+        } },
+        policy(),
+    );
+    defer observation.deinit();
+
+    const selected = selectedPackageByName(
+        &graph,
+        &observation,
+        "product:package",
+    ).?;
+    try testing.expectEqualStrings(
+        "old-vendor",
+        selected.source.rpm.vendor.?,
+    );
+}
+
+test "oracle distro sync identity includes prerequisite markers" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{
+        .name = "package",
+        .requires = &.{.{
+            .name = "rpmlib(Test)",
+            .flags = "EQ",
+            .comparison = .eq,
+            .version = "1",
+        }},
+    });
+    try builder.addPackage(available, .{
+        .name = "package",
+        .requires = &.{.{
+            .name = "rpmlib(Test)",
+            .flags = "EQ",
+            .comparison = .eq,
+            .version = "1",
+            .pre = true,
+        }},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .dist_sync,
+            .selection = .all,
+        }} },
+        policy(),
+    );
+    defer observation.deinit();
+
+    const selected = selectedPackageByName(
+        &graph,
+        &observation,
+        "package",
+    ).?;
+    try testing.expect(selected.relationEntries(
+        &graph.universe,
+        .requires,
+    )[0].pre);
+}
+
+test "oracle update preserves architecture color and distro sync changes it" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{
+        .name = "package",
+        .version = "1",
+        .arch = "x86_64",
+    });
+    try builder.addPackage(available, .{
+        .name = "package",
+        .version = "2",
+        .arch = "i686",
+    });
+    try builder.addPackage(available, .{ .name = "requested" });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var update = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{
+            .{
+                .action = .update,
+                .selection = .all,
+            },
+            .{
+                .action = .install,
+                .selection = .{ .name = "requested" },
+            },
+        } },
+        policy(),
+    );
+    defer update.deinit();
+    try testing.expectEqualStrings(
+        "x86_64",
+        selectedPackageByName(
+            &graph,
+            &update,
+            "package",
+        ).?.source.nevra.arch,
+    );
+
+    var sync = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .dist_sync,
+            .selection = .all,
+        }} },
+        policy(),
+    );
+    defer sync.deinit();
+    try testing.expectEqualStrings(
+        "i686",
+        selectedPackageByName(
+            &graph,
+            &sync,
+            "package",
+        ).?.source.nevra.arch,
+    );
+}
+
+test "oracle update accepts renamed provide and obsolete replacement" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{ .name = "old-package" });
+    try builder.addPackage(available, .{
+        .name = "replacement",
+        .provides = &.{relation("old-package")},
+        .obsoletes = &.{relation("old-package")},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .update,
+            .selection = .all,
+        }} },
+        policy(),
+    );
+    defer observation.deinit();
+
+    try testing.expect(containsSelectedName(
+        &graph,
+        &observation,
+        "replacement",
+    ));
+    try testing.expectEqual(
+        solver_model.ActionKind.obsolete,
+        actionForName(&graph, &observation, "replacement").?.kind,
+    );
+}
+
+test "oracle force best removes explicitly obsoleted installed candidates" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{
+        .name = "old-package",
+        .version = "2",
+    });
+    try builder.addPackage(available, .{
+        .name = "old-package",
+        .version = "1",
+        .requires = &.{relation("missing-capability")},
+    });
+    try builder.addPackage(available, .{
+        .name = "renamed-package",
+        .provides = &.{relation("old-package")},
+        .obsoletes = &.{versionedRelation(
+            "old-package",
+            .eq,
+            "2",
+        )},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var best_policy = policy();
+    best_policy.best = true;
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .update,
+            .selection = .all,
+        }} },
+        best_policy,
+    );
+    defer observation.deinit();
+
+    try testing.expect(containsSelectedName(
+        &graph,
+        &observation,
+        "renamed-package",
+    ));
+    try testing.expect(!containsSelectedName(
+        &graph,
+        &observation,
+        "old-package",
+    ));
 }
 
 test "oracle records replacement as an obsolete action" {

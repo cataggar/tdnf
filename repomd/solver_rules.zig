@@ -108,6 +108,19 @@ pub const PackageState = struct {
     multiversion: bool = false,
     user_installed: bool = false,
     allow_uninstall: bool = false,
+    replacement: ReplacementState = .{},
+};
+
+pub const ReplacementKind = enum {
+    none,
+    update,
+    dist_sync,
+};
+
+pub const ReplacementState = struct {
+    kind: ReplacementKind = .none,
+    job: solver_model.JobId = @enumFromInt(0),
+    force_best: bool = false,
 };
 
 pub const OwnedFormula = struct {
@@ -597,7 +610,41 @@ fn collectPackageStates(
     goal: solver_model.Goal,
     states: []PackageState,
 ) GenerateError!void {
-    for (goal.jobs) |job| {
+    for (goal.jobs, 0..) |job, job_index| {
+        switch (job.action) {
+            .update, .dist_sync => {
+                if (std.meta.activeTag(job.selection) != .all) {
+                    return error.UnsupportedJob;
+                }
+                if (job.flags.clean_deps or
+                    job.flags.targeted or
+                    job.flags.weak)
+                {
+                    return error.UnsupportedJob;
+                }
+                const kind: ReplacementKind = switch (job.action) {
+                    .update => .update,
+                    .dist_sync => .dist_sync,
+                    else => unreachable,
+                };
+                for (index.universe.packages, states) |package, *state| {
+                    if (package.installed == null) continue;
+                    if (state.replacement.kind != .none and
+                        state.replacement.kind != kind)
+                    {
+                        return error.UnsupportedJob;
+                    }
+                    state.replacement = .{
+                        .kind = kind,
+                        .job = @enumFromInt(@as(u32, @intCast(job_index))),
+                        .force_best = state.replacement.force_best or
+                            job.flags.force_best,
+                    };
+                }
+                continue;
+            },
+            else => {},
+        }
         const state_kind: enum {
             multiversion,
             user_installed,
@@ -960,7 +1007,11 @@ fn generateJobs(
                 }
             },
             .multiversion, .user_installed, .allow_uninstall => {},
-            .update, .dist_sync => return error.UnsupportedJob,
+            .update, .dist_sync => {
+                if (std.meta.activeTag(job.selection) != .all) {
+                    return error.UnsupportedJob;
+                }
+            },
         }
     }
 }
@@ -1936,6 +1987,76 @@ test "mechanical jobs emit clauses and preserve package policy state" {
     try std.testing.expect(saw_replacement_block);
     try std.testing.expect(saw_weak_lock);
     try std.testing.expectEqual(@as(usize, 2), system_job_failures);
+}
+
+test "update and distro sync mark installed replacement intent" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var graph_builder = TestGraphBuilder.init(arena_state.allocator());
+    const installed = try graph_builder.addRepository("@System", .installed);
+    const available = try graph_builder.addRepository("available", .available);
+    _ = try graph_builder.addPackage(installed, .{ .name = "installed" });
+    _ = try graph_builder.addPackage(available, .{
+        .name = "installed",
+        .version = "2",
+    });
+    var graph = try graph_builder.finish(&arena_state);
+    defer graph.deinit();
+
+    inline for ([_]struct {
+        action: solver_model.JobAction,
+        kind: ReplacementKind,
+    }{
+        .{ .action = .update, .kind = .update },
+        .{ .action = .dist_sync, .kind = .dist_sync },
+    }) |entry| {
+        var formula = try generateBase(
+            std.testing.allocator,
+            &graph.universe,
+            .{ .jobs = &.{.{
+                .action = entry.action,
+                .selection = .all,
+                .flags = .{ .force_best = true },
+            }} },
+            testArchitecture(),
+        );
+        defer formula.deinit();
+        try std.testing.expectEqual(
+            entry.kind,
+            formula.package_states[0].replacement.kind,
+        );
+        try std.testing.expect(
+            formula.package_states[0].replacement.force_best,
+        );
+        for (formula.clauses) |clause| {
+            try std.testing.expect(std.meta.activeTag(clause.origin) != .job);
+        }
+
+        try std.testing.expectError(
+            error.UnsupportedJob,
+            generateBase(
+                std.testing.allocator,
+                &graph.universe,
+                .{ .jobs = &.{.{
+                    .action = entry.action,
+                    .selection = .{ .name = "installed" },
+                }} },
+                testArchitecture(),
+            ),
+        );
+        try std.testing.expectError(
+            error.UnsupportedJob,
+            generateBase(
+                std.testing.allocator,
+                &graph.universe,
+                .{ .jobs = &.{.{
+                    .action = entry.action,
+                    .selection = .all,
+                    .flags = .{ .clean_deps = true },
+                }} },
+                testArchitecture(),
+            ),
+        );
+    }
 }
 
 test "weak metadata records deterministic descriptors without hard implications" {
