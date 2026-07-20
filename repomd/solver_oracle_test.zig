@@ -530,6 +530,82 @@ test "effective jobs own exact selections including synthetic user-installed job
     ) != null);
 }
 
+test "allow erasing replaces an installed conflict and preserves unrelated packages" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{ .name = "conflicting" });
+    try builder.addPackage(installed, .{ .name = "unrelated" });
+    try builder.addPackage(available, .{
+        .name = "requested",
+        .conflicts = &.{relation("conflicting")},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var allow_erasing = policy();
+    allow_erasing.allow_erasing = true;
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(2) },
+        }} },
+        allow_erasing,
+    );
+    defer observation.deinit();
+
+    try testing.expect(!containsSelectedName(
+        &graph,
+        &observation,
+        "conflicting",
+    ));
+    try testing.expect(containsSelectedName(
+        &graph,
+        &observation,
+        "unrelated",
+    ));
+    try testing.expect(containsSelectedName(
+        &graph,
+        &observation,
+        "requested",
+    ));
+    try testing.expectEqual(@as(usize, 0), observation.outcome.problems.len);
+    try testing.expectEqual(@as(usize, 0), observation.outcome.skipped_jobs.len);
+}
+
+test "allow erasing permits reverse dependency cascades" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    try builder.addPackage(installed, .{ .name = "dependency" });
+    try builder.addPackage(installed, .{
+        .name = "application",
+        .requires = &.{relation("dependency")},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var allow_erasing = policy();
+    allow_erasing.allow_erasing = true;
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .erase,
+            .selection = .{ .package = @enumFromInt(0) },
+        }} },
+        allow_erasing,
+    );
+    defer observation.deinit();
+
+    try testing.expectEqual(@as(usize, 0), observation.selected.len);
+    try testing.expectEqual(@as(usize, 0), observation.outcome.problems.len);
+    try testing.expectEqual(@as(usize, 0), observation.outcome.skipped_jobs.len);
+}
+
 test "downgrade and reinstall require exact package selections" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     var builder = GraphBuilder.init(arena_state.allocator());

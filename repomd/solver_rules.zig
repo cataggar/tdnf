@@ -127,6 +127,7 @@ pub const OwnedFormula = struct {
     allocator: std.mem.Allocator,
     universe: *const solver_model.Universe,
     architecture: ?solver_model.ArchitecturePolicy = null,
+    replacement_kind: ReplacementKind = .none,
     clauses: []const Clause,
     literals: []const Literal,
     weak_requests: []const WeakRequest,
@@ -551,6 +552,7 @@ pub fn generateBase(
         goal,
         package_states,
     );
+    const replacement_kind = try goalReplacementKind(goal);
 
     const install_candidates = try allocator.alloc(bool, universe.packages.len);
     defer allocator.free(install_candidates);
@@ -596,12 +598,29 @@ pub fn generateBase(
         .allocator = allocator,
         .universe = universe,
         .architecture = architecture,
+        .replacement_kind = replacement_kind,
         .clauses = clauses,
         .literals = literals,
         .weak_requests = weak_requests,
         .weak_candidates = weak_candidates,
         .package_states = package_states,
     };
+}
+
+fn goalReplacementKind(goal: solver_model.Goal) GenerateError!ReplacementKind {
+    var replacement_kind: ReplacementKind = .none;
+    for (goal.jobs) |job| {
+        const job_kind: ReplacementKind = switch (job.action) {
+            .update => .update,
+            .dist_sync => .dist_sync,
+            else => continue,
+        };
+        if (replacement_kind != .none and replacement_kind != job_kind) {
+            return error.UnsupportedJob;
+        }
+        replacement_kind = job_kind;
+    }
+    return replacement_kind;
 }
 
 fn collectPackageStates(
@@ -2024,6 +2043,7 @@ test "update and distro sync mark installed replacement intent" {
             entry.kind,
             formula.package_states[0].replacement.kind,
         );
+        try std.testing.expectEqual(entry.kind, formula.replacement_kind);
         try std.testing.expect(
             formula.package_states[0].replacement.force_best,
         );

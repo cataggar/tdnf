@@ -412,6 +412,11 @@ fn setSolverFlag(
     if (enabled) try flags.append(flag);
 }
 
+fn queueElements(queue: *const c.Queue) []const c.Id {
+    if (queue.count == 0) return &.{};
+    return queue.elements[0..@intCast(queue.count)];
+}
+
 fn collectSelected(
     arena: std.mem.Allocator,
     state: *const PoolState,
@@ -423,7 +428,7 @@ fn collectSelected(
     _ = c.transaction_installedresult(transaction, &raw);
 
     var selected = std.array_list.Managed(solver_model.PackageId).init(arena);
-    for (raw.elements[0..@intCast(raw.count)]) |solvid| {
+    for (queueElements(&raw)) |solvid| {
         const package = packageIdForSolvid(state, solvid) orelse {
             if (isResultSentinel(solvid)) continue;
             return error.UnsupportedResult;
@@ -448,7 +453,7 @@ fn collectActions(
         c.SOLVER_TRANSACTION_SHOW_OBSOLETES |
         c.SOLVER_TRANSACTION_CHANGE_IS_REINSTALL;
 
-    for (transaction.*.steps.elements[0..@intCast(transaction.*.steps.count)]) |solvid| {
+    for (queueElements(&transaction.*.steps)) |solvid| {
         const package_id = packageIdForSolvid(state, solvid) orelse {
             if (isResultSentinel(solvid)) continue;
             return error.UnsupportedResult;
@@ -483,7 +488,7 @@ fn collectActions(
             c.queue_init(&prior_queue);
             defer c.queue_free(&prior_queue);
             c.transaction_all_obs_pkgs(transaction, solvid, &prior_queue);
-            for (prior_queue.elements[0..@intCast(prior_queue.count)]) |prior_solvid| {
+            for (queueElements(&prior_queue)) |prior_solvid| {
                 const candidate = packageIdForSolvid(state, prior_solvid) orelse {
                     if (isResultSentinel(prior_solvid)) continue;
                     return error.UnsupportedResult;
@@ -712,7 +717,7 @@ fn collectOrder(
 ) SolveError![]const OrderStep {
     c.transaction_order(transaction, 0);
     var order = std.array_list.Managed(OrderStep).init(arena);
-    for (transaction.*.steps.elements[0..@intCast(transaction.*.steps.count)]) |solvid| {
+    for (queueElements(&transaction.*.steps)) |solvid| {
         const package_id = packageIdForSolvid(state, solvid) orelse {
             if (isResultSentinel(solvid)) continue;
             return error.UnsupportedResult;
