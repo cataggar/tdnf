@@ -4,8 +4,9 @@
 //! obsoleting replacement is selected and ranks ordinary job and requirement
 //! candidates by repository priority, architecture, same-name package EVR,
 //! and common versioned provides. It also handles update-all, distro-sync-all,
-//! weak dependency selection, and ordinary allow-erasing. Skip-broken and
-//! cleanup policy remain separate follow-up work.
+//! weak dependency selection, ordinary allow-erasing, and rule-class-aware
+//! skipping of broken exact install jobs. Cleanup policy remains separate
+//! follow-up work.
 
 const std = @import("std");
 const query_index = @import("index.zig");
@@ -49,6 +50,22 @@ pub const WeakResult = struct {
     }
 };
 
+pub const SkipBrokenResult = struct {
+    allocator: std.mem.Allocator,
+    result: solver_search.Result,
+    skipped_jobs: []const solver_model.JobId,
+
+    pub fn deinit(self: *SkipBrokenResult) void {
+        self.allocator.free(self.skipped_jobs);
+        self.result.deinit();
+        self.* = undefined;
+    }
+};
+
+pub const SkipBrokenError = solver_search.SolveError || error{
+    UnsupportedPolicy,
+};
+
 pub const PrepareError = error{
     OutOfMemory,
     InvalidFormula,
@@ -66,6 +83,7 @@ pub const Prepared = struct {
     allocator: std.mem.Allocator,
     formula: solver_rules.OwnedFormula,
     decision_policy: solver_search.CandidateDecisionPolicy,
+    best: bool = false,
 
     pub fn solve(
         self: *const Prepared,
@@ -88,6 +106,17 @@ pub const Prepared = struct {
             error.InvalidCandidatePolicy => return error.InvalidDecisionPolicy,
             else => |solve_error| return solve_error,
         };
+    }
+
+    /// Skip up to `max_skip_broken_jobs` exact install jobs whose
+    /// unsatisfiable cores require package rules.
+    ///
+    /// Job-only contradictions and hard policy failures remain unsatisfiable.
+    pub fn solveSkipBroken(
+        self: *const Prepared,
+        allocator: std.mem.Allocator,
+    ) SkipBrokenError!SkipBrokenResult {
+        return solveSkippingBrokenJobs(self, allocator);
     }
 
     /// Resolve ordinary recommends and supplements after the hard solution.
@@ -156,8 +185,8 @@ pub const Prepared = struct {
 
 /// Copy a base formula and append installed-retention clauses.
 ///
-/// The returned formula still borrows the universe, repository metadata, and
-/// architecture policy strings.
+/// The returned formula still borrows the universe, source jobs, repository
+/// metadata, and architecture policy strings.
 pub fn prepareInstalledRetention(
     allocator: std.mem.Allocator,
     base: *const solver_rules.OwnedFormula,
@@ -504,6 +533,7 @@ pub fn prepareWithOptions(
         .formula = .{
             .allocator = allocator,
             .universe = base.universe,
+            .jobs = base.jobs,
             .architecture = base.architecture,
             .replacement_kind = base.replacement_kind,
             .clauses = owned_clauses,
@@ -520,7 +550,354 @@ pub fn prepareWithOptions(
             .groups = owned_candidate_groups,
             .candidates = owned_policy_candidates,
         },
+        .best = options.best,
     };
+}
+
+const PackageRuleMode = enum {
+    include,
+    omit,
+};
+
+fn solveSkippingBrokenJobs(
+    prepared: *const Prepared,
+    allocator: std.mem.Allocator,
+) SkipBrokenError!SkipBrokenResult {
+    if (prepared.best or
+        prepared.formula.jobs.len > solver_model.max_skip_broken_jobs or
+        prepared.formula.replacement_kind != .none)
+    {
+        return error.UnsupportedPolicy;
+    }
+    const skipped = try allocator.alloc(bool, prepared.formula.jobs.len);
+    defer allocator.free(skipped);
+    @memset(skipped, false);
+    try validateSkipBrokenGoal(prepared, skipped);
+    @memset(skipped, false);
+
+    const trial = try allocator.alloc(bool, prepared.formula.jobs.len);
+    defer allocator.free(trial);
+
+    while (true) {
+        var result = try solveFiltered(
+            prepared,
+            allocator,
+            skipped,
+            .include,
+        );
+        errdefer result.deinit();
+        if (result == .satisfiable) {
+            const skipped_jobs = try collectSkippedJobIds(
+                allocator,
+                skipped,
+                true,
+            );
+            return .{
+                .allocator = allocator,
+                .result = result,
+                .skipped_jobs = skipped_jobs,
+            };
+        }
+
+        @memcpy(trial, skipped);
+        for (trial, skipped) |*excluded, already_skipped| {
+            if (!already_skipped) excluded.* = true;
+        }
+        var hard_result = try solveFiltered(
+            prepared,
+            allocator,
+            trial,
+            .include,
+        );
+        const hard_satisfiable = hard_result == .satisfiable;
+        hard_result.deinit();
+        if (!hard_satisfiable) {
+            const skipped_jobs = try collectSkippedJobIds(
+                allocator,
+                skipped,
+                false,
+            );
+            return .{
+                .allocator = allocator,
+                .result = result,
+                .skipped_jobs = skipped_jobs,
+            };
+        }
+
+        var found_individually_broken = false;
+        for (skipped, 0..) |already_skipped, job_index| {
+            if (already_skipped) continue;
+            @memset(trial, true);
+            trial[job_index] = false;
+            var probe = try solveFiltered(
+                prepared,
+                allocator,
+                trial,
+                .include,
+            );
+            const probe_satisfiable = probe == .satisfiable;
+            probe.deinit();
+            if (probe_satisfiable) continue;
+
+            var package_free = try solveFiltered(
+                prepared,
+                allocator,
+                trial,
+                .omit,
+            );
+            const package_free_satisfiable =
+                package_free == .satisfiable;
+            package_free.deinit();
+            if (!package_free_satisfiable) {
+                const skipped_jobs = try collectSkippedJobIds(
+                    allocator,
+                    skipped,
+                    false,
+                );
+                return .{
+                    .allocator = allocator,
+                    .result = result,
+                    .skipped_jobs = skipped_jobs,
+                };
+            }
+            skipped[job_index] = true;
+            found_individually_broken = true;
+        }
+        if (found_individually_broken) {
+            result.deinit();
+            continue;
+        }
+
+        @memcpy(trial, skipped);
+        for (trial, skipped) |*excluded, already_skipped| {
+            if (already_skipped) continue;
+            excluded.* = true;
+            var probe = try solveFiltered(
+                prepared,
+                allocator,
+                trial,
+                .include,
+            );
+            const probe_satisfiable = probe == .satisfiable;
+            probe.deinit();
+            if (probe_satisfiable) excluded.* = false;
+        }
+
+        var package_free = try solveFiltered(
+            prepared,
+            allocator,
+            trial,
+            .omit,
+        );
+        const package_free_satisfiable = package_free == .satisfiable;
+        package_free.deinit();
+        if (!package_free_satisfiable) {
+            const skipped_jobs = try collectSkippedJobIds(
+                allocator,
+                skipped,
+                false,
+            );
+            return .{
+                .allocator = allocator,
+                .result = result,
+                .skipped_jobs = skipped_jobs,
+            };
+        }
+
+        var found_core_job = false;
+        for (skipped, trial) |*is_skipped, excluded| {
+            if (is_skipped.* or excluded) continue;
+            is_skipped.* = true;
+            found_core_job = true;
+        }
+        if (!found_core_job) {
+            return error.InternalSolverFailure;
+        }
+        result.deinit();
+    }
+}
+
+fn validateSkipBrokenGoal(
+    prepared: *const Prepared,
+    seen_jobs: []bool,
+) SkipBrokenError!void {
+    if (seen_jobs.len != prepared.formula.jobs.len) {
+        return error.InvalidFormula;
+    }
+    for (prepared.formula.jobs) |job| {
+        if (job.action != .install or
+            std.meta.activeTag(job.selection) != .package or
+            job.flags.clean_deps or
+            job.flags.force_best or
+            job.flags.targeted or
+            job.flags.not_by_user or
+            job.flags.weak)
+        {
+            return error.UnsupportedPolicy;
+        }
+        const package_id = job.selection.package;
+        if (@intFromEnum(package_id) >= prepared.formula.universe.packages.len) {
+            return error.InvalidFormula;
+        }
+    }
+    for (prepared.formula.clauses) |clause| {
+        const job_id = switch (clause.origin) {
+            .job => |value| value,
+            else => continue,
+        };
+        const job_index: usize = @intFromEnum(job_id);
+        if (job_index >= seen_jobs.len or
+            seen_jobs[job_index] or
+            clause.disposition != .hard)
+        {
+            return error.InvalidFormula;
+        }
+        const literals = checkedClauseLiterals(
+            &prepared.formula,
+            clause,
+        ) catch return error.InvalidFormula;
+        const selected_package = switch (prepared.formula.jobs[job_index].selection) {
+            .package => |package_id| package_id,
+            else => unreachable,
+        };
+        if (literals.len != 1 or
+            !literals[0].positive() or
+            literals[0].package() != selected_package)
+        {
+            return error.InvalidFormula;
+        }
+        seen_jobs[job_index] = true;
+    }
+    for (seen_jobs) |seen| {
+        if (!seen) return error.InvalidFormula;
+    }
+}
+
+fn solveFiltered(
+    prepared: *const Prepared,
+    allocator: std.mem.Allocator,
+    excluded_jobs: []const bool,
+    package_rules: PackageRuleMode,
+) SkipBrokenError!solver_search.Result {
+    const clause_mapping = try allocator.alloc(
+        ?u32,
+        prepared.formula.clauses.len,
+    );
+    defer allocator.free(clause_mapping);
+    @memset(clause_mapping, null);
+
+    var clauses = std.array_list.Managed(solver_rules.Clause).init(allocator);
+    defer clauses.deinit();
+    for (prepared.formula.clauses, 0..) |clause, clause_index| {
+        if (clause.origin == .job) {
+            const job_index: usize = @intFromEnum(clause.origin.job);
+            if (job_index >= excluded_jobs.len) return error.InvalidFormula;
+            if (excluded_jobs[job_index]) continue;
+        } else if (package_rules == .omit and
+            isIntrinsicPackageRule(clause.origin))
+        {
+            continue;
+        }
+        if (clauses.items.len == std.math.maxInt(u32)) {
+            return error.FormulaTooLarge;
+        }
+        clause_mapping[clause_index] = @intCast(clauses.items.len);
+        try clauses.append(clause);
+    }
+
+    var groups = CandidateGroupList.init(allocator);
+    defer groups.deinit();
+    var candidates = PackageIdList.init(allocator);
+    defer candidates.deinit();
+    for (prepared.decision_policy.groups) |group| {
+        const clause_index: usize = @intCast(group.clause_index);
+        if (clause_index >= clause_mapping.len) {
+            return error.InvalidDecisionPolicy;
+        }
+        const filtered_clause = clause_mapping[clause_index] orelse continue;
+        const source_start: usize = @intCast(group.candidates.start);
+        const source_len: usize = @intCast(group.candidates.len);
+        if (source_start > prepared.decision_policy.candidates.len or
+            source_len >
+                prepared.decision_policy.candidates.len - source_start)
+        {
+            return error.InvalidDecisionPolicy;
+        }
+        const source = prepared.decision_policy.candidates[source_start .. source_start + source_len];
+        if (candidates.items.len > std.math.maxInt(u32) or
+            source.len > std.math.maxInt(u32) - candidates.items.len)
+        {
+            return error.FormulaTooLarge;
+        }
+        const start = candidates.items.len;
+        try candidates.appendSlice(source);
+        try groups.append(.{
+            .clause_index = filtered_clause,
+            .candidates = .{
+                .start = @intCast(start),
+                .len = @intCast(source.len),
+            },
+        });
+    }
+
+    const formula = solver_rules.OwnedFormula{
+        .allocator = allocator,
+        .universe = prepared.formula.universe,
+        .jobs = prepared.formula.jobs,
+        .architecture = prepared.formula.architecture,
+        .replacement_kind = prepared.formula.replacement_kind,
+        .clauses = clauses.items,
+        .literals = prepared.formula.literals,
+        .weak_requests = prepared.formula.weak_requests,
+        .weak_candidates = prepared.formula.weak_candidates,
+        .package_states = prepared.formula.package_states,
+    };
+    return solver_search.solveWithCandidatePolicy(
+        allocator,
+        &formula,
+        &.{},
+        .{
+            .fallback = prepared.decision_policy.fallback,
+            .groups = groups.items,
+            .candidates = candidates.items,
+        },
+    ) catch |err| switch (err) {
+        error.InvalidCandidatePolicy => return error.InvalidDecisionPolicy,
+        else => |solve_error| return solve_error,
+    };
+}
+
+fn isIntrinsicPackageRule(origin: solver_rules.RuleOrigin) bool {
+    return switch (origin) {
+        .not_installable,
+        .requirement,
+        .conflict,
+        .obsoletes,
+        .same_name,
+        => true,
+        .installed_keep, .job => false,
+    };
+}
+
+fn collectSkippedJobIds(
+    allocator: std.mem.Allocator,
+    skipped: []const bool,
+    include_skipped: bool,
+) error{OutOfMemory}![]const solver_model.JobId {
+    var count: usize = 0;
+    if (include_skipped) {
+        for (skipped) |is_skipped| count += @intFromBool(is_skipped);
+    }
+    const ids = try allocator.alloc(solver_model.JobId, count);
+    var cursor: usize = 0;
+    if (include_skipped) {
+        for (skipped, 0..) |is_skipped, job_index| {
+            if (!is_skipped) continue;
+            ids[cursor] = @enumFromInt(@as(u32, @intCast(job_index)));
+            cursor += 1;
+        }
+    }
+    return ids;
 }
 
 fn rankReplacementGroup(
@@ -5973,6 +6350,449 @@ test "global allow erasing permits reverse dependency cascades" {
     );
 }
 
+test "skip broken keeps satisfiable exact install jobs" {
+    var available_relations = [_]metadata.Relation{
+        .{ .name = "missing-capability" },
+    };
+    var available_packages = [_]metadata.Package{
+        testPackage("good", "1"),
+        testPackage("broken", "1"),
+    };
+    available_packages[1].requires = .{ .start = 0, .len = 1 };
+    const available_model = metadata.RepositoryModel{
+        .packages = &available_packages,
+        .relations = &available_relations,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &available_model }},
+    );
+    defer universe.deinit();
+    const goal = solver_model.Goal{ .jobs = &.{
+        .{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(0) },
+        },
+        .{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(1) },
+        },
+    } };
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        goal,
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    var blocked = try prepared.solve(std.testing.allocator);
+    defer blocked.deinit();
+    try std.testing.expect(blocked == .unsatisfiable);
+
+    var skipped = try prepared.solveSkipBroken(
+        std.testing.allocator,
+    );
+    defer skipped.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ true, false },
+        skipped.result.satisfiable.values,
+    );
+    try std.testing.expectEqualSlices(
+        solver_model.JobId,
+        &.{@enumFromInt(1)},
+        skipped.skipped_jobs,
+    );
+}
+
+test "skip broken drops every exact install job in a package conflict" {
+    var available_relations = [_]metadata.Relation{
+        .{ .name = "second" },
+    };
+    var available_packages = [_]metadata.Package{
+        testPackage("first", "1"),
+        testPackage("second", "1"),
+    };
+    available_packages[0].conflicts = .{ .start = 0, .len = 1 };
+    const available_model = metadata.RepositoryModel{
+        .packages = &available_packages,
+        .relations = &available_relations,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &available_model }},
+    );
+    defer universe.deinit();
+    const goal = solver_model.Goal{ .jobs = &.{
+        .{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(0) },
+        },
+        .{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(1) },
+        },
+    } };
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        goal,
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    var skipped = try prepared.solveSkipBroken(
+        std.testing.allocator,
+    );
+    defer skipped.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, false },
+        skipped.result.satisfiable.values,
+    );
+    try std.testing.expectEqualSlices(
+        solver_model.JobId,
+        &.{ @enumFromInt(0), @enumFromInt(1) },
+        skipped.skipped_jobs,
+    );
+}
+
+test "skip broken resolves multiple independent package failures" {
+    var available_relations = [_]metadata.Relation{
+        .{ .name = "missing-one" },
+        .{ .name = "missing-two" },
+    };
+    var available_packages = [_]metadata.Package{
+        testPackage("broken-one", "1"),
+        testPackage("good", "1"),
+        testPackage("broken-two", "1"),
+    };
+    available_packages[0].requires = .{ .start = 0, .len = 1 };
+    available_packages[2].requires = .{ .start = 1, .len = 1 };
+    const available_model = metadata.RepositoryModel{
+        .packages = &available_packages,
+        .relations = &available_relations,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &available_model }},
+    );
+    defer universe.deinit();
+    const goal = solver_model.Goal{ .jobs = &.{
+        .{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(0) },
+        },
+        .{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(1) },
+        },
+        .{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(2) },
+        },
+    } };
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        goal,
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    var skipped = try prepared.solveSkipBroken(
+        std.testing.allocator,
+    );
+    defer skipped.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, true, false },
+        skipped.result.satisfiable.values,
+    );
+    try std.testing.expectEqualSlices(
+        solver_model.JobId,
+        &.{ @enumFromInt(0), @enumFromInt(2) },
+        skipped.skipped_jobs,
+    );
+}
+
+test "skip broken resolves independent conflicting job cores" {
+    var available_relations = [_]metadata.Relation{
+        .{ .name = "second-a" },
+        .{ .name = "second-b" },
+    };
+    var available_packages = [_]metadata.Package{
+        testPackage("first-a", "1"),
+        testPackage("second-a", "1"),
+        testPackage("first-b", "1"),
+        testPackage("second-b", "1"),
+        testPackage("good", "1"),
+    };
+    available_packages[0].conflicts = .{ .start = 0, .len = 1 };
+    available_packages[2].conflicts = .{ .start = 1, .len = 1 };
+    const available_model = metadata.RepositoryModel{
+        .packages = &available_packages,
+        .relations = &available_relations,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &available_model }},
+    );
+    defer universe.deinit();
+    const goal = solver_model.Goal{ .jobs = &.{
+        .{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(0) },
+        },
+        .{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(1) },
+        },
+        .{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(2) },
+        },
+        .{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(3) },
+        },
+        .{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(4) },
+        },
+    } };
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        goal,
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer prepared.deinit();
+
+    var skipped = try prepared.solveSkipBroken(
+        std.testing.allocator,
+    );
+    defer skipped.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, false, false, false, true },
+        skipped.result.satisfiable.values,
+    );
+    try std.testing.expectEqualSlices(
+        solver_model.JobId,
+        &.{
+            @enumFromInt(0),
+            @enumFromInt(1),
+            @enumFromInt(2),
+            @enumFromInt(3),
+        },
+        skipped.skipped_jobs,
+    );
+}
+
+test "allow erasing resolves package conflicts before skip broken" {
+    var installed_packages = [_]metadata.Package{
+        testPackage("installed", "1"),
+    };
+    var available_relations = [_]metadata.Relation{
+        .{ .name = "installed" },
+    };
+    var available_packages = [_]metadata.Package{
+        testPackage("requested", "1"),
+    };
+    available_packages[0].conflicts = .{ .start = 0, .len = 1 };
+    const installed_model = metadata.RepositoryModel{
+        .packages = &installed_packages,
+    };
+    const available_model = metadata.RepositoryModel{
+        .packages = &available_packages,
+        .relations = &available_relations,
+    };
+    const installed_states = [_]solver_model.InstalledState{
+        .{ .rpmdb_hnum = 1, .reason = .automatic },
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{
+            .{
+                .id = "@System",
+                .model = &installed_model,
+                .kind = .installed,
+                .installed_states = &installed_states,
+            },
+            .{ .id = "available", .model = &available_model },
+        },
+    );
+    defer universe.deinit();
+    const goal = solver_model.Goal{ .jobs = &.{.{
+        .action = .install,
+        .selection = .{ .package = @enumFromInt(1) },
+    }} };
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        goal,
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareWithOptions(
+        std.testing.allocator,
+        &base,
+        .{ .allow_erasing = true },
+    );
+    defer prepared.deinit();
+
+    var skipped = try prepared.solveSkipBroken(
+        std.testing.allocator,
+    );
+    defer skipped.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, true },
+        skipped.result.satisfiable.values,
+    );
+    try std.testing.expectEqual(@as(usize, 0), skipped.skipped_jobs.len);
+}
+
+test "skip broken rejects non-exact and policy-changing jobs" {
+    var available_packages = [_]metadata.Package{
+        testPackage("package", "1"),
+    };
+    const available_model = metadata.RepositoryModel{
+        .packages = &available_packages,
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{ .id = "available", .model = &available_model }},
+    );
+    defer universe.deinit();
+
+    const cases = [_]solver_model.Job{
+        .{ .action = .install, .selection = .{ .name = "package" } },
+        .{ .action = .erase, .selection = .{ .package = @enumFromInt(0) } },
+        .{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(0) },
+            .flags = .{ .force_best = true },
+        },
+    };
+    for (cases) |job| {
+        const goal = solver_model.Goal{ .jobs = &.{job} };
+        var base = try solver_rules.generateBase(
+            std.testing.allocator,
+            &universe,
+            goal,
+            testArchitecture(),
+        );
+        defer base.deinit();
+        var prepared = try prepareInstalledRetention(
+            std.testing.allocator,
+            &base,
+        );
+        defer prepared.deinit();
+        try std.testing.expectError(
+            error.UnsupportedPolicy,
+            prepared.solveSkipBroken(std.testing.allocator),
+        );
+    }
+
+    const best_goal = solver_model.Goal{ .jobs = &.{.{
+        .action = .install,
+        .selection = .{ .package = @enumFromInt(0) },
+    }} };
+    var best_base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        best_goal,
+        testArchitecture(),
+    );
+    defer best_base.deinit();
+    var best_prepared = try prepareWithOptions(
+        std.testing.allocator,
+        &best_base,
+        .{ .best = true },
+    );
+    defer best_prepared.deinit();
+    try std.testing.expectError(
+        error.UnsupportedPolicy,
+        best_prepared.solveSkipBroken(std.testing.allocator),
+    );
+
+    var too_many_jobs: [solver_model.max_skip_broken_jobs + 1]solver_model.Job = undefined;
+    for (&too_many_jobs) |*job| {
+        job.* = .{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(0) },
+        };
+    }
+    var too_many_base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &too_many_jobs },
+        testArchitecture(),
+    );
+    defer too_many_base.deinit();
+    var too_many_prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &too_many_base,
+    );
+    defer too_many_prepared.deinit();
+    try std.testing.expectError(
+        error.UnsupportedPolicy,
+        too_many_prepared.solveSkipBroken(std.testing.allocator),
+    );
+
+    var malformed_states = [_]solver_rules.PackageState{.{}};
+    const malformed_literals = [_]solver_rules.Literal{
+        solver_rules.Literal.init(@enumFromInt(0), false),
+    };
+    const malformed_clauses = [_]solver_rules.Clause{.{
+        .literals = .{ .start = 0, .len = 1 },
+        .origin = .{ .job = @enumFromInt(0) },
+    }};
+    const malformed_base = solver_rules.OwnedFormula{
+        .allocator = std.testing.allocator,
+        .universe = &universe,
+        .jobs = best_goal.jobs,
+        .architecture = testArchitecture(),
+        .clauses = &malformed_clauses,
+        .literals = &malformed_literals,
+        .weak_requests = &.{},
+        .weak_candidates = &.{},
+        .package_states = &malformed_states,
+    };
+    var malformed_prepared = try prepareInstalledRetention(
+        std.testing.allocator,
+        &malformed_base,
+    );
+    defer malformed_prepared.deinit();
+    try std.testing.expectError(
+        error.InvalidFormula,
+        malformed_prepared.solveSkipBroken(std.testing.allocator),
+    );
+}
+
 test "multiversion state remains an explicit policy boundary" {
     var installed_packages = [_]metadata.Package{
         testPackage("parallel", "1"),
@@ -6254,13 +7074,17 @@ fn allocationFailureCase(allocator: std.mem.Allocator) !void {
             },
         },
         .{
-            .literals = .{ .start = 2, .len = 2 },
+            .literals = .{ .start = 2, .len = 1 },
             .origin = .{ .job = @enumFromInt(0) },
         },
     };
     const base = solver_rules.OwnedFormula{
         .allocator = std.testing.allocator,
         .universe = &universe,
+        .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(1) },
+        }},
         .architecture = testArchitecture(),
         .clauses = &clauses,
         .literals = &literals,
@@ -6272,6 +7096,10 @@ fn allocationFailureCase(allocator: std.mem.Allocator) !void {
     defer prepared.deinit();
     var result = try prepared.solve(allocator);
     defer result.deinit();
+    var skip_broken = try prepared.solveSkipBroken(
+        allocator,
+    );
+    defer skip_broken.deinit();
     var weak_result = try prepared.solveWeak(allocator, .{});
     defer weak_result.deinit();
 }
