@@ -223,6 +223,36 @@ fn solveNative(
     };
 }
 
+fn deriveNativeProblems(
+    allocator: std.mem.Allocator,
+    universe: *const solver_model.Universe,
+    goal: solver_model.Goal,
+    solve_policy: solver_model.SolvePolicy,
+) !solver_result.OwnedProblems {
+    var base = try solver_rules.generateBase(
+        allocator,
+        universe,
+        goal,
+        solve_policy.architecture,
+    );
+    defer base.deinit();
+    var prepared = try solver_policy.prepareWithOptions(
+        allocator,
+        &base,
+        .{
+            .best = solve_policy.best,
+            .allow_erasing = solve_policy.allow_erasing,
+            .clean_deps = solve_policy.clean_deps,
+            .protected_names = solve_policy.protected_names,
+        },
+    );
+    defer prepared.deinit();
+    return solver_result.deriveUnsatProblems(
+        allocator,
+        &prepared.formula,
+    );
+}
+
 fn expectNativeMatchesOracle(
     native: *const solver_result.OwnedResult,
     observation: *const oracle.OwnedObservation,
@@ -257,6 +287,66 @@ fn expectNativeMatchesOracle(
             expected.priors,
             actual.priors,
         );
+    }
+}
+
+fn expectProblemsEqual(
+    expected: []const solver_model.Problem,
+    actual: []const solver_model.Problem,
+) !void {
+    try testing.expectEqual(expected.len, actual.len);
+    for (expected, actual) |left, right| {
+        try testing.expectEqual(left.kind, right.kind);
+        try testing.expectEqual(left.package, right.package);
+        try testing.expectEqual(
+            left.related_package,
+            right.related_package,
+        );
+        try testing.expectEqual(left.job, right.job);
+        try testing.expectEqual(left.count, right.count);
+        if (left.capability) |left_relation| {
+            const right_relation = right.capability orelse
+                return error.TestExpectedEqual;
+            try testing.expectEqualStrings(
+                left_relation.name,
+                right_relation.name,
+            );
+            try testing.expectEqual(
+                left_relation.comparison,
+                right_relation.comparison,
+            );
+            try testing.expectEqual(left_relation.epoch, right_relation.epoch);
+            try testing.expectEqual(left_relation.pre, right_relation.pre);
+            try testing.expectEqual(left_relation.sense, right_relation.sense);
+            try expectOptionalString(
+                left_relation.version,
+                right_relation.version,
+            );
+            try expectOptionalString(
+                left_relation.release,
+                right_relation.release,
+            );
+            try expectOptionalString(
+                left_relation.flags,
+                right_relation.flags,
+            );
+        } else {
+            try testing.expect(right.capability == null);
+        }
+    }
+}
+
+fn expectOptionalString(
+    expected: ?[]const u8,
+    actual: ?[]const u8,
+) !void {
+    if (expected) |left| {
+        try testing.expectEqualStrings(
+            left,
+            actual orelse return error.TestExpectedEqual,
+        );
+    } else {
+        try testing.expect(actual == null);
     }
 }
 
@@ -3572,16 +3662,24 @@ test "oracle normalizes missing requirements without English diagnostics" {
     var graph = try builder.finish(&arena_state);
     defer graph.deinit();
 
+    const goal = solver_model.Goal{ .jobs = &.{.{
+        .action = .install,
+        .selection = .{ .name = "broken" },
+    }} };
     var observation = try oracle.solve(
         testing.allocator,
         &graph.universe,
-        .{ .jobs = &.{.{
-            .action = .install,
-            .selection = .{ .name = "broken" },
-        }} },
+        goal,
         policy(),
     );
     defer observation.deinit();
+    var native = try deriveNativeProblems(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        policy(),
+    );
+    defer native.deinit();
     @memset(&missing_capability, 'x');
 
     try testing.expectEqual(@as(usize, 1), observation.outcome.problems.len);
@@ -3597,6 +3695,14 @@ test "oracle normalizes missing requirements without English diagnostics" {
     try testing.expectEqual(
         @as(u32, 7),
         observation.outcome.problems[0].capability.?.sense,
+    );
+    try expectProblemsEqual(
+        observation.outcome.problems,
+        native.problems,
+    );
+    try testing.expectEqualStrings(
+        "missing-capability",
+        native.problems[0].capability.?.name,
     );
     const canonical = try canonicalText(testing.allocator, &graph, &observation);
     defer testing.allocator.free(canonical);
@@ -3619,21 +3725,306 @@ test "oracle normalizes conflicts" {
     var graph = try builder.finish(&arena_state);
     defer graph.deinit();
 
+    const goal = solver_model.Goal{ .jobs = &.{
+        .{ .action = .install, .selection = .{ .name = "first" } },
+        .{ .action = .install, .selection = .{ .name = "second" } },
+    } };
     var observation = try oracle.solve(
         testing.allocator,
         &graph.universe,
-        .{ .jobs = &.{
-            .{ .action = .install, .selection = .{ .name = "first" } },
-            .{ .action = .install, .selection = .{ .name = "second" } },
-        } },
+        goal,
         policy(),
     );
     defer observation.deinit();
+    var native = try deriveNativeProblems(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        policy(),
+    );
+    defer native.deinit();
 
     try testing.expectEqual(@as(usize, 1), observation.outcome.problems.len);
     try testing.expectEqual(
         solver_model.ProblemKind.conflict,
         observation.outcome.problems[0].kind,
+    );
+    try expectProblemsEqual(
+        observation.outcome.problems,
+        native.problems,
+    );
+}
+
+test "native and oracle normalize no-candidate jobs" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    _ = try builder.addRepo("available", .available, 50);
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    const goal = solver_model.Goal{ .jobs = &.{.{
+        .action = .install,
+        .selection = .{ .name = "missing-package" },
+    }} };
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        policy(),
+    );
+    defer observation.deinit();
+    var native = try deriveNativeProblems(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        policy(),
+    );
+    defer native.deinit();
+
+    try expectProblemsEqual(
+        observation.outcome.problems,
+        native.problems,
+    );
+    const problem = native.problems[0];
+    try testing.expectEqual(
+        solver_model.ProblemKind.no_candidate,
+        problem.kind,
+    );
+    try testing.expectEqual(
+        @as(?solver_model.JobId, @enumFromInt(0)),
+        problem.job,
+    );
+    try testing.expectEqualStrings(
+        "missing-package",
+        problem.capability.?.name,
+    );
+}
+
+test "native and oracle normalize not-installable packages" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(available, .{
+        .name = "wrong-architecture",
+        .arch = "s390x",
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    const goal = solver_model.Goal{ .jobs = &.{.{
+        .action = .install,
+        .selection = .{ .package = @enumFromInt(0) },
+    }} };
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        policy(),
+    );
+    defer observation.deinit();
+    var native = try deriveNativeProblems(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        policy(),
+    );
+    defer native.deinit();
+
+    try expectProblemsEqual(
+        observation.outcome.problems,
+        native.problems,
+    );
+    try testing.expectEqual(
+        solver_model.ProblemKind.not_installable,
+        native.problems[0].kind,
+    );
+}
+
+test "native and oracle normalize same-name conflicts" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(available, .{
+        .name = "duplicate",
+        .version = "1",
+    });
+    try builder.addPackage(available, .{
+        .name = "duplicate",
+        .version = "2",
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    const goal = solver_model.Goal{ .jobs = &.{
+        .{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(0) },
+        },
+        .{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(1) },
+        },
+    } };
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        policy(),
+    );
+    defer observation.deinit();
+    var native = try deriveNativeProblems(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        policy(),
+    );
+    defer native.deinit();
+
+    try expectProblemsEqual(
+        observation.outcome.problems,
+        native.problems,
+    );
+    try testing.expectEqual(
+        solver_model.ProblemKind.conflict,
+        native.problems[0].kind,
+    );
+}
+
+test "native and oracle normalize obsoletes conflicts" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{ .name = "old-package" });
+    try builder.addPackage(available, .{
+        .name = "replacement",
+        .obsoletes = &.{relation("old-package")},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    const goal = solver_model.Goal{ .jobs = &.{
+        .{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(0) },
+        },
+        .{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(1) },
+        },
+    } };
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        policy(),
+    );
+    defer observation.deinit();
+    var native = try deriveNativeProblems(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        policy(),
+    );
+    defer native.deinit();
+
+    try expectProblemsEqual(
+        observation.outcome.problems,
+        native.problems,
+    );
+    try testing.expectEqual(
+        solver_model.ProblemKind.obsoletes,
+        native.problems[0].kind,
+    );
+}
+
+test "native problem derivation rejects multiple independent cores" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(available, .{
+        .name = "first",
+        .requires = &.{relation("first-missing")},
+    });
+    try builder.addPackage(available, .{
+        .name = "second",
+        .requires = &.{relation("second-missing")},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    try testing.expectError(
+        error.UnsupportedProblem,
+        deriveNativeProblems(
+            testing.allocator,
+            &graph.universe,
+            .{ .jobs = &.{
+                .{
+                    .action = .install,
+                    .selection = .{ .package = @enumFromInt(0) },
+                },
+                .{
+                    .action = .install,
+                    .selection = .{ .package = @enumFromInt(1) },
+                },
+            } },
+            policy(),
+        ),
+    );
+}
+
+test "native problem derivation rejects multiple cores for one job" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(available, .{
+        .name = "broken",
+        .requires = &.{
+            relation("first-missing"),
+            relation("second-missing"),
+        },
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    try testing.expectError(
+        error.UnsupportedProblem,
+        deriveNativeProblems(
+            testing.allocator,
+            &graph.universe,
+            .{ .jobs = &.{.{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(0) },
+            }} },
+            policy(),
+        ),
+    );
+}
+
+test "native problem derivation rejects installed-retention cores" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{ .name = "installed" });
+    try builder.addPackage(available, .{
+        .name = "request",
+        .conflicts = &.{relation("installed")},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    try testing.expectError(
+        error.UnsupportedProblem,
+        deriveNativeProblems(
+            testing.allocator,
+            &graph.universe,
+            .{ .jobs = &.{.{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(1) },
+            }} },
+            policy(),
+        ),
     );
 }
 
