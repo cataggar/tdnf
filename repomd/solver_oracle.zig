@@ -121,7 +121,9 @@ pub fn solve(
         };
     }
 
-    if (problem_count != 0) {
+    const skip_broken = problem_count != 0 and policy.skip_broken and
+        problemsAreSkippable(solver);
+    if (problem_count != 0 and !skip_broken) {
         const problems = try collectProblems(arena, &state, universe, goal, solver);
         return .{
             .arena_state = arena_state,
@@ -137,6 +139,10 @@ pub fn solve(
         };
     }
 
+    const skipped_jobs = if (skip_broken)
+        try collectSkippedJobs(arena, &state, goal, solver)
+    else
+        &.{};
     const transaction = c.solver_create_transaction(solver) orelse return error.OutOfMemory;
     defer c.transaction_free(transaction);
 
@@ -149,7 +155,7 @@ pub fn solve(
         .outcome = .{
             .actions = actions,
             .problems = &.{},
-            .skipped_jobs = &.{},
+            .skipped_jobs = skipped_jobs,
         },
         .selected = selected,
         .order = order,
@@ -163,8 +169,7 @@ fn validateInputs(
     goal: solver_model.Goal,
     policy: solver_model.SolvePolicy,
 ) SolveError!void {
-    if (policy.skip_broken or
-        !policy.architecture.allow_multilib or
+    if (!policy.architecture.allow_multilib or
         policy.installonly_limit != 0 or
         policy.protected_names.len != 0 or
         policy.installonly_names.len != 0)
@@ -173,6 +178,26 @@ fn validateInputs(
     }
     if (goal.jobs.len > std.math.maxInt(u32)) {
         return error.InvalidModel;
+    }
+    if (policy.skip_broken) {
+        if (policy.best or
+            policy.clean_deps or
+            goal.jobs.len > solver_model.max_skip_broken_jobs)
+        {
+            return error.UnsupportedPolicy;
+        }
+        for (goal.jobs) |job| {
+            if (job.action != .install or
+                std.meta.activeTag(job.selection) != .package or
+                job.flags.clean_deps or
+                job.flags.force_best or
+                job.flags.targeted or
+                job.flags.not_by_user or
+                job.flags.weak)
+            {
+                return error.UnsupportedPolicy;
+            }
+        }
     }
     for (universe.repositories) |repository| {
         if (repository.priority == std.math.minInt(i32)) {
@@ -646,6 +671,70 @@ fn collectProblems(
     }
     problems.items.len = write_index;
     return problems.toOwnedSlice();
+}
+
+fn problemsAreSkippable(solver: *c.Solver) bool {
+    const count = c.solver_problem_count(solver);
+    var problem_number: c.Id = 1;
+    while (problem_number <= count) : (problem_number += 1) {
+        const rule = c.solver_findproblemrule(solver, problem_number);
+        var source: c.Id = 0;
+        var target: c.Id = 0;
+        var dep: c.Id = 0;
+        const rule_type = c.solver_ruleinfo(
+            solver,
+            rule,
+            &source,
+            &target,
+            &dep,
+        );
+        if (rule_type & c.SOLVER_RULE_PKG == 0) return false;
+    }
+    return true;
+}
+
+fn collectSkippedJobs(
+    arena: std.mem.Allocator,
+    state: *const PoolState,
+    goal: solver_model.Goal,
+    solver: *c.Solver,
+) SolveError![]const solver_model.JobId {
+    const skipped = try arena.alloc(bool, goal.jobs.len);
+    @memset(skipped, false);
+
+    var rules: c.Queue = undefined;
+    c.queue_init(&rules);
+    defer c.queue_free(&rules);
+
+    const count = c.solver_problem_count(solver);
+    var problem_number: c.Id = 1;
+    while (problem_number <= count) : (problem_number += 1) {
+        c.solver_findallproblemrules(solver, problem_number, &rules);
+        for (queueElements(&rules)) |rule| {
+            const raw_job_index = c.solver_rule2jobidx(solver, rule);
+            if (raw_job_index == 0) continue;
+            const queue_offset = raw_job_index - 1;
+            if (queue_offset < 0 or queue_offset & 1 != 0) {
+                return error.UnsupportedResult;
+            }
+            const queue_index: usize = @intCast(@divTrunc(queue_offset, 2));
+            if (queue_index >= state.job_ids.items.len) {
+                return error.UnsupportedResult;
+            }
+            const job_id = state.job_ids.items[queue_index] orelse continue;
+            const job_index: usize = @intFromEnum(job_id);
+            if (job_index >= skipped.len) return error.UnsupportedResult;
+            skipped[job_index] = true;
+        }
+    }
+
+    var skipped_jobs = std.array_list.Managed(solver_model.JobId).init(arena);
+    for (skipped, 0..) |is_skipped, job_index| {
+        if (!is_skipped) continue;
+        try skipped_jobs.append(@enumFromInt(@as(u32, @intCast(job_index))));
+    }
+    if (skipped_jobs.items.len == 0) return error.UnsupportedResult;
+    return skipped_jobs.toOwnedSlice();
 }
 
 fn relatedPackageForRule(

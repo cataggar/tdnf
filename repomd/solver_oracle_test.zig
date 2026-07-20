@@ -302,6 +302,14 @@ fn canonicalText(
             },
         );
     }
+    for (observation.outcome.skipped_jobs) |job_id| {
+        try appendFmt(
+            &out,
+            allocator,
+            "skipped_job {d}\n",
+            .{@intFromEnum(job_id)},
+        );
+    }
     for (observation.order, 0..) |step, index| {
         try appendFmt(
             &out,
@@ -406,10 +414,259 @@ test "oracle rejects policies whose semantics are not implemented" {
         oracle.solve(
             testing.allocator,
             &graph.universe,
-            .{ .jobs = &.{} },
+            .{ .jobs = &.{.{
+                .action = .erase,
+                .selection = .{ .package = @enumFromInt(0) },
+            }} },
             unsupported,
         ),
     );
+
+    unsupported.best = true;
+    try testing.expectError(
+        error.UnsupportedPolicy,
+        oracle.solve(
+            testing.allocator,
+            &graph.universe,
+            .{ .jobs = &.{.{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(0) },
+            }} },
+            unsupported,
+        ),
+    );
+
+    unsupported.best = false;
+    var too_many_jobs: [solver_model.max_skip_broken_jobs + 1]solver_model.Job = undefined;
+    for (&too_many_jobs) |*job| {
+        job.* = .{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(0) },
+        };
+    }
+    try testing.expectError(
+        error.UnsupportedPolicy,
+        oracle.solve(
+            testing.allocator,
+            &graph.universe,
+            .{ .jobs = &too_many_jobs },
+            unsupported,
+        ),
+    );
+}
+
+test "skip broken keeps satisfiable exact install jobs" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(available, .{ .name = "good" });
+    try builder.addPackage(available, .{
+        .name = "broken",
+        .requires = &.{relation("missing-capability")},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var skip_policy = policy();
+    skip_policy.skip_broken = true;
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{
+            .{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(0) },
+            },
+            .{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(1) },
+            },
+        } },
+        skip_policy,
+    );
+    defer observation.deinit();
+
+    try testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{@enumFromInt(0)},
+        observation.selected,
+    );
+    try testing.expectEqualSlices(
+        solver_model.JobId,
+        &.{@enumFromInt(1)},
+        observation.outcome.skipped_jobs,
+    );
+    try testing.expectEqual(@as(usize, 0), observation.outcome.problems.len);
+    const canonical = try canonicalText(
+        testing.allocator,
+        &graph,
+        &observation,
+    );
+    defer testing.allocator.free(canonical);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        canonical,
+        "skipped_job 1\n",
+    ) != null);
+}
+
+test "skip broken drops every exact install job in a package conflict" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(available, .{
+        .name = "first",
+        .conflicts = &.{relation("second")},
+    });
+    try builder.addPackage(available, .{ .name = "second" });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var skip_policy = policy();
+    skip_policy.skip_broken = true;
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{
+            .{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(0) },
+            },
+            .{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(1) },
+            },
+        } },
+        skip_policy,
+    );
+    defer observation.deinit();
+
+    try testing.expectEqual(@as(usize, 0), observation.selected.len);
+    try testing.expectEqualSlices(
+        solver_model.JobId,
+        &.{ @enumFromInt(0), @enumFromInt(1) },
+        observation.outcome.skipped_jobs,
+    );
+    try testing.expectEqual(@as(usize, 0), observation.outcome.problems.len);
+}
+
+test "skip broken resolves multiple independent package failures" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(available, .{
+        .name = "broken-one",
+        .requires = &.{relation("missing-one")},
+    });
+    try builder.addPackage(available, .{ .name = "good" });
+    try builder.addPackage(available, .{
+        .name = "broken-two",
+        .requires = &.{relation("missing-two")},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var skip_policy = policy();
+    skip_policy.skip_broken = true;
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{
+            .{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(0) },
+            },
+            .{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(1) },
+            },
+            .{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(2) },
+            },
+        } },
+        skip_policy,
+    );
+    defer observation.deinit();
+
+    try testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{@enumFromInt(1)},
+        observation.selected,
+    );
+    try testing.expectEqualSlices(
+        solver_model.JobId,
+        &.{ @enumFromInt(0), @enumFromInt(2) },
+        observation.outcome.skipped_jobs,
+    );
+    try testing.expectEqual(@as(usize, 0), observation.outcome.problems.len);
+}
+
+test "skip broken resolves independent conflicting job cores" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(available, .{
+        .name = "first-a",
+        .conflicts = &.{relation("second-a")},
+    });
+    try builder.addPackage(available, .{ .name = "second-a" });
+    try builder.addPackage(available, .{
+        .name = "first-b",
+        .conflicts = &.{relation("second-b")},
+    });
+    try builder.addPackage(available, .{ .name = "second-b" });
+    try builder.addPackage(available, .{ .name = "good" });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var skip_policy = policy();
+    skip_policy.skip_broken = true;
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{
+            .{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(0) },
+            },
+            .{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(1) },
+            },
+            .{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(2) },
+            },
+            .{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(3) },
+            },
+            .{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(4) },
+            },
+        } },
+        skip_policy,
+    );
+    defer observation.deinit();
+
+    try testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{@enumFromInt(4)},
+        observation.selected,
+    );
+    try testing.expectEqualSlices(
+        solver_model.JobId,
+        &.{
+            @enumFromInt(0),
+            @enumFromInt(1),
+            @enumFromInt(2),
+            @enumFromInt(3),
+        },
+        observation.outcome.skipped_jobs,
+    );
+    try testing.expectEqual(@as(usize, 0), observation.outcome.problems.len);
 }
 
 test "oracle rejects repository cost until tdnf implements it" {

@@ -126,6 +126,7 @@ pub const ReplacementState = struct {
 pub const OwnedFormula = struct {
     allocator: std.mem.Allocator,
     universe: *const solver_model.Universe,
+    jobs: []const solver_model.Job = &.{},
     architecture: ?solver_model.ArchitecturePolicy = null,
     replacement_kind: ReplacementKind = .none,
     clauses: []const Clause,
@@ -597,6 +598,7 @@ pub fn generateBase(
     return .{
         .allocator = allocator,
         .universe = universe,
+        .jobs = goal.jobs,
         .architecture = architecture,
         .replacement_kind = replacement_kind,
         .clauses = clauses,

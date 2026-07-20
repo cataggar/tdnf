@@ -5,6 +5,9 @@ pub const RepositoryId = enum(u32) { _ };
 pub const PackageId = enum(u32) { _ };
 pub const JobId = enum(u32) { _ };
 
+/// Temporary bound for the first exact-install skip-broken policy slice.
+pub const max_skip_broken_jobs: usize = 64;
+
 pub const RepositoryKind = enum {
     installed,
     available,
