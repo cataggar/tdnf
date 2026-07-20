@@ -1209,7 +1209,7 @@ fn sameEvra(left: metadata.Package, right: metadata.Package) bool {
         std.mem.eql(u8, left.nevra.arch, right.nevra.arch);
 }
 
-fn isSource(architecture: []const u8) bool {
+pub fn isSource(architecture: []const u8) bool {
     return std.mem.eql(u8, architecture, "src") or
         std.mem.eql(u8, architecture, "nosrc");
 }
