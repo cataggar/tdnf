@@ -3,6 +3,9 @@ const metadata = @import("model.zig");
 const coordinator = @import("solver_coordinator.zig");
 const solver_model = @import("solver_model.zig");
 const oracle = @import("solver_oracle.zig");
+const solver_policy = @import("solver_policy.zig");
+const solver_result = @import("solver_result.zig");
+const solver_rules = @import("solver_rules.zig");
 
 const testing = std.testing;
 const golden_schema = "tdnf-libsolv-oracle-v1";
@@ -161,6 +164,121 @@ fn policy() solver_model.SolvePolicy {
     };
 }
 
+fn solveNative(
+    allocator: std.mem.Allocator,
+    universe: *const solver_model.Universe,
+    goal: solver_model.Goal,
+    solve_policy: solver_model.SolvePolicy,
+) !solver_result.OwnedResult {
+    var base = try solver_rules.generateBase(
+        allocator,
+        universe,
+        goal,
+        solve_policy.architecture,
+    );
+    defer base.deinit();
+    var prepared = try solver_policy.prepareWithOptions(
+        allocator,
+        &base,
+        .{
+            .best = solve_policy.best,
+            .allow_erasing = solve_policy.allow_erasing,
+            .clean_deps = solve_policy.clean_deps,
+            .protected_names = solve_policy.protected_names,
+        },
+    );
+    defer prepared.deinit();
+
+    if (solve_policy.skip_broken) {
+        var skipped = try prepared.solveSkipBroken(allocator);
+        defer skipped.deinit();
+        return switch (skipped.result) {
+            .satisfiable => |model| try solver_result.materialize(
+                allocator,
+                .{
+                    .prepared = &prepared,
+                    .model = model,
+                    .skipped_jobs = skipped.skipped_jobs,
+                },
+            ),
+            .unsatisfiable => error.TestUnexpectedResult,
+        };
+    }
+
+    var weak = try prepared.solveWeak(
+        allocator,
+        .{ .enabled = solve_policy.install_weak_deps },
+    );
+    defer weak.deinit();
+    return switch (weak.result) {
+        .satisfiable => |model| try solver_result.materialize(
+            allocator,
+            .{
+                .prepared = &prepared,
+                .model = model,
+                .accepted_weak = weak.accepted,
+            },
+        ),
+        .unsatisfiable => error.TestUnexpectedResult,
+    };
+}
+
+fn expectNativeMatchesOracle(
+    native: *const solver_result.OwnedResult,
+    observation: *const oracle.OwnedObservation,
+) !void {
+    try testing.expectEqualSlices(
+        solver_model.PackageId,
+        observation.selected,
+        native.selected,
+    );
+    try testing.expectEqualSlices(
+        solver_model.JobId,
+        observation.outcome.skipped_jobs,
+        native.outcome.skipped_jobs,
+    );
+    try testing.expectEqual(
+        observation.outcome.actions.len,
+        native.outcome.actions.len,
+    );
+    for (observation.outcome.actions, native.outcome.actions) |
+        expected,
+        actual,
+    | {
+        try testing.expectEqual(expected.package, actual.package);
+        try testing.expectEqual(expected.kind, actual.kind);
+        try testing.expectEqual(expected.reason, actual.reason);
+        try testing.expectEqual(
+            expected.requested_by,
+            actual.requested_by,
+        );
+        try testing.expectEqualSlices(
+            solver_model.PackageId,
+            expected.priors,
+            actual.priors,
+        );
+    }
+}
+
+fn materializeInstallonly(
+    allocator: std.mem.Allocator,
+    solved: *const coordinator.OwnedSolve,
+) !solver_result.OwnedResult {
+    if (solved.problem != null) return error.TestUnexpectedResult;
+    return switch (solved.weak_result.result) {
+        .satisfiable => |model| try solver_result.materialize(
+            allocator,
+            .{
+                .prepared = &solved.prepared,
+                .model = model,
+                .accepted_weak = solved.weak_result.accepted,
+                .eviction_packages = solved.eviction_packages,
+            },
+        ),
+        .unsatisfiable => error.TestUnexpectedResult,
+    };
+}
+
 fn relation(name: []const u8) metadata.Relation {
     return .{ .name = name };
 }
@@ -277,13 +395,33 @@ fn canonicalText(
         try appendFmt(
             &out,
             allocator,
-            "action {d} {t} prior={any} reason={t} job={any}\n",
+            "action {d} {t} priors=[",
             .{
                 @intFromEnum(action.package),
                 action.kind,
-                if (action.prior) |value| @as(?u32, @intFromEnum(value)) else null,
+            },
+        );
+        for (action.priors, 0..) |prior, index| {
+            try appendFmt(
+                &out,
+                allocator,
+                "{s}{d}",
+                .{
+                    if (index == 0) "" else ",",
+                    @intFromEnum(prior),
+                },
+            );
+        }
+        try appendFmt(
+            &out,
+            allocator,
+            "] reason={t} job={any}\n",
+            .{
                 action.reason,
-                if (action.requested_by) |value| @as(?u32, @intFromEnum(value)) else null,
+                if (action.requested_by) |value|
+                    @as(?u32, @intFromEnum(value))
+                else
+                    null,
             },
         );
     }
@@ -519,6 +657,23 @@ test "skip broken keeps satisfiable exact install jobs" {
         canonical,
         "skipped_job 1\n",
     ) != null);
+    var native = try solveNative(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{
+            .{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(0) },
+            },
+            .{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(1) },
+            },
+        } },
+        skip_policy,
+    );
+    defer native.deinit();
+    try expectNativeMatchesOracle(&native, &observation);
 }
 
 test "skip broken drops every exact install job in a package conflict" {
@@ -860,6 +1015,18 @@ test "clean deps removes only the automatic dependency closure of an exact erase
         actionForName(&graph, &observation, "recommended").?.reason,
     );
     try testing.expect(actionForName(&graph, &observation, "unrelated-orphan") == null);
+    var native = try solveNative(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .erase,
+            .selection = .{ .package = @enumFromInt(0) },
+            .flags = .{ .clean_deps = true },
+        }} },
+        cleanup_policy,
+    );
+    defer native.deinit();
+    try expectNativeMatchesOracle(&native, &observation);
 }
 
 test "clean deps adds back every installed provider needed by a survivor" {
@@ -1195,6 +1362,22 @@ test "install-only first install is ordinary even with a zero limit" {
         observation.selected,
     );
     try testing.expectEqual(@as(usize, 1), observation.effective_jobs.len);
+    var native = try coordinator.solveInstallonly(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(0) },
+        }} },
+        installonly_policy,
+    );
+    defer native.deinit();
+    var materialized = try materializeInstallonly(
+        testing.allocator,
+        &native,
+    );
+    defer materialized.deinit();
+    try expectNativeMatchesOracle(&materialized, &observation);
 
     installonly_policy.skip_broken = true;
     try testing.expectError(
@@ -1286,6 +1469,157 @@ test "install-only install and update retain the installed instance" {
         bool,
         &.{ true, true },
         native.weak_result.result.satisfiable.values,
+    );
+    var materialized = try materializeInstallonly(
+        testing.allocator,
+        &native,
+    );
+    defer materialized.deinit();
+    try expectNativeMatchesOracle(
+        &materialized,
+        &updated_observation,
+    );
+}
+
+test "install-only exact replacement materializes as reinstall" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{
+        .name = "kernel",
+        .version = "1",
+    });
+    try builder.addPackage(available, .{
+        .name = "kernel",
+        .version = "1",
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    const goal = solver_model.Goal{ .jobs = &.{.{
+        .action = .reinstall,
+        .selection = .{ .package = @enumFromInt(1) },
+    }} };
+    var installonly_policy = policy();
+    installonly_policy.installonly_names = &.{"kernel"};
+    installonly_policy.installonly_limit = 2;
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        installonly_policy,
+    );
+    defer observation.deinit();
+
+    const effective_jobs = [_]solver_model.Job{
+        goal.jobs[0],
+        .{
+            .action = .multiversion,
+            .selection = .{ .name = "kernel" },
+            .reason = .policy,
+        },
+    };
+    var base = try solver_rules.generateBase(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &effective_jobs },
+        installonly_policy.architecture,
+    );
+    defer base.deinit();
+    var prepared = try solver_policy.prepareWithOptions(
+        testing.allocator,
+        &base,
+        .{ .installonly_policy = true },
+    );
+    defer prepared.deinit();
+    var weak = try prepared.solveWeak(
+        testing.allocator,
+        .{ .enabled = true },
+    );
+    defer weak.deinit();
+    var native = switch (weak.result) {
+        .satisfiable => |model| try solver_result.materialize(
+            testing.allocator,
+            .{
+                .prepared = &prepared,
+                .model = model,
+                .accepted_weak = weak.accepted,
+            },
+        ),
+        .unsatisfiable => return error.TestUnexpectedResult,
+    };
+    defer native.deinit();
+
+    try expectNativeMatchesOracle(&native, &observation);
+    const action = native.outcome.actions[0];
+    try testing.expectEqual(solver_model.ActionKind.reinstall, action.kind);
+    try testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{@enumFromInt(0)},
+        action.priors,
+    );
+}
+
+test "install-only obsoletes materialize as install plus erase" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{
+        .name = "kernel",
+        .version = "1",
+    });
+    try builder.addPackage(installed, .{ .name = "legacy-helper" });
+    try builder.addPackage(available, .{
+        .name = "kernel",
+        .version = "2",
+        .obsoletes = &.{relation("legacy-helper")},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    const goal = solver_model.Goal{ .jobs = &.{.{
+        .action = .install,
+        .selection = .{ .package = @enumFromInt(2) },
+    }} };
+    var installonly_policy = policy();
+    installonly_policy.installonly_names = &.{"kernel"};
+    installonly_policy.installonly_limit = 3;
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        installonly_policy,
+    );
+    defer observation.deinit();
+    var solved = try coordinator.solveInstallonly(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        installonly_policy,
+    );
+    defer solved.deinit();
+    var native = try materializeInstallonly(
+        testing.allocator,
+        &solved,
+    );
+    defer native.deinit();
+
+    try expectNativeMatchesOracle(&native, &observation);
+    try testing.expectEqual(
+        solver_model.ActionKind.erase,
+        actionForPackage(
+            &observation,
+            @enumFromInt(1),
+        ).?.kind,
+    );
+    try testing.expectEqual(
+        solver_model.ActionKind.install,
+        actionForPackage(
+            &observation,
+            @enumFromInt(2),
+        ).?.kind,
     );
 }
 
@@ -1418,6 +1752,12 @@ test "install-only limit evicts install order across architectures" {
         &.{ false, true, true },
         native.weak_result.result.satisfiable.values,
     );
+    var materialized = try materializeInstallonly(
+        testing.allocator,
+        &native,
+    );
+    defer materialized.deinit();
+    try expectNativeMatchesOracle(&materialized, &observation);
 
     installonly_policy.installonly_limit = 1;
     const explicit_goal = solver_model.Goal{ .jobs = &.{
@@ -1461,6 +1801,15 @@ test "install-only limit evicts install order across architectures" {
         bool,
         &.{ false, false, true },
         explicit_native.weak_result.result.satisfiable.values,
+    );
+    var explicit_materialized = try materializeInstallonly(
+        testing.allocator,
+        &explicit_native,
+    );
+    defer explicit_materialized.deinit();
+    try expectNativeMatchesOracle(
+        &explicit_materialized,
+        &explicit,
     );
 }
 
@@ -1899,9 +2248,9 @@ test "oracle resolves dependency chain with versioned requirement" {
         \\selected 0 base-1-1.x86_64
         \\selected 1 library-1-1.x86_64
         \\selected 2 application-1-1.x86_64
-        \\action 0 install prior=null reason=dependency job=null
-        \\action 1 install prior=null reason=dependency job=null
-        \\action 2 install prior=null reason=user job=0
+        \\action 0 install priors=[] reason=dependency job=null
+        \\action 1 install priors=[] reason=dependency job=null
+        \\action 2 install priors=[] reason=user job=0
         \\order 0 install 0
         \\order 1 install 1
         \\order 2 install 2
@@ -1909,6 +2258,17 @@ test "oracle resolves dependency chain with versioned requirement" {
     ,
         golden,
     );
+    var native = try solveNative(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .name = "application" },
+        }} },
+        policy(),
+    );
+    defer native.deinit();
+    try expectNativeMatchesOracle(&native, &observation);
 }
 
 test "oracle deterministically chooses the best alternative provider" {
@@ -2369,7 +2729,22 @@ test "oracle records upgrade prior and newly required dependency" {
     try testing.expect(containsSelectedName(&graph, &observation, "helper"));
     const action = actionForName(&graph, &observation, "application").?;
     try testing.expectEqual(solver_model.ActionKind.upgrade, action.kind);
-    try testing.expectEqual(@as(u32, 0), @intFromEnum(action.prior.?));
+    try testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{@enumFromInt(0)},
+        action.priors,
+    );
+    var native = try solveNative(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .update,
+            .selection = .all,
+        }} },
+        policy(),
+    );
+    defer native.deinit();
+    try expectNativeMatchesOracle(&native, &observation);
 }
 
 test "oracle exact replacement actions follow EVR rather than request label" {
@@ -2398,6 +2773,17 @@ test "oracle exact replacement actions follow EVR rather than request label" {
         solver_model.ActionKind.downgrade,
         actionForName(&graph, &downgrade, "package").?.kind,
     );
+    var native_downgrade = try solveNative(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .downgrade,
+            .selection = .{ .package = @enumFromInt(1) },
+        }} },
+        policy(),
+    );
+    defer native_downgrade.deinit();
+    try expectNativeMatchesOracle(&native_downgrade, &downgrade);
 
     var reinstall = try oracle.solve(
         testing.allocator,
@@ -2413,6 +2799,17 @@ test "oracle exact replacement actions follow EVR rather than request label" {
         solver_model.ActionKind.reinstall,
         actionForName(&graph, &reinstall, "package").?.kind,
     );
+    var native_reinstall = try solveNative(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .reinstall,
+            .selection = .{ .package = @enumFromInt(2) },
+        }} },
+        policy(),
+    );
+    defer native_reinstall.deinit();
+    try expectNativeMatchesOracle(&native_reinstall, &reinstall);
 
     var mislabeled = try oracle.solve(
         testing.allocator,
@@ -2427,6 +2824,198 @@ test "oracle exact replacement actions follow EVR rather than request label" {
     try testing.expectEqual(
         solver_model.ActionKind.upgrade,
         actionForName(&graph, &mislabeled, "package").?.kind,
+    );
+    var native_mislabeled = try solveNative(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .downgrade,
+            .selection = .{ .package = @enumFromInt(3) },
+        }} },
+        policy(),
+    );
+    defer native_mislabeled.deinit();
+    try expectNativeMatchesOracle(&native_mislabeled, &mislabeled);
+}
+
+test "native and oracle retain every exact installed upgrade prior" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{
+        .name = "duplicate",
+        .version = "1",
+    });
+    try builder.addPackage(installed, .{
+        .name = "duplicate",
+        .version = "1",
+    });
+    try builder.addPackage(available, .{
+        .name = "duplicate",
+        .version = "2",
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    const goal = solver_model.Goal{ .jobs = &.{.{
+        .action = .update,
+        .selection = .all,
+    }} };
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        policy(),
+    );
+    defer observation.deinit();
+
+    const action = actionForPackage(
+        &observation,
+        @enumFromInt(2),
+    ) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(solver_model.ActionKind.upgrade, action.kind);
+    try testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{ @enumFromInt(0), @enumFromInt(1) },
+        action.priors,
+    );
+    try testing.expectEqual(
+        @as(u32, 1),
+        graph.universe.package(action.priors[0]).?.installed.?.rpmdb_hnum,
+    );
+    try testing.expectEqual(
+        @as(u32, 2),
+        graph.universe.package(action.priors[1]).?.installed.?.rpmdb_hnum,
+    );
+    var native = try solveNative(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        policy(),
+    );
+    defer native.deinit();
+    try expectNativeMatchesOracle(&native, &observation);
+}
+
+test "replacement kind follows the highest same-name installed prior" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{
+        .name = "duplicate",
+        .version = "1",
+    });
+    try builder.addPackage(installed, .{
+        .name = "duplicate",
+        .version = "3",
+    });
+    try builder.addPackage(available, .{
+        .name = "duplicate",
+        .version = "2",
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    const goal = solver_model.Goal{ .jobs = &.{.{
+        .action = .dist_sync,
+        .selection = .all,
+    }} };
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        policy(),
+    );
+    defer observation.deinit();
+
+    const action = actionForPackage(
+        &observation,
+        @enumFromInt(2),
+    ) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(solver_model.ActionKind.downgrade, action.kind);
+    try testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{ @enumFromInt(0), @enumFromInt(1) },
+        action.priors,
+    );
+    var native = try solveNative(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        policy(),
+    );
+    defer native.deinit();
+    try expectNativeMatchesOracle(&native, &observation);
+}
+
+test "same-name replacement kind takes precedence over extra obsoletes" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{
+        .name = "application",
+        .version = "1",
+    });
+    try builder.addPackage(installed, .{ .name = "legacy-helper" });
+    try builder.addPackage(available, .{
+        .name = "application",
+        .version = "2",
+        .obsoletes = &.{relation("legacy-helper")},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    const goal = solver_model.Goal{ .jobs = &.{.{
+        .action = .install,
+        .selection = .{ .package = @enumFromInt(2) },
+    }} };
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        policy(),
+    );
+    defer observation.deinit();
+
+    const action = actionForPackage(
+        &observation,
+        @enumFromInt(2),
+    ) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(solver_model.ActionKind.upgrade, action.kind);
+    try testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{ @enumFromInt(0), @enumFromInt(1) },
+        action.priors,
+    );
+    var native = try solveNative(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        policy(),
+    );
+    defer native.deinit();
+    try expectNativeMatchesOracle(&native, &observation);
+
+    var protected_policy = policy();
+    protected_policy.protected_names = &.{"legacy-helper"};
+    var protected = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        protected_policy,
+    );
+    defer protected.deinit();
+    try testing.expectEqual(@as(usize, 1), protected.outcome.problems.len);
+    try testing.expectEqual(
+        solver_model.ProblemKind.protected_package,
+        protected.outcome.problems[0].kind,
+    );
+    try testing.expectEqual(
+        @as(?solver_model.PackageId, @enumFromInt(1)),
+        protected.outcome.problems[0].package,
     );
 }
 
@@ -2465,6 +3054,17 @@ test "oracle distro sync downgrades to preferred repo and keeps orphans" {
         solver_model.ActionKind.downgrade,
         actionForName(&graph, &observation, "package").?.kind,
     );
+    var native = try solveNative(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .dist_sync,
+            .selection = .all,
+        }} },
+        policy(),
+    );
+    defer native.deinit();
+    try expectNativeMatchesOracle(&native, &observation);
 }
 
 test "oracle force best prevents distro sync version fallback" {
@@ -2873,8 +3473,79 @@ test "oracle records replacement as an obsolete action" {
 
     const action = actionForName(&graph, &observation, "replacement").?;
     try testing.expectEqual(solver_model.ActionKind.obsolete, action.kind);
-    try testing.expectEqual(@as(u32, 0), @intFromEnum(action.prior.?));
+    try testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{@enumFromInt(0)},
+        action.priors,
+    );
     try testing.expectEqual(solver_model.TransactionReason.obsoletes, action.reason);
+    var native = try solveNative(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .name = "replacement" },
+        }} },
+        policy(),
+    );
+    defer native.deinit();
+    try expectNativeMatchesOracle(&native, &observation);
+}
+
+test "each selected obsoleter retains a shared installed prior" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{ .name = "old-package" });
+    try builder.addPackage(available, .{
+        .name = "replacement-one",
+        .obsoletes = &.{relation("old-package")},
+    });
+    try builder.addPackage(available, .{
+        .name = "replacement-two",
+        .obsoletes = &.{relation("old-package")},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    const goal = solver_model.Goal{ .jobs = &.{
+        .{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(1) },
+        },
+        .{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(2) },
+        },
+    } };
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        policy(),
+    );
+    defer observation.deinit();
+    for (observation.outcome.actions) |action| {
+        try testing.expectEqual(
+            solver_model.ActionKind.obsolete,
+            action.kind,
+        );
+        try testing.expectEqualSlices(
+            solver_model.PackageId,
+            &.{@enumFromInt(0)},
+            action.priors,
+        );
+    }
+
+    var native = try solveNative(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        policy(),
+    );
+    defer native.deinit();
+    try expectNativeMatchesOracle(&native, &observation);
 }
 
 test "oracle normalizes missing requirements without English diagnostics" {
@@ -2990,6 +3661,14 @@ test "oracle weak dependency policy is observable" {
     );
     defer with_weak.deinit();
     try testing.expect(containsSelectedName(&graph, &with_weak, "addon"));
+    var native_with_weak = try solveNative(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        policy(),
+    );
+    defer native_with_weak.deinit();
+    try expectNativeMatchesOracle(&native_with_weak, &with_weak);
 
     var without_weak_policy = policy();
     without_weak_policy.install_weak_deps = false;
@@ -3001,6 +3680,14 @@ test "oracle weak dependency policy is observable" {
     );
     defer without_weak.deinit();
     try testing.expect(!containsSelectedName(&graph, &without_weak, "addon"));
+    var native_without_weak = try solveNative(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        without_weak_policy,
+    );
+    defer native_without_weak.deinit();
+    try expectNativeMatchesOracle(&native_without_weak, &without_weak);
 }
 
 test "oracle weak pruning prefers the best machine architecture" {

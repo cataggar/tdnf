@@ -1130,6 +1130,16 @@ fn rpmProvideMatches(
     };
 }
 
+/// Return whether a package's implicit NEVR provide matches a relation.
+pub fn packageMatchesNevr(
+    package: metadata.Package,
+    relation: metadata.Relation,
+) bool {
+    return !isSource(package.nevra.arch) and
+        std.mem.eql(u8, package.nevra.name, relation.name) and
+        rpmProvideMatches(selfProvide(package), relation);
+}
+
 fn relationFlags(comparison: metadata.CompareOp) u8 {
     return switch (comparison) {
         .none => 0,

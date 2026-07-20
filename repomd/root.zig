@@ -23,6 +23,7 @@ pub const transaction_native = @import("transaction_native.zig");
 pub const solver_model = @import("solver_model.zig");
 pub const solver_coordinator = @import("solver_coordinator.zig");
 pub const solver_policy = @import("solver_policy.zig");
+pub const solver_result = @import("solver_result.zig");
 pub const solver_rules = @import("solver_rules.zig");
 pub const solver_search = @import("solver_search.zig");
 
@@ -241,6 +242,7 @@ comptime {
     _ = @import("solvbridge.zig");
     _ = @import("solver_coordinator.zig");
     _ = @import("solver_policy.zig");
+    _ = @import("solver_result.zig");
     _ = @import("solver_rules.zig");
     _ = @import("solver_search.zig");
     _ = @import("transaction_native.zig");

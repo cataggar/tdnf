@@ -345,7 +345,7 @@ pub const TransactionReason = enum {
 
 pub const Action = struct {
     package: PackageId,
-    prior: ?PackageId = null,
+    priors: []const PackageId = &.{},
     kind: ActionKind,
     reason: TransactionReason,
     requested_by: ?JobId = null,
