@@ -30,9 +30,25 @@ pub const OwnedResult = struct {
     }
 };
 
+pub const OwnedProblems = struct {
+    arena_state: std.heap.ArenaAllocator,
+    problems: []const solver_model.Problem,
+
+    pub fn deinit(self: *OwnedProblems) void {
+        self.arena_state.deinit();
+        self.* = undefined;
+    }
+};
+
 pub const MaterializeError = error{
     OutOfMemory,
     InvalidInput,
+};
+
+pub const DeriveProblemsError = solver_search.SolveError || error{
+    Satisfiable,
+    InvalidInput,
+    UnsupportedProblem,
 };
 
 /// Convert a complete satisfiable model into canonical package actions.
@@ -260,6 +276,320 @@ pub fn materialize(
             .skipped_jobs = owned_skipped,
         },
     };
+}
+
+/// Derive one canonical structured problem from one independent UNSAT core.
+///
+/// Multi-core failures and cores requiring multiple causal package rules are
+/// rejected until their libsolv representative semantics are frozen. This
+/// parity slice rebuilds filtered formulas and is not yet a runtime path.
+pub fn deriveUnsatProblems(
+    allocator: std.mem.Allocator,
+    formula: *const solver_rules.OwnedFormula,
+) DeriveProblemsError!OwnedProblems {
+    var full_result = try solver_search.solve(allocator, formula);
+    defer full_result.deinit();
+    if (full_result == .satisfiable) return error.Satisfiable;
+
+    const included = try allocator.alloc(bool, formula.clauses.len);
+    defer allocator.free(included);
+    @memset(included, true);
+    for (included) |*keep| {
+        keep.* = false;
+        var probe = try solveIncludedClauses(
+            allocator,
+            formula,
+            included,
+        );
+        const remains_unsatisfiable = probe == .unsatisfiable;
+        probe.deinit();
+        if (!remains_unsatisfiable) keep.* = true;
+    }
+
+    var causal_origin: ?solver_rules.RuleOrigin = null;
+    var causal_clause_index: ?usize = null;
+    const core_jobs = try allocator.alloc(bool, formula.jobs.len);
+    defer allocator.free(core_jobs);
+    @memset(core_jobs, false);
+    for (formula.clauses, included, 0..) |clause, keep, clause_index| {
+        if (!keep) continue;
+        switch (clause.origin) {
+            .job => |job_id| {
+                const job_index: usize = @intFromEnum(job_id);
+                if (job_index >= core_jobs.len) {
+                    return error.InvalidInput;
+                }
+                core_jobs[job_index] = true;
+            },
+            .installed_keep => return error.UnsupportedProblem,
+            else => {
+                if (causal_origin != null) {
+                    return error.UnsupportedProblem;
+                }
+                causal_origin = clause.origin;
+                causal_clause_index = clause_index;
+            },
+        }
+    }
+
+    var core_job_count: usize = 0;
+    var only_core_job: ?solver_model.JobId = null;
+    for (core_jobs, 0..) |in_core, job_index| {
+        if (!in_core) continue;
+        core_job_count += 1;
+        only_core_job = @enumFromInt(
+            @as(u32, @intCast(job_index)),
+        );
+    }
+    if (core_job_count == 0) return error.UnsupportedProblem;
+
+    const residual = try allocator.alloc(bool, formula.clauses.len);
+    defer allocator.free(residual);
+    @memset(residual, true);
+    if (causal_clause_index) |clause_index| {
+        residual[clause_index] = false;
+    } else {
+        if (core_job_count != 1) return error.UnsupportedProblem;
+        for (formula.clauses, 0..) |clause, clause_index| {
+            const job_id = switch (clause.origin) {
+                .job => |value| value,
+                else => continue,
+            };
+            const job_index: usize = @intFromEnum(job_id);
+            if (job_index >= core_jobs.len) return error.InvalidInput;
+            if (core_jobs[job_index]) residual[clause_index] = false;
+        }
+    }
+    var residual_result = try solveIncludedClauses(
+        allocator,
+        formula,
+        residual,
+    );
+    const has_additional_core = residual_result == .unsatisfiable;
+    residual_result.deinit();
+    if (has_additional_core) return error.UnsupportedProblem;
+
+    const problem = if (causal_origin) |origin|
+        try problemForOrigin(formula, origin)
+    else if (core_job_count == 1)
+        try noCandidateProblem(formula, only_core_job.?)
+    else
+        return error.UnsupportedProblem;
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const problems = try arena.alloc(solver_model.Problem, 1);
+    problems[0] = problem;
+    if (problem.capability) |relation| {
+        problems[0].capability = try cloneRelation(arena, relation);
+    }
+    return .{
+        .arena_state = arena_state,
+        .problems = problems,
+    };
+}
+
+fn solveIncludedClauses(
+    allocator: std.mem.Allocator,
+    source: *const solver_rules.OwnedFormula,
+    included: []const bool,
+) DeriveProblemsError!solver_search.Result {
+    if (included.len != source.clauses.len) {
+        return error.InvalidInput;
+    }
+    var clauses =
+        std.array_list.Managed(solver_rules.Clause).init(allocator);
+    defer clauses.deinit();
+    var literals =
+        std.array_list.Managed(solver_rules.Literal).init(allocator);
+    defer literals.deinit();
+
+    for (source.clauses, included) |clause, keep| {
+        if (!keep) continue;
+        const source_literals = try checkedClauseLiterals(
+            source,
+            clause,
+        );
+        if (literals.items.len > std.math.maxInt(u32) or
+            source_literals.len >
+                std.math.maxInt(u32) - literals.items.len)
+        {
+            return error.InvalidInput;
+        }
+        const start = literals.items.len;
+        try literals.appendSlice(source_literals);
+        var copied = clause;
+        copied.literals = .{
+            .start = @intCast(start),
+            .len = @intCast(source_literals.len),
+        };
+        try clauses.append(copied);
+    }
+
+    const filtered = solver_rules.OwnedFormula{
+        .allocator = allocator,
+        .universe = source.universe,
+        .jobs = source.jobs,
+        .architecture = source.architecture,
+        .replacement_kind = source.replacement_kind,
+        .clauses = clauses.items,
+        .literals = literals.items,
+        .weak_requests = source.weak_requests,
+        .weak_candidates = source.weak_candidates,
+        .package_states = source.package_states,
+    };
+    return solver_search.solve(allocator, &filtered);
+}
+
+fn checkedClauseLiterals(
+    formula: *const solver_rules.OwnedFormula,
+    clause: solver_rules.Clause,
+) DeriveProblemsError![]const solver_rules.Literal {
+    const start: usize = @intCast(clause.literals.start);
+    const len: usize = @intCast(clause.literals.len);
+    if (start > formula.literals.len or
+        len > formula.literals.len - start)
+    {
+        return error.InvalidInput;
+    }
+    return formula.literals[start .. start + len];
+}
+
+fn problemForOrigin(
+    formula: *const solver_rules.OwnedFormula,
+    origin: solver_rules.RuleOrigin,
+) DeriveProblemsError!solver_model.Problem {
+    return switch (origin) {
+        .not_installable => |package_id| .{
+            .kind = .not_installable,
+            .package = try validPackageId(formula, package_id),
+            .count = 1,
+        },
+        .requirement => |dependency| .{
+            .kind = .unsatisfied_requirement,
+            .package = try validPackageId(
+                formula,
+                dependency.package,
+            ),
+            .capability = try dependencyRelation(
+                formula,
+                dependency,
+                .requires,
+            ),
+            .count = 1,
+        },
+        .conflict => |conflict| .{
+            .kind = .conflict,
+            .package = try validPackageId(
+                formula,
+                conflict.dependency.package,
+            ),
+            .related_package = if (conflict.target) |target|
+                try validPackageId(formula, target)
+            else
+                null,
+            .capability = try dependencyRelation(
+                formula,
+                conflict.dependency,
+                .conflicts,
+            ),
+            .count = 1,
+        },
+        .obsoletes => |obsoletes| .{
+            .kind = .obsoletes,
+            .package = try validPackageId(
+                formula,
+                obsoletes.dependency.package,
+            ),
+            .related_package = try validPackageId(
+                formula,
+                obsoletes.target,
+            ),
+            .capability = try dependencyRelation(
+                formula,
+                obsoletes.dependency,
+                .obsoletes,
+            ),
+            .count = 1,
+        },
+        .same_name => |same_name| .{
+            .kind = .conflict,
+            .package = try validPackageId(formula, same_name.right),
+            .related_package = try validPackageId(
+                formula,
+                same_name.left,
+            ),
+            .count = 1,
+        },
+        .job, .installed_keep => return error.UnsupportedProblem,
+    };
+}
+
+fn noCandidateProblem(
+    formula: *const solver_rules.OwnedFormula,
+    job_id: solver_model.JobId,
+) DeriveProblemsError!solver_model.Problem {
+    const job_index: usize = @intFromEnum(job_id);
+    if (job_index >= formula.jobs.len) return error.InvalidInput;
+    return .{
+        .kind = .no_candidate,
+        .capability = switch (formula.jobs[job_index].selection) {
+            .name => |name| metadata.Relation{ .name = name },
+            .capability => |capability| capability,
+            else => null,
+        },
+        .job = job_id,
+        .count = 1,
+    };
+}
+
+fn validPackageId(
+    formula: *const solver_rules.OwnedFormula,
+    package_id: solver_model.PackageId,
+) DeriveProblemsError!solver_model.PackageId {
+    if (formula.universe.package(package_id) == null) {
+        return error.InvalidInput;
+    }
+    return package_id;
+}
+
+fn dependencyRelation(
+    formula: *const solver_rules.OwnedFormula,
+    dependency: solver_rules.DependencyRef,
+    expected_kind: metadata.DependencyKind,
+) DeriveProblemsError!metadata.Relation {
+    if (dependency.kind != expected_kind) return error.InvalidInput;
+    const package = formula.universe.package(dependency.package) orelse
+        return error.InvalidInput;
+    const relations = package.relationEntries(
+        formula.universe,
+        dependency.kind,
+    );
+    const relation_index: usize = @intCast(dependency.index);
+    if (relation_index >= relations.len) return error.InvalidInput;
+    return relations[relation_index];
+}
+
+fn cloneRelation(
+    allocator: std.mem.Allocator,
+    relation: metadata.Relation,
+) error{OutOfMemory}!metadata.Relation {
+    var cloned = relation;
+    cloned.name = try allocator.dupe(u8, relation.name);
+    cloned.flags = if (relation.flags) |value|
+        try allocator.dupe(u8, value)
+    else
+        null;
+    cloned.version = if (relation.version) |value|
+        try allocator.dupe(u8, value)
+    else
+        null;
+    cloned.release = if (relation.release) |value|
+        try allocator.dupe(u8, value)
+    else
+        null;
+    return cloned;
 }
 
 const DecisionReason = struct {
@@ -662,6 +992,63 @@ test "materializer cleans up every allocation failure" {
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,
         materializerAllocationFailureCase,
+        .{},
+    );
+}
+
+fn problemDerivationAllocationFailureCase(
+    allocator: std.mem.Allocator,
+) !void {
+    const repository_model = metadata.RepositoryModel{};
+    var universe = try solver_model.Universe.init(
+        allocator,
+        &.{.{
+            .id = "available",
+            .model = &repository_model,
+        }},
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .name = "missing-package" },
+        }} },
+        .{ .native_arch = "x86_64" },
+    );
+    defer base.deinit();
+    var prepared = try solver_policy.prepareInstalledRetention(
+        allocator,
+        &base,
+    );
+    defer prepared.deinit();
+    var problems = try deriveUnsatProblems(
+        allocator,
+        &prepared.formula,
+    );
+    defer problems.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), problems.problems.len);
+    const problem = problems.problems[0];
+    try std.testing.expectEqual(
+        solver_model.ProblemKind.no_candidate,
+        problem.kind,
+    );
+    try std.testing.expectEqual(
+        @as(?solver_model.JobId, @enumFromInt(0)),
+        problem.job,
+    );
+    try std.testing.expectEqualStrings(
+        "missing-package",
+        problem.capability.?.name,
+    );
+}
+
+test "problem derivation cleans up every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        problemDerivationAllocationFailureCase,
         .{},
     );
 }
