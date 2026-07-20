@@ -1,6 +1,7 @@
 const std = @import("std");
 const metadata = @import("model.zig");
 const solver_model = @import("solver_model.zig");
+const solver_rules = @import("solver_rules.zig");
 const solv_bridge = @import("solvbridge.zig");
 
 const c = solv_bridge.libsolv;
@@ -756,15 +757,38 @@ fn protectedRemoval(
     actions: []const solver_model.Action,
 ) ?solver_model.PackageId {
     for (actions) |action| {
-        const package_id = switch (action.kind) {
-            .erase => action.package,
-            .obsolete => action.prior orelse continue,
-            else => continue,
-        };
-        const package = universe.package(package_id) orelse continue;
-        if (package.installed != null and
-            nameInList(package.source.nevra.name, protected_names))
-        {
+        if (action.kind == .erase) {
+            const package = universe.package(action.package) orelse
+                continue;
+            if (package.installed != null and
+                nameInList(
+                    package.source.nevra.name,
+                    protected_names,
+                ))
+            {
+                return action.package;
+            }
+        }
+        const replacement = universe.package(action.package) orelse continue;
+        for (action.priors) |package_id| {
+            const package = universe.package(package_id) orelse continue;
+            if (package.installed == null or
+                !nameInList(
+                    package.source.nevra.name,
+                    protected_names,
+                ))
+            {
+                continue;
+            }
+            if (!solver_rules.isSource(
+                replacement.source.nevra.arch,
+            ) and std.mem.eql(
+                u8,
+                package.source.nevra.name,
+                replacement.source.nevra.name,
+            )) {
+                continue;
+            }
             return package_id;
         }
     }
@@ -856,7 +880,8 @@ fn collectActions(
             continue;
         }
 
-        var prior: ?solver_model.PackageId = null;
+        var priors =
+            std.array_list.Managed(solver_model.PackageId).init(arena);
         if (kind != .install and kind != .erase) {
             var prior_queue: c.Queue = undefined;
             c.queue_init(&prior_queue);
@@ -867,11 +892,14 @@ fn collectActions(
                     if (isResultSentinel(prior_solvid)) continue;
                     return error.UnsupportedResult;
                 };
-                if (prior != null and prior.? != candidate) {
-                    return error.UnsupportedResult;
-                }
-                prior = candidate;
+                try priors.append(candidate);
             }
+            std.sort.pdq(
+                solver_model.PackageId,
+                priors.items,
+                {},
+                packageIdLessThan,
+            );
         }
 
         const decision = decisionReason(state, goal, solver, solvid);
@@ -879,7 +907,7 @@ fn collectActions(
             installonly_evictions[@intFromEnum(package_id)];
         try actions.append(.{
             .package = package_id,
-            .prior = prior,
+            .priors = try priors.toOwnedSlice(),
             .kind = kind,
             .reason = if (kind == .obsolete)
                 .obsoletes
