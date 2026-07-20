@@ -787,6 +787,123 @@ test "effective jobs own exact selections including synthetic user-installed job
     ) != null);
 }
 
+test "clean deps removes only the automatic dependency closure of an exact erase" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    try builder.addPackage(installed, .{
+        .name = "requested",
+        .requires = &.{relation("dependency")},
+        .recommends = &.{relation("recommended")},
+    });
+    try builder.addPackage(installed, .{
+        .name = "dependency",
+        .requires = &.{relation("transitive")},
+    });
+    try builder.addPackage(installed, .{ .name = "transitive" });
+    try builder.addPackage(installed, .{ .name = "unrelated-orphan" });
+    try builder.addPackage(installed, .{ .name = "recommended" });
+    builder.repos.items[installed].installed_states.items[0].reason = .user;
+    builder.repos.items[installed].installed_states.items[1].reason = .automatic;
+    builder.repos.items[installed].installed_states.items[2].reason = .automatic;
+    builder.repos.items[installed].installed_states.items[3].reason = .automatic;
+    builder.repos.items[installed].installed_states.items[4].reason = .automatic;
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var cleanup_policy = policy();
+    cleanup_policy.allow_erasing = true;
+    cleanup_policy.clean_deps = true;
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .erase,
+            .selection = .{ .package = @enumFromInt(0) },
+            .flags = .{ .clean_deps = true },
+        }} },
+        cleanup_policy,
+    );
+    defer observation.deinit();
+
+    try testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{@enumFromInt(3)},
+        observation.selected,
+    );
+    const requested = actionForName(&graph, &observation, "requested").?;
+    try testing.expectEqual(solver_model.TransactionReason.user, requested.reason);
+    try testing.expectEqual(
+        @as(?solver_model.JobId, @enumFromInt(0)),
+        requested.requested_by,
+    );
+    const dependency = actionForName(&graph, &observation, "dependency").?;
+    try testing.expectEqual(solver_model.TransactionReason.cleanup, dependency.reason);
+    try testing.expectEqual(@as(?solver_model.JobId, null), dependency.requested_by);
+    try testing.expectEqual(
+        solver_model.TransactionReason.cleanup,
+        actionForName(&graph, &observation, "transitive").?.reason,
+    );
+    try testing.expectEqual(
+        solver_model.TransactionReason.cleanup,
+        actionForName(&graph, &observation, "recommended").?.reason,
+    );
+    try testing.expect(actionForName(&graph, &observation, "unrelated-orphan") == null);
+}
+
+test "clean deps adds back every installed provider needed by a survivor" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    try builder.addPackage(installed, .{
+        .name = "requested",
+        .requires = &.{relation("virtual")},
+    });
+    try builder.addPackage(installed, .{
+        .name = "provider-one",
+        .provides = &.{relation("virtual")},
+    });
+    try builder.addPackage(installed, .{
+        .name = "provider-two",
+        .provides = &.{relation("virtual")},
+    });
+    try builder.addPackage(installed, .{
+        .name = "survivor",
+        .requires = &.{relation("virtual")},
+    });
+    builder.repos.items[installed].installed_states.items[0].reason = .user;
+    builder.repos.items[installed].installed_states.items[1].reason = .automatic;
+    builder.repos.items[installed].installed_states.items[2].reason = .automatic;
+    builder.repos.items[installed].installed_states.items[3].reason = .user;
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var cleanup_policy = policy();
+    cleanup_policy.allow_erasing = true;
+    cleanup_policy.clean_deps = true;
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .erase,
+            .selection = .{ .package = @enumFromInt(0) },
+            .flags = .{ .clean_deps = true },
+        }} },
+        cleanup_policy,
+    );
+    defer observation.deinit();
+
+    try testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{
+            @enumFromInt(1),
+            @enumFromInt(2),
+            @enumFromInt(3),
+        },
+        observation.selected,
+    );
+}
+
 test "allow erasing replaces an installed conflict and preserves unrelated packages" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     var builder = GraphBuilder.init(arena_state.allocator());

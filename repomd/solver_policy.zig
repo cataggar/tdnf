@@ -4,9 +4,8 @@
 //! obsoleting replacement is selected and ranks ordinary job and requirement
 //! candidates by repository priority, architecture, same-name package EVR,
 //! and common versioned provides. It also handles update-all, distro-sync-all,
-//! weak dependency selection, ordinary allow-erasing, and rule-class-aware
-//! skipping of broken exact install jobs. Cleanup policy remains separate
-//! follow-up work.
+//! weak dependency selection, ordinary allow-erasing, exact-erase dependency
+//! cleanup, and rule-class-aware skipping of broken exact install jobs.
 
 const std = @import("std");
 const query_index = @import("index.zig");
@@ -77,12 +76,16 @@ pub const PrepareError = error{
 pub const PrepareOptions = struct {
     best: bool = false,
     allow_erasing: bool = false,
+    /// Release automatic Requires/Recommends of exact installed erase jobs.
+    clean_deps: bool = false,
 };
 
 pub const Prepared = struct {
     allocator: std.mem.Allocator,
     formula: solver_rules.OwnedFormula,
     decision_policy: solver_search.CandidateDecisionPolicy,
+    /// Installed packages released by clean-deps, excluding direct erases.
+    cleanup_packages: []const solver_model.PackageId,
     best: bool = false,
 
     pub fn solve(
@@ -178,6 +181,7 @@ pub const Prepared = struct {
             self.decision_policy.fallback.preferred_values,
         );
         self.allocator.free(self.decision_policy.fallback.order);
+        self.allocator.free(self.cleanup_packages);
         self.formula.deinit();
         self.* = undefined;
     }
@@ -207,6 +211,7 @@ pub fn prepareWithOptions(
     if (options.allow_erasing and base.replacement_kind != .none) {
         return error.UnsupportedPolicy;
     }
+    const clean_deps = try validateCleanupPolicy(base, options);
     for (base.package_states) |state| {
         if (state.multiversion) return error.UnsupportedPolicy;
         if (state.replacement.kind != .none and
@@ -222,6 +227,9 @@ pub fn prepareWithOptions(
     const directly_erased = try allocator.alloc(bool, package_count);
     defer allocator.free(directly_erased);
     @memset(directly_erased, false);
+    const cleanup_seeds = try allocator.alloc(bool, package_count);
+    defer allocator.free(cleanup_seeds);
+    @memset(cleanup_seeds, false);
 
     const replacement_candidates = try allocator.alloc(
         PackageIdList,
@@ -291,7 +299,7 @@ pub fn prepareWithOptions(
                     );
                 }
             },
-            .job => {
+            .job => |job_id| {
                 if (literals.len == 1 and !literals[0].positive()) {
                     const package_index = try packageIndex(
                         literals[0].package(),
@@ -299,6 +307,16 @@ pub fn prepareWithOptions(
                     );
                     if (base.universe.packages[package_index].installed != null) {
                         directly_erased[package_index] = true;
+                        const job_index: usize = @intFromEnum(job_id);
+                        if (job_index >= base.jobs.len) {
+                            return error.InvalidFormula;
+                        }
+                        if (base.jobs[job_index].action == .erase and
+                            (options.clean_deps or
+                                base.jobs[job_index].flags.clean_deps))
+                        {
+                            cleanup_seeds[package_index] = true;
+                        }
                     }
                 }
             },
@@ -313,6 +331,18 @@ pub fn prepareWithOptions(
             &policy_candidates,
         );
     }
+    const cleanup_removals = if (clean_deps)
+        try computeCleanupRemovals(
+            allocator,
+            base,
+            directly_erased,
+            cleanup_seeds,
+        )
+    else
+        try allocator.alloc(bool, package_count);
+    defer allocator.free(cleanup_removals);
+    if (!clean_deps) @memset(cleanup_removals, false);
+
     var clauses = std.array_list.Managed(solver_rules.Clause).init(allocator);
     defer clauses.deinit();
     try clauses.appendSlice(base.clauses);
@@ -330,6 +360,7 @@ pub fn prepareWithOptions(
         _ = installed;
         const package_index: usize = @intFromEnum(package.id);
         if (directly_erased[package_index] or
+            cleanup_removals[package_index] or
             ((options.allow_erasing or
                 base.package_states[package_index].allow_uninstall) and
                 base.package_states[package_index].replacement.kind == .none))
@@ -525,8 +556,24 @@ pub fn prepareWithOptions(
         preferred_values,
     ) |package, *decision, *preferred| {
         decision.* = package.id;
-        preferred.* = package.installed != null;
+        preferred.* = package.installed != null and
+            !cleanup_removals[@intFromEnum(package.id)];
     }
+    var cleanup_packages = PackageIdList.init(allocator);
+    defer cleanup_packages.deinit();
+    for (cleanup_removals, directly_erased, 0..) |
+        cleanup,
+        direct,
+        package_index,
+    | {
+        if (cleanup and !direct) {
+            try cleanup_packages.append(
+                @enumFromInt(@as(u32, @intCast(package_index))),
+            );
+        }
+    }
+    const owned_cleanup_packages = try cleanup_packages.toOwnedSlice();
+    errdefer allocator.free(owned_cleanup_packages);
 
     return .{
         .allocator = allocator,
@@ -550,8 +597,371 @@ pub fn prepareWithOptions(
             .groups = owned_candidate_groups,
             .candidates = owned_policy_candidates,
         },
+        .cleanup_packages = owned_cleanup_packages,
         .best = options.best,
     };
+}
+
+fn validateCleanupPolicy(
+    base: *const solver_rules.OwnedFormula,
+    options: PrepareOptions,
+) PrepareError!bool {
+    var clean_deps = options.clean_deps;
+    var erase_count: usize = 0;
+    for (base.jobs) |job| {
+        if (job.action == .erase and job.flags.clean_deps) {
+            clean_deps = true;
+        }
+    }
+    if (!clean_deps) return false;
+    if (options.best or base.replacement_kind != .none) {
+        return error.UnsupportedPolicy;
+    }
+
+    for (base.jobs) |job| {
+        switch (job.action) {
+            .erase => {
+                const package_id = switch (job.selection) {
+                    .package => |value| value,
+                    else => return error.UnsupportedPolicy,
+                };
+                const package = base.universe.package(package_id) orelse
+                    return error.InvalidFormula;
+                if (package.installed == null or
+                    (!options.clean_deps and !job.flags.clean_deps) or
+                    job.flags.force_best or
+                    job.flags.targeted or
+                    job.flags.not_by_user or
+                    job.flags.weak)
+                {
+                    return error.UnsupportedPolicy;
+                }
+                erase_count += 1;
+            },
+            .user_installed => {
+                const package_id = switch (job.selection) {
+                    .package => |value| value,
+                    else => return error.UnsupportedPolicy,
+                };
+                const package = base.universe.package(package_id) orelse
+                    return error.InvalidFormula;
+                if (package.installed == null or
+                    job.flags.force_best or
+                    job.flags.targeted or
+                    job.flags.not_by_user or
+                    job.flags.weak)
+                {
+                    return error.UnsupportedPolicy;
+                }
+            },
+            else => return error.UnsupportedPolicy,
+        }
+    }
+    if (erase_count == 0) return error.UnsupportedPolicy;
+
+    for (base.package_states) |state| {
+        if (state.allow_uninstall) return error.UnsupportedPolicy;
+    }
+    for (base.universe.packages) |package| {
+        if (package.installed != null and
+            package.relationEntries(base.universe, .supplements).len != 0)
+        {
+            return error.UnsupportedPolicy;
+        }
+    }
+    return true;
+}
+
+fn computeCleanupRemovals(
+    allocator: std.mem.Allocator,
+    base: *const solver_rules.OwnedFormula,
+    directly_erased: []const bool,
+    cleanup_seeds: []const bool,
+) PrepareError![]bool {
+    const package_count = base.universe.packages.len;
+    if (directly_erased.len != package_count or
+        cleanup_seeds.len != package_count)
+    {
+        return error.InvalidFormula;
+    }
+
+    const removals = try allocator.alloc(bool, package_count);
+    errdefer allocator.free(removals);
+    @memset(removals, false);
+    const scheduled = try allocator.alloc(bool, package_count);
+    defer allocator.free(scheduled);
+    @memset(scheduled, false);
+    var queue = PackageIdList.init(allocator);
+    defer queue.deinit();
+    var dependencies = try CleanupDependencyIndex.init(allocator, base);
+    defer dependencies.deinit();
+
+    for (cleanup_seeds, 0..) |seed, package_index| {
+        if (!seed) continue;
+        scheduled[package_index] = true;
+        try queue.append(@enumFromInt(@as(u32, @intCast(package_index))));
+    }
+
+    var cursor: usize = 0;
+    while (cursor < queue.items.len) : (cursor += 1) {
+        const package_id = queue.items[cursor];
+        const package_index: usize = @intFromEnum(package_id);
+        const package = base.universe.package(package_id) orelse
+            return error.InvalidFormula;
+        if (package.installed == null) continue;
+        if (!directly_erased[package_index] and
+            installedIsUserRoot(base, package_index))
+        {
+            continue;
+        }
+        removals[package_index] = true;
+        try queueCleanupDependencies(
+            base,
+            &dependencies,
+            package_id,
+            scheduled,
+            &queue,
+        );
+    }
+
+    const kept = try allocator.alloc(bool, package_count);
+    defer allocator.free(kept);
+    var addback = PackageIdList.init(allocator);
+    defer addback.deinit();
+    for (base.universe.packages, 0..) |package, package_index| {
+        kept[package_index] = package.installed != null and
+            !removals[package_index];
+        if (kept[package_index]) try addback.append(package.id);
+    }
+
+    cursor = 0;
+    while (cursor < addback.items.len) : (cursor += 1) {
+        try addBackCleanupDependencies(
+            base,
+            &dependencies,
+            addback.items[cursor],
+            directly_erased,
+            removals,
+            kept,
+            &addback,
+        );
+    }
+    return removals;
+}
+
+const CleanupDependencyIndex = struct {
+    allocator: std.mem.Allocator,
+    requirements: []std.array_list.Managed(u32),
+    recommends: []std.array_list.Managed(u32),
+
+    fn init(
+        allocator: std.mem.Allocator,
+        base: *const solver_rules.OwnedFormula,
+    ) PrepareError!CleanupDependencyIndex {
+        const package_count = base.universe.packages.len;
+        const requirements = try allocator.alloc(
+            std.array_list.Managed(u32),
+            package_count,
+        );
+        errdefer allocator.free(requirements);
+        var requirements_initialized: usize = 0;
+        errdefer for (requirements[0..requirements_initialized]) |*list| {
+            list.deinit();
+        };
+        for (requirements) |*list| {
+            list.* = std.array_list.Managed(u32).init(allocator);
+            requirements_initialized += 1;
+        }
+        const recommends = try allocator.alloc(
+            std.array_list.Managed(u32),
+            package_count,
+        );
+        errdefer allocator.free(recommends);
+        var recommends_initialized: usize = 0;
+        errdefer for (recommends[0..recommends_initialized]) |*list| {
+            list.deinit();
+        };
+        for (recommends) |*list| {
+            list.* = std.array_list.Managed(u32).init(allocator);
+            recommends_initialized += 1;
+        }
+
+        for (base.clauses, 0..) |clause, clause_index| {
+            const dependency = switch (clause.origin) {
+                .requirement => |value| value,
+                else => continue,
+            };
+            if (dependency.kind != .requires) continue;
+            const package_index = try packageIndex(
+                dependency.package,
+                package_count,
+            );
+            if (clause_index > std.math.maxInt(u32)) {
+                return error.TooManyClauses;
+            }
+            try requirements[package_index].append(@intCast(clause_index));
+        }
+        for (base.weak_requests, 0..) |request, request_index| {
+            if (request.direction != .forward or
+                request.dependency.kind != .recommends)
+            {
+                continue;
+            }
+            const package_index = try packageIndex(
+                request.dependency.package,
+                package_count,
+            );
+            if (request_index > std.math.maxInt(u32)) {
+                return error.TooManyClauses;
+            }
+            try recommends[package_index].append(@intCast(request_index));
+        }
+        return .{
+            .allocator = allocator,
+            .requirements = requirements,
+            .recommends = recommends,
+        };
+    }
+
+    fn deinit(self: *CleanupDependencyIndex) void {
+        for (self.recommends) |*list| list.deinit();
+        self.allocator.free(self.recommends);
+        for (self.requirements) |*list| list.deinit();
+        self.allocator.free(self.requirements);
+        self.* = undefined;
+    }
+};
+
+fn installedIsUserRoot(
+    base: *const solver_rules.OwnedFormula,
+    package_index: usize,
+) bool {
+    const installed = base.universe.packages[package_index].installed orelse
+        return false;
+    return installed.reason != .automatic or
+        base.package_states[package_index].user_installed;
+}
+
+fn queueCleanupDependencies(
+    base: *const solver_rules.OwnedFormula,
+    dependencies: *const CleanupDependencyIndex,
+    owner: solver_model.PackageId,
+    scheduled: []bool,
+    queue: *PackageIdList,
+) PrepareError!void {
+    const owner_index = try packageIndex(owner, dependencies.requirements.len);
+    for (dependencies.requirements[owner_index].items) |clause_index| {
+        const clause = base.clauses[clause_index];
+        for (try checkedClauseLiterals(base, clause)) |literal| {
+            if (!literal.positive()) continue;
+            try queueCleanupPackage(base, literal.package(), scheduled, queue);
+        }
+    }
+    for (dependencies.recommends[owner_index].items) |request_index| {
+        const request = base.weak_requests[request_index];
+        for (request.candidates.slice(base.weak_candidates)) |candidate| {
+            try queueCleanupPackage(base, candidate, scheduled, queue);
+        }
+    }
+}
+
+fn queueCleanupPackage(
+    base: *const solver_rules.OwnedFormula,
+    package_id: solver_model.PackageId,
+    scheduled: []bool,
+    queue: *PackageIdList,
+) PrepareError!void {
+    const package_index = try packageIndex(package_id, scheduled.len);
+    if (base.universe.packages[package_index].installed == null or
+        scheduled[package_index])
+    {
+        return;
+    }
+    scheduled[package_index] = true;
+    try queue.append(package_id);
+}
+
+fn addBackCleanupDependencies(
+    base: *const solver_rules.OwnedFormula,
+    dependencies: *const CleanupDependencyIndex,
+    owner: solver_model.PackageId,
+    directly_erased: []const bool,
+    removals: []bool,
+    kept: []bool,
+    queue: *PackageIdList,
+) PrepareError!void {
+    const owner_index = try packageIndex(owner, dependencies.requirements.len);
+    for (dependencies.requirements[owner_index].items) |clause_index| {
+        const clause = base.clauses[clause_index];
+        const literals = try checkedClauseLiterals(base, clause);
+        var has_kept_provider = false;
+        for (literals) |literal| {
+            if (!literal.positive()) continue;
+            const package_index = try packageIndex(
+                literal.package(),
+                kept.len,
+            );
+            if (kept[package_index]) {
+                has_kept_provider = true;
+                break;
+            }
+        }
+        if (has_kept_provider) continue;
+        for (literals) |literal| {
+            if (!literal.positive()) continue;
+            try addBackCleanupPackage(
+                base,
+                literal.package(),
+                directly_erased,
+                removals,
+                kept,
+                queue,
+            );
+        }
+    }
+    for (dependencies.recommends[owner_index].items) |request_index| {
+        const request = base.weak_requests[request_index];
+        const candidates = request.candidates.slice(base.weak_candidates);
+        var has_kept_provider = false;
+        for (candidates) |candidate| {
+            const package_index = try packageIndex(candidate, kept.len);
+            if (kept[package_index]) {
+                has_kept_provider = true;
+                break;
+            }
+        }
+        if (has_kept_provider) continue;
+        for (candidates) |candidate| {
+            try addBackCleanupPackage(
+                base,
+                candidate,
+                directly_erased,
+                removals,
+                kept,
+                queue,
+            );
+        }
+    }
+}
+
+fn addBackCleanupPackage(
+    base: *const solver_rules.OwnedFormula,
+    package_id: solver_model.PackageId,
+    directly_erased: []const bool,
+    removals: []bool,
+    kept: []bool,
+    queue: *PackageIdList,
+) PrepareError!void {
+    const package_index = try packageIndex(package_id, kept.len);
+    if (base.universe.packages[package_index].installed == null or
+        directly_erased[package_index] or
+        !removals[package_index])
+    {
+        return;
+    }
+    removals[package_index] = false;
+    kept[package_index] = true;
+    try queue.append(package_id);
 }
 
 const PackageRuleMode = enum {
@@ -6350,6 +6760,265 @@ test "global allow erasing permits reverse dependency cascades" {
     );
 }
 
+test "clean deps removes an exact erase dependency closure but not old orphans" {
+    var installed_relations = [_]metadata.Relation{
+        .{ .name = "dependency" },
+        .{ .name = "transitive" },
+        .{ .name = "recommended" },
+    };
+    var installed_packages = [_]metadata.Package{
+        testPackage("requested", "1"),
+        testPackage("dependency", "1"),
+        testPackage("transitive", "1"),
+        testPackage("unrelated-orphan", "1"),
+        testPackage("recommended", "1"),
+    };
+    installed_packages[0].requires = .{ .start = 0, .len = 1 };
+    installed_packages[0].recommends = .{ .start = 2, .len = 1 };
+    installed_packages[1].requires = .{ .start = 1, .len = 1 };
+    const installed_model = metadata.RepositoryModel{
+        .packages = &installed_packages,
+        .relations = &installed_relations,
+    };
+    const installed_states = [_]solver_model.InstalledState{
+        .{ .rpmdb_hnum = 1, .reason = .user },
+        .{ .rpmdb_hnum = 2, .reason = .automatic },
+        .{ .rpmdb_hnum = 3, .reason = .automatic },
+        .{ .rpmdb_hnum = 4, .reason = .automatic },
+        .{ .rpmdb_hnum = 5, .reason = .automatic },
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{
+            .id = "@System",
+            .model = &installed_model,
+            .kind = .installed,
+            .installed_states = &installed_states,
+        }},
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .erase,
+            .selection = .{ .package = @enumFromInt(0) },
+            .flags = .{ .clean_deps = true },
+        }} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+
+    var prepared = try prepareWithOptions(
+        std.testing.allocator,
+        &base,
+        .{ .allow_erasing = true, .clean_deps = true },
+    );
+    defer prepared.deinit();
+    try std.testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{ @enumFromInt(1), @enumFromInt(2), @enumFromInt(4) },
+        prepared.cleanup_packages,
+    );
+    var result = try prepared.solve(std.testing.allocator);
+    defer result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, false, false, true, false },
+        result.satisfiable.values,
+    );
+}
+
+test "clean deps preserves user roots and all providers needed by survivors" {
+    var installed_relations = [_]metadata.Relation{
+        .{ .name = "virtual" },
+        .{ .name = "virtual" },
+        .{ .name = "virtual" },
+        .{ .name = "virtual" },
+    };
+    var installed_packages = [_]metadata.Package{
+        testPackage("requested", "1"),
+        testPackage("provider-one", "1"),
+        testPackage("provider-two", "1"),
+        testPackage("survivor", "1"),
+    };
+    installed_packages[0].requires = .{ .start = 0, .len = 1 };
+    installed_packages[1].provides = .{ .start = 1, .len = 1 };
+    installed_packages[2].provides = .{ .start = 2, .len = 1 };
+    installed_packages[3].requires = .{ .start = 3, .len = 1 };
+    const installed_model = metadata.RepositoryModel{
+        .packages = &installed_packages,
+        .relations = &installed_relations,
+    };
+    const installed_states = [_]solver_model.InstalledState{
+        .{ .rpmdb_hnum = 1, .reason = .user },
+        .{ .rpmdb_hnum = 2, .reason = .automatic },
+        .{ .rpmdb_hnum = 3, .reason = .automatic },
+        .{ .rpmdb_hnum = 4, .reason = .user },
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{
+            .id = "@System",
+            .model = &installed_model,
+            .kind = .installed,
+            .installed_states = &installed_states,
+        }},
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .erase,
+            .selection = .{ .package = @enumFromInt(0) },
+            .flags = .{ .clean_deps = true },
+        }} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+
+    var prepared = try prepareWithOptions(
+        std.testing.allocator,
+        &base,
+        .{ .allow_erasing = true },
+    );
+    defer prepared.deinit();
+    try std.testing.expectEqual(@as(usize, 0), prepared.cleanup_packages.len);
+    var result = try prepared.solve(std.testing.allocator);
+    defer result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, true, true, true },
+        result.satisfiable.values,
+    );
+}
+
+test "clean deps honors explicit user-installed roots and rejects supplements" {
+    var installed_relations = [_]metadata.Relation{
+        .{ .name = "dependency" },
+        .{ .name = "condition" },
+    };
+    var installed_packages = [_]metadata.Package{
+        testPackage("requested", "1"),
+        testPackage("dependency", "1"),
+    };
+    installed_packages[0].requires = .{ .start = 0, .len = 1 };
+    installed_packages[1].supplements = .{ .start = 1, .len = 1 };
+    const installed_model = metadata.RepositoryModel{
+        .packages = &installed_packages,
+        .relations = &installed_relations,
+    };
+    var available_packages = [_]metadata.Package{
+        testPackage("available", "1"),
+    };
+    const available_model = metadata.RepositoryModel{
+        .packages = &available_packages,
+    };
+    const installed_states = [_]solver_model.InstalledState{
+        .{ .rpmdb_hnum = 1, .reason = .user },
+        .{ .rpmdb_hnum = 2, .reason = .automatic },
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{
+            .{
+                .id = "@System",
+                .model = &installed_model,
+                .kind = .installed,
+                .installed_states = &installed_states,
+            },
+            .{ .id = "available", .model = &available_model },
+        },
+    );
+    defer universe.deinit();
+    const jobs = [_]solver_model.Job{
+        .{
+            .action = .erase,
+            .selection = .{ .package = @enumFromInt(0) },
+            .flags = .{ .clean_deps = true },
+        },
+        .{
+            .action = .user_installed,
+            .selection = .{ .package = @enumFromInt(1) },
+        },
+    };
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &jobs },
+        testArchitecture(),
+    );
+    defer base.deinit();
+
+    try std.testing.expectError(
+        error.UnsupportedPolicy,
+        prepareWithOptions(
+            std.testing.allocator,
+            &base,
+            .{ .clean_deps = true },
+        ),
+    );
+
+    installed_packages[1].supplements = .{};
+    var supported_base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &jobs },
+        testArchitecture(),
+    );
+    defer supported_base.deinit();
+    var prepared = try prepareWithOptions(
+        std.testing.allocator,
+        &supported_base,
+        .{ .clean_deps = true },
+    );
+    defer prepared.deinit();
+    try std.testing.expectEqual(@as(usize, 0), prepared.cleanup_packages.len);
+    var result = try prepared.solve(std.testing.allocator);
+    defer result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, true, false },
+        result.satisfiable.values,
+    );
+
+    const unsupported_user_jobs = [_]solver_model.Job{
+        .{ .action = .user_installed, .selection = .all },
+        .{ .action = .user_installed, .selection = .{ .name = "dependency" } },
+        .{
+            .action = .user_installed,
+            .selection = .{ .package = @enumFromInt(2) },
+        },
+        .{
+            .action = .user_installed,
+            .selection = .{ .package = @enumFromInt(1) },
+            .flags = .{ .targeted = true },
+        },
+    };
+    for (unsupported_user_jobs) |user_job| {
+        const unsupported_jobs = [_]solver_model.Job{
+            jobs[0],
+            user_job,
+        };
+        var unsupported_base = try solver_rules.generateBase(
+            std.testing.allocator,
+            &universe,
+            .{ .jobs = &unsupported_jobs },
+            testArchitecture(),
+        );
+        defer unsupported_base.deinit();
+        try std.testing.expectError(
+            error.UnsupportedPolicy,
+            prepareWithOptions(
+                std.testing.allocator,
+                &unsupported_base,
+                .{ .clean_deps = true },
+            ),
+        );
+    }
+}
+
 test "skip broken keeps satisfiable exact install jobs" {
     var available_relations = [_]metadata.Relation{
         .{ .name = "missing-capability" },
@@ -7104,10 +7773,61 @@ fn allocationFailureCase(allocator: std.mem.Allocator) !void {
     defer weak_result.deinit();
 }
 
+fn cleanupAllocationFailureCase(allocator: std.mem.Allocator) !void {
+    var installed_relations = [_]metadata.Relation{
+        .{ .name = "dependency" },
+    };
+    var installed_packages = [_]metadata.Package{
+        testPackage("requested", "1"),
+        testPackage("dependency", "1"),
+    };
+    installed_packages[0].requires = .{ .start = 0, .len = 1 };
+    const installed_model = metadata.RepositoryModel{
+        .packages = &installed_packages,
+        .relations = &installed_relations,
+    };
+    const installed_states = [_]solver_model.InstalledState{
+        .{ .rpmdb_hnum = 1, .reason = .user },
+        .{ .rpmdb_hnum = 2, .reason = .automatic },
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{
+            .id = "@System",
+            .model = &installed_model,
+            .kind = .installed,
+            .installed_states = &installed_states,
+        }},
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .erase,
+            .selection = .{ .package = @enumFromInt(0) },
+            .flags = .{ .clean_deps = true },
+        }} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareWithOptions(
+        allocator,
+        &base,
+        .{ .allow_erasing = true },
+    );
+    defer prepared.deinit();
+}
+
 test "policy preparation cleans up every allocation failure" {
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,
         allocationFailureCase,
+        .{},
+    );
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        cleanupAllocationFailureCase,
         .{},
     );
 }
