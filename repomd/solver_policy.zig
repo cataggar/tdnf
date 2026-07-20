@@ -78,6 +78,8 @@ pub const PrepareOptions = struct {
     allow_erasing: bool = false,
     /// Release automatic Requires/Recommends of exact installed erase jobs.
     clean_deps: bool = false,
+    /// Exact installed package names protected from erase or obsoletion.
+    protected_names: []const []const u8 = &.{},
 };
 
 pub const Prepared = struct {
@@ -86,6 +88,9 @@ pub const Prepared = struct {
     decision_policy: solver_search.CandidateDecisionPolicy,
     /// Installed packages released by clean-deps, excluding direct erases.
     cleanup_packages: []const solver_model.PackageId,
+    /// Installed package instances covered by protected-name policy.
+    protected_packages: []const solver_model.PackageId,
+    protected_policy: bool = false,
     best: bool = false,
 
     pub fn solve(
@@ -120,6 +125,33 @@ pub const Prepared = struct {
         allocator: std.mem.Allocator,
     ) SkipBrokenError!SkipBrokenResult {
         return solveSkippingBrokenJobs(self, allocator);
+    }
+
+    /// Return the first protected package removed without a same-name
+    /// replacement. Same-name upgrades, downgrades, and reinstalls are valid.
+    pub fn protectedRemoval(
+        self: *const Prepared,
+        model: solver_search.Model,
+    ) ?solver_model.PackageId {
+        for (self.protected_packages) |package_id| {
+            if (model.value(package_id) orelse return package_id) continue;
+            const package = self.formula.universe.package(package_id) orelse
+                return package_id;
+            for (self.formula.universe.packages) |replacement| {
+                if (replacement.id == package_id or
+                    solver_rules.isSource(replacement.source.nevra.arch) or
+                    !std.mem.eql(
+                        u8,
+                        replacement.source.nevra.name,
+                        package.source.nevra.name,
+                    ))
+                {
+                    continue;
+                }
+                if (model.value(replacement.id) orelse false) break;
+            } else return package_id;
+        }
+        return null;
     }
 
     /// Resolve ordinary recommends and supplements after the hard solution.
@@ -181,6 +213,7 @@ pub const Prepared = struct {
             self.decision_policy.fallback.preferred_values,
         );
         self.allocator.free(self.decision_policy.fallback.order);
+        self.allocator.free(self.protected_packages);
         self.allocator.free(self.cleanup_packages);
         self.formula.deinit();
         self.* = undefined;
@@ -212,6 +245,12 @@ pub fn prepareWithOptions(
         return error.UnsupportedPolicy;
     }
     const clean_deps = try validateCleanupPolicy(base, options);
+    if (clean_deps and
+        options.protected_names.len != 0 and
+        !options.allow_erasing)
+    {
+        return error.UnsupportedPolicy;
+    }
     for (base.package_states) |state| {
         if (state.multiversion) return error.UnsupportedPolicy;
         if (state.replacement.kind != .none and
@@ -230,6 +269,9 @@ pub fn prepareWithOptions(
     const cleanup_seeds = try allocator.alloc(bool, package_count);
     defer allocator.free(cleanup_seeds);
     @memset(cleanup_seeds, false);
+    const protected = try allocator.alloc(bool, package_count);
+    defer allocator.free(protected);
+    try markProtectedPackages(base, options.protected_names, protected);
 
     const replacement_candidates = try allocator.alloc(
         PackageIdList,
@@ -337,6 +379,7 @@ pub fn prepareWithOptions(
             base,
             directly_erased,
             cleanup_seeds,
+            protected,
         )
     else
         try allocator.alloc(bool, package_count);
@@ -360,9 +403,11 @@ pub fn prepareWithOptions(
         _ = installed;
         const package_index: usize = @intFromEnum(package.id);
         if (directly_erased[package_index] or
-            cleanup_removals[package_index] or
+            (cleanup_removals[package_index] and
+                !protected[package_index]) or
             ((options.allow_erasing or
                 base.package_states[package_index].allow_uninstall) and
+                !protected[package_index] and
                 base.package_states[package_index].replacement.kind == .none))
         {
             continue;
@@ -574,6 +619,17 @@ pub fn prepareWithOptions(
     }
     const owned_cleanup_packages = try cleanup_packages.toOwnedSlice();
     errdefer allocator.free(owned_cleanup_packages);
+    var protected_packages = PackageIdList.init(allocator);
+    defer protected_packages.deinit();
+    for (protected, 0..) |is_protected, package_index| {
+        if (is_protected) {
+            try protected_packages.append(
+                @enumFromInt(@as(u32, @intCast(package_index))),
+            );
+        }
+    }
+    const owned_protected_packages = try protected_packages.toOwnedSlice();
+    errdefer allocator.free(owned_protected_packages);
 
     return .{
         .allocator = allocator,
@@ -598,8 +654,38 @@ pub fn prepareWithOptions(
             .candidates = owned_policy_candidates,
         },
         .cleanup_packages = owned_cleanup_packages,
+        .protected_packages = owned_protected_packages,
+        .protected_policy = options.protected_names.len != 0,
         .best = options.best,
     };
+}
+
+fn markProtectedPackages(
+    base: *const solver_rules.OwnedFormula,
+    protected_names: []const []const u8,
+    protected: []bool,
+) PrepareError!void {
+    if (protected.len != base.universe.packages.len) {
+        return error.InvalidFormula;
+    }
+    @memset(protected, false);
+    for (protected_names) |name| {
+        var installed_package: ?usize = null;
+        for (base.universe.packages, 0..) |package, package_index| {
+            if (package.installed == null or
+                !std.mem.eql(u8, package.source.nevra.name, name))
+            {
+                continue;
+            }
+            if (installed_package != null and
+                installed_package.? != package_index)
+            {
+                return error.UnsupportedPolicy;
+            }
+            installed_package = package_index;
+            protected[package_index] = true;
+        }
+    }
 }
 
 fn validateCleanupPolicy(
@@ -677,10 +763,12 @@ fn computeCleanupRemovals(
     base: *const solver_rules.OwnedFormula,
     directly_erased: []const bool,
     cleanup_seeds: []const bool,
+    protected: []const bool,
 ) PrepareError![]bool {
     const package_count = base.universe.packages.len;
     if (directly_erased.len != package_count or
-        cleanup_seeds.len != package_count)
+        cleanup_seeds.len != package_count or
+        protected.len != package_count)
     {
         return error.InvalidFormula;
     }
@@ -710,7 +798,7 @@ fn computeCleanupRemovals(
             return error.InvalidFormula;
         if (package.installed == null) continue;
         if (!directly_erased[package_index] and
-            installedIsUserRoot(base, package_index))
+            installedIsUserRoot(base, package_index, protected))
         {
             continue;
         }
@@ -835,11 +923,13 @@ const CleanupDependencyIndex = struct {
 fn installedIsUserRoot(
     base: *const solver_rules.OwnedFormula,
     package_index: usize,
+    protected: []const bool,
 ) bool {
     const installed = base.universe.packages[package_index].installed orelse
         return false;
     return installed.reason != .automatic or
-        base.package_states[package_index].user_installed;
+        base.package_states[package_index].user_installed or
+        protected[package_index];
 }
 
 fn queueCleanupDependencies(
@@ -974,6 +1064,7 @@ fn solveSkippingBrokenJobs(
     allocator: std.mem.Allocator,
 ) SkipBrokenError!SkipBrokenResult {
     if (prepared.best or
+        prepared.protected_policy or
         prepared.formula.jobs.len > solver_model.max_skip_broken_jobs or
         prepared.formula.replacement_kind != .none)
     {
@@ -7019,6 +7110,443 @@ test "clean deps honors explicit user-installed roots and rejects supplements" {
     }
 }
 
+test "protected policy catches direct erase obsoletion and indirect removal" {
+    var available_relations = [_]metadata.Relation{
+        .{ .name = "protected" },
+        .{ .name = "protected" },
+    };
+    var installed_packages = [_]metadata.Package{
+        testPackage("protected", "1"),
+    };
+    var available_packages = [_]metadata.Package{
+        testPackage("conflicting", "1"),
+        testPackage("obsoleter", "1"),
+    };
+    available_packages[0].conflicts = .{ .start = 0, .len = 1 };
+    available_packages[1].obsoletes = .{ .start = 1, .len = 1 };
+    const installed_model = metadata.RepositoryModel{
+        .packages = &installed_packages,
+    };
+    const available_model = metadata.RepositoryModel{
+        .packages = &available_packages,
+        .relations = &available_relations,
+    };
+    const installed_states = [_]solver_model.InstalledState{
+        .{ .rpmdb_hnum = 1, .reason = .user },
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{
+            .{
+                .id = "@System",
+                .model = &installed_model,
+                .kind = .installed,
+                .installed_states = &installed_states,
+            },
+            .{ .id = "available", .model = &available_model },
+        },
+    );
+    defer universe.deinit();
+
+    var erase_base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .erase,
+            .selection = .{ .package = @enumFromInt(0) },
+        }} },
+        testArchitecture(),
+    );
+    defer erase_base.deinit();
+    var erased = try prepareWithOptions(
+        std.testing.allocator,
+        &erase_base,
+        .{
+            .allow_erasing = true,
+            .protected_names = &.{"protected"},
+        },
+    );
+    defer erased.deinit();
+    try std.testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{@enumFromInt(0)},
+        erased.protected_packages,
+    );
+    var erased_result = try erased.solve(std.testing.allocator);
+    defer erased_result.deinit();
+    try std.testing.expectEqual(
+        @as(?solver_model.PackageId, @enumFromInt(0)),
+        erased.protectedRemoval(erased_result.satisfiable),
+    );
+
+    var conflict_base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(1) },
+        }} },
+        testArchitecture(),
+    );
+    defer conflict_base.deinit();
+    var conflict = try prepareWithOptions(
+        std.testing.allocator,
+        &conflict_base,
+        .{
+            .allow_erasing = true,
+            .protected_names = &.{"protected"},
+        },
+    );
+    defer conflict.deinit();
+    var conflict_result = try conflict.solve(std.testing.allocator);
+    defer conflict_result.deinit();
+    switch (conflict_result) {
+        .unsatisfiable => {},
+        .satisfiable => |model| try std.testing.expectEqual(
+            @as(?solver_model.PackageId, @enumFromInt(0)),
+            conflict.protectedRemoval(model),
+        ),
+    }
+
+    var obsolete_base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(2) },
+        }} },
+        testArchitecture(),
+    );
+    defer obsolete_base.deinit();
+    var obsoleted = try prepareWithOptions(
+        std.testing.allocator,
+        &obsolete_base,
+        .{ .protected_names = &.{"protected"} },
+    );
+    defer obsoleted.deinit();
+    var obsoleted_result = try obsoleted.solve(std.testing.allocator);
+    defer obsoleted_result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, false, true },
+        obsoleted_result.satisfiable.values,
+    );
+    try std.testing.expectEqual(
+        @as(?solver_model.PackageId, @enumFromInt(0)),
+        obsoleted.protectedRemoval(obsoleted_result.satisfiable),
+    );
+}
+
+test "protected allow erasing releases only unprotected packages" {
+    var available_relations = [_]metadata.Relation{
+        .{ .name = "unprotected" },
+        .{ .name = "protected" },
+    };
+    var installed_packages = [_]metadata.Package{
+        testPackage("protected", "1"),
+        testPackage("unprotected", "1"),
+    };
+    var available_packages = [_]metadata.Package{
+        testPackage("allowed-request", "1"),
+        testPackage("blocked-request", "1"),
+    };
+    available_packages[0].conflicts = .{ .start = 0, .len = 1 };
+    available_packages[1].conflicts = .{ .start = 1, .len = 1 };
+    const installed_model = metadata.RepositoryModel{
+        .packages = &installed_packages,
+    };
+    const available_model = metadata.RepositoryModel{
+        .packages = &available_packages,
+        .relations = &available_relations,
+    };
+    const installed_states = [_]solver_model.InstalledState{
+        .{ .rpmdb_hnum = 1, .reason = .user },
+        .{ .rpmdb_hnum = 2, .reason = .user },
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{
+            .{
+                .id = "@System",
+                .model = &installed_model,
+                .kind = .installed,
+                .installed_states = &installed_states,
+            },
+            .{ .id = "available", .model = &available_model },
+        },
+    );
+    defer universe.deinit();
+
+    var allowed_base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(2) },
+        }} },
+        testArchitecture(),
+    );
+    defer allowed_base.deinit();
+    var allowed = try prepareWithOptions(
+        std.testing.allocator,
+        &allowed_base,
+        .{
+            .allow_erasing = true,
+            .protected_names = &.{"protected"},
+        },
+    );
+    defer allowed.deinit();
+    var allowed_result = try allowed.solve(std.testing.allocator);
+    defer allowed_result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ true, false, true, false },
+        allowed_result.satisfiable.values,
+    );
+    try std.testing.expectEqual(
+        @as(?solver_model.PackageId, null),
+        allowed.protectedRemoval(allowed_result.satisfiable),
+    );
+
+    var blocked_base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(3) },
+        }} },
+        testArchitecture(),
+    );
+    defer blocked_base.deinit();
+    var blocked = try prepareWithOptions(
+        std.testing.allocator,
+        &blocked_base,
+        .{
+            .allow_erasing = true,
+            .protected_names = &.{"protected"},
+        },
+    );
+    defer blocked.deinit();
+    var blocked_result = try blocked.solve(std.testing.allocator);
+    defer blocked_result.deinit();
+    try std.testing.expect(blocked_result == .unsatisfiable);
+}
+
+test "protected policy allows a paired same-name replacement" {
+    var installed_packages = [_]metadata.Package{
+        testPackage("protected", "1"),
+    };
+    var available_packages = [_]metadata.Package{
+        testPackage("protected", "2"),
+    };
+    const installed_model = metadata.RepositoryModel{
+        .packages = &installed_packages,
+    };
+    const available_model = metadata.RepositoryModel{
+        .packages = &available_packages,
+    };
+    const installed_states = [_]solver_model.InstalledState{
+        .{ .rpmdb_hnum = 1, .reason = .user },
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{
+            .{
+                .id = "@System",
+                .model = &installed_model,
+                .kind = .installed,
+                .installed_states = &installed_states,
+            },
+            .{ .id = "available", .model = &available_model },
+        },
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{
+            .{
+                .action = .erase,
+                .selection = .{ .package = @enumFromInt(0) },
+            },
+            .{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(1) },
+            },
+        } },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    var prepared = try prepareWithOptions(
+        std.testing.allocator,
+        &base,
+        .{
+            .allow_erasing = true,
+            .protected_names = &.{"protected"},
+        },
+    );
+    defer prepared.deinit();
+
+    var result = try prepared.solve(std.testing.allocator);
+    defer result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, true },
+        result.satisfiable.values,
+    );
+    try std.testing.expectEqual(
+        @as(?solver_model.PackageId, null),
+        prepared.protectedRemoval(result.satisfiable),
+    );
+}
+
+test "protected automatic dependencies remain clean-deps roots" {
+    var installed_relations = [_]metadata.Relation{
+        .{ .name = "protected" },
+    };
+    var installed_packages = [_]metadata.Package{
+        testPackage("requested", "1"),
+        testPackage("protected", "1"),
+    };
+    installed_packages[0].requires = .{ .start = 0, .len = 1 };
+    const installed_model = metadata.RepositoryModel{
+        .packages = &installed_packages,
+        .relations = &installed_relations,
+    };
+    const installed_states = [_]solver_model.InstalledState{
+        .{ .rpmdb_hnum = 1, .reason = .user },
+        .{ .rpmdb_hnum = 2, .reason = .automatic },
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{
+            .id = "@System",
+            .model = &installed_model,
+            .kind = .installed,
+            .installed_states = &installed_states,
+        }},
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .erase,
+            .selection = .{ .package = @enumFromInt(0) },
+            .flags = .{ .clean_deps = true },
+        }} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    try std.testing.expectError(
+        error.UnsupportedPolicy,
+        prepareWithOptions(
+            std.testing.allocator,
+            &base,
+            .{
+                .clean_deps = true,
+                .protected_names = &.{"protected"},
+            },
+        ),
+    );
+    var prepared = try prepareWithOptions(
+        std.testing.allocator,
+        &base,
+        .{
+            .allow_erasing = true,
+            .clean_deps = true,
+            .protected_names = &.{"protected"},
+        },
+    );
+    defer prepared.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), prepared.cleanup_packages.len);
+    var result = try prepared.solve(std.testing.allocator);
+    defer result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, true },
+        result.satisfiable.values,
+    );
+    try std.testing.expectEqual(
+        @as(?solver_model.PackageId, null),
+        prepared.protectedRemoval(result.satisfiable),
+    );
+}
+
+test "protected policy rejects multiple installed instances and skip broken" {
+    var installed_packages = [_]metadata.Package{
+        testPackage("protected", "1"),
+        testPackage("protected", "2"),
+    };
+    var available_packages = [_]metadata.Package{
+        testPackage("request", "1"),
+    };
+    const installed_model = metadata.RepositoryModel{
+        .packages = &installed_packages,
+    };
+    const available_model = metadata.RepositoryModel{
+        .packages = &available_packages,
+    };
+    const installed_states = [_]solver_model.InstalledState{
+        .{ .rpmdb_hnum = 1, .reason = .user },
+        .{ .rpmdb_hnum = 2, .reason = .user },
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{
+            .{
+                .id = "@System",
+                .model = &installed_model,
+                .kind = .installed,
+                .installed_states = &installed_states,
+            },
+            .{ .id = "available", .model = &available_model },
+        },
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(2) },
+        }} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+    try std.testing.expectError(
+        error.UnsupportedPolicy,
+        prepareWithOptions(
+            std.testing.allocator,
+            &base,
+            .{ .protected_names = &.{"protected"} },
+        ),
+    );
+
+    installed_packages[1].nevra.name = "other";
+    var single_base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(2) },
+        }} },
+        testArchitecture(),
+    );
+    defer single_base.deinit();
+    var prepared = try prepareWithOptions(
+        std.testing.allocator,
+        &single_base,
+        .{ .protected_names = &.{"protected"} },
+    );
+    defer prepared.deinit();
+    try std.testing.expectError(
+        error.UnsupportedPolicy,
+        prepared.solveSkipBroken(std.testing.allocator),
+    );
+}
+
 test "skip broken keeps satisfiable exact install jobs" {
     var available_relations = [_]metadata.Relation{
         .{ .name = "missing-capability" },
@@ -7814,7 +8342,10 @@ fn cleanupAllocationFailureCase(allocator: std.mem.Allocator) !void {
     var prepared = try prepareWithOptions(
         allocator,
         &base,
-        .{ .allow_erasing = true },
+        .{
+            .allow_erasing = true,
+            .protected_names = &.{"dependency"},
+        },
     );
     defer prepared.deinit();
 }

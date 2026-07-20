@@ -146,8 +146,27 @@ pub fn solve(
     const transaction = c.solver_create_transaction(solver) orelse return error.OutOfMemory;
     defer c.transaction_free(transaction);
 
-    const selected = try collectSelected(arena, &state, transaction);
     const actions = try collectActions(arena, &state, universe, goal, solver, transaction);
+    if (protectedRemoval(universe, policy.protected_names, actions)) |package_id| {
+        const problems = try arena.alloc(solver_model.Problem, 1);
+        problems[0] = .{
+            .kind = .protected_package,
+            .package = package_id,
+        };
+        return .{
+            .arena_state = arena_state,
+            .outcome = .{
+                .actions = &.{},
+                .problems = problems,
+                .skipped_jobs = skipped_jobs,
+            },
+            .selected = &.{},
+            .order = &.{},
+            .effective_jobs = effective_jobs,
+            .effective_solver_flags = solver_flags,
+        };
+    }
+    const selected = try collectSelected(arena, &state, transaction);
     const order = try collectOrder(arena, &state, transaction);
 
     return .{
@@ -171,8 +190,17 @@ fn validateInputs(
 ) SolveError!void {
     if (!policy.architecture.allow_multilib or
         policy.installonly_limit != 0 or
-        policy.protected_names.len != 0 or
         policy.installonly_names.len != 0)
+    {
+        return error.UnsupportedPolicy;
+    }
+    var clean_deps = policy.clean_deps;
+    for (goal.jobs) |job| {
+        clean_deps = clean_deps or job.flags.clean_deps;
+    }
+    if (clean_deps and
+        policy.protected_names.len != 0 and
+        !policy.allow_erasing)
     {
         return error.UnsupportedPolicy;
     }
@@ -182,6 +210,7 @@ fn validateInputs(
     if (policy.skip_broken) {
         if (policy.best or
             policy.clean_deps or
+            policy.protected_names.len != 0 or
             goal.jobs.len > solver_model.max_skip_broken_jobs)
         {
             return error.UnsupportedPolicy;
@@ -196,6 +225,17 @@ fn validateInputs(
                 job.flags.weak)
             {
                 return error.UnsupportedPolicy;
+            }
+        }
+    }
+    for (policy.protected_names) |name| {
+        var installed_count: usize = 0;
+        for (universe.packages) |package| {
+            if (package.installed != null and
+                std.mem.eql(u8, package.source.nevra.name, name))
+            {
+                installed_count += 1;
+                if (installed_count > 1) return error.UnsupportedPolicy;
             }
         }
     }
@@ -301,6 +341,24 @@ fn encodeJobs(
                 state.package_solvids[@intFromEnum(package.id)],
             );
             try state.job_ids.append(null);
+        }
+        if (policy.protected_names.len != 0) {
+            for (universe.packages) |package| {
+                if (package.installed == null) continue;
+                const action = if (nameInList(
+                    package.source.nevra.name,
+                    policy.protected_names,
+                ))
+                    c.SOLVER_USERINSTALLED
+                else
+                    c.SOLVER_ALLOWUNINSTALL;
+                c.queue_push2(
+                    jobs,
+                    c.SOLVER_SOLVABLE | action,
+                    state.package_solvids[@intFromEnum(package.id)],
+                );
+                try state.job_ids.append(null);
+            }
         }
     }
 
@@ -419,11 +477,45 @@ fn configureSolver(
     try setSolverFlag(solver, &flags, c.SOLVER_FLAG_YUM_OBSOLETES, .yum_obsoletes, true);
     try setSolverFlag(solver, &flags, c.SOLVER_FLAG_ALLOW_DOWNGRADE, .allow_downgrade, true);
     try setSolverFlag(solver, &flags, c.SOLVER_FLAG_INSTALL_ALSO_UPDATES, .install_also_updates, true);
-    try setSolverFlag(solver, &flags, c.SOLVER_FLAG_ALLOW_UNINSTALL, .allow_uninstall, policy.allow_erasing);
+    try setSolverFlag(
+        solver,
+        &flags,
+        c.SOLVER_FLAG_ALLOW_UNINSTALL,
+        .allow_uninstall,
+        policy.allow_erasing and policy.protected_names.len == 0,
+    );
     try setSolverFlag(solver, &flags, c.SOLVER_FLAG_IGNORE_RECOMMENDED, .ignore_recommended, !policy.install_weak_deps);
 
     std.sort.pdq(SolverFlag, flags.items, {}, solverFlagLessThan);
     return flags.toOwnedSlice();
+}
+
+fn nameInList(name: []const u8, names: []const []const u8) bool {
+    for (names) |candidate| {
+        if (std.mem.eql(u8, name, candidate)) return true;
+    }
+    return false;
+}
+
+fn protectedRemoval(
+    universe: *const solver_model.Universe,
+    protected_names: []const []const u8,
+    actions: []const solver_model.Action,
+) ?solver_model.PackageId {
+    for (actions) |action| {
+        const package_id = switch (action.kind) {
+            .erase => action.package,
+            .obsolete => action.prior orelse continue,
+            else => continue,
+        };
+        const package = universe.package(package_id) orelse continue;
+        if (package.installed != null and
+            nameInList(package.source.nevra.name, protected_names))
+        {
+            return package_id;
+        }
+    }
+    return null;
 }
 
 fn setSolverFlag(

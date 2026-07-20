@@ -904,6 +904,254 @@ test "clean deps adds back every installed provider needed by a survivor" {
     );
 }
 
+test "protected policy rejects unsupported boundaries" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{ .name = "protected" });
+    try builder.addPackage(installed, .{ .name = "protected" });
+    try builder.addPackage(available, .{ .name = "request" });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var protected_policy = policy();
+    protected_policy.protected_names = &.{"protected"};
+    const goal = solver_model.Goal{ .jobs = &.{.{
+        .action = .install,
+        .selection = .{ .package = @enumFromInt(2) },
+    }} };
+    try testing.expectError(
+        error.UnsupportedPolicy,
+        oracle.solve(
+            testing.allocator,
+            &graph.universe,
+            goal,
+            protected_policy,
+        ),
+    );
+
+    protected_policy.protected_names = &.{"missing"};
+    protected_policy.skip_broken = true;
+    try testing.expectError(
+        error.UnsupportedPolicy,
+        oracle.solve(
+            testing.allocator,
+            &graph.universe,
+            goal,
+            protected_policy,
+        ),
+    );
+
+    protected_policy.skip_broken = false;
+    const clean_goal = solver_model.Goal{ .jobs = &.{.{
+        .action = .erase,
+        .selection = .{ .package = @enumFromInt(0) },
+        .flags = .{ .clean_deps = true },
+    }} };
+    try testing.expectError(
+        error.UnsupportedPolicy,
+        oracle.solve(
+            testing.allocator,
+            &graph.universe,
+            clean_goal,
+            protected_policy,
+        ),
+    );
+}
+
+test "protected direct erase and obsoletion become protected problems" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{ .name = "protected" });
+    try builder.addPackage(available, .{
+        .name = "obsoleter",
+        .obsoletes = &.{relation("protected")},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var protected_policy = policy();
+    protected_policy.allow_erasing = true;
+    protected_policy.protected_names = &.{"protected"};
+    var erased = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .erase,
+            .selection = .{ .package = @enumFromInt(0) },
+        }} },
+        protected_policy,
+    );
+    defer erased.deinit();
+    try testing.expectEqual(@as(usize, 1), erased.outcome.problems.len);
+    try testing.expectEqual(
+        solver_model.ProblemKind.protected_package,
+        erased.outcome.problems[0].kind,
+    );
+    try testing.expectEqual(
+        @as(?solver_model.PackageId, @enumFromInt(0)),
+        erased.outcome.problems[0].package,
+    );
+
+    protected_policy.allow_erasing = false;
+    var obsoleted = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(1) },
+        }} },
+        protected_policy,
+    );
+    defer obsoleted.deinit();
+    try testing.expectEqual(@as(usize, 1), obsoleted.outcome.problems.len);
+    try testing.expectEqual(
+        solver_model.ProblemKind.protected_package,
+        obsoleted.outcome.problems[0].kind,
+    );
+}
+
+test "protected allow erasing releases only unprotected packages" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{ .name = "protected" });
+    try builder.addPackage(installed, .{ .name = "unprotected" });
+    try builder.addPackage(available, .{
+        .name = "allowed-request",
+        .conflicts = &.{relation("unprotected")},
+    });
+    try builder.addPackage(available, .{
+        .name = "blocked-request",
+        .conflicts = &.{relation("protected")},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var protected_policy = policy();
+    protected_policy.allow_erasing = true;
+    protected_policy.protected_names = &.{"protected"};
+    var allowed = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(2) },
+        }} },
+        protected_policy,
+    );
+    defer allowed.deinit();
+    try testing.expectEqual(@as(usize, 0), allowed.outcome.problems.len);
+    try testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{ @enumFromInt(0), @enumFromInt(2) },
+        allowed.selected,
+    );
+
+    var blocked = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(3) },
+        }} },
+        protected_policy,
+    );
+    defer blocked.deinit();
+    try testing.expect(blocked.outcome.problems.len != 0);
+    try testing.expectEqual(@as(usize, 0), blocked.selected.len);
+}
+
+test "protected same-name replacement remains allowed" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{
+        .name = "protected",
+        .version = "1",
+    });
+    try builder.addPackage(available, .{
+        .name = "protected",
+        .version = "2",
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var protected_policy = policy();
+    protected_policy.allow_erasing = true;
+    protected_policy.protected_names = &.{"protected"};
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{
+            .{
+                .action = .erase,
+                .selection = .{ .package = @enumFromInt(0) },
+            },
+            .{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(1) },
+            },
+        } },
+        protected_policy,
+    );
+    defer observation.deinit();
+
+    try testing.expectEqual(@as(usize, 0), observation.outcome.problems.len);
+    try testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{@enumFromInt(1)},
+        observation.selected,
+    );
+    try testing.expectEqual(
+        solver_model.ActionKind.upgrade,
+        actionForName(&graph, &observation, "protected").?.kind,
+    );
+}
+
+test "protected automatic dependency is a clean-deps root" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    try builder.addPackage(installed, .{
+        .name = "requested",
+        .requires = &.{relation("protected")},
+    });
+    try builder.addPackage(installed, .{ .name = "protected" });
+    builder.repos.items[installed].installed_states.items[0].reason = .user;
+    builder.repos.items[installed].installed_states.items[1].reason = .automatic;
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var protected_policy = policy();
+    protected_policy.allow_erasing = true;
+    protected_policy.clean_deps = true;
+    protected_policy.protected_names = &.{"protected"};
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .erase,
+            .selection = .{ .package = @enumFromInt(0) },
+            .flags = .{ .clean_deps = true },
+        }} },
+        protected_policy,
+    );
+    defer observation.deinit();
+
+    try testing.expectEqual(@as(usize, 0), observation.outcome.problems.len);
+    try testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{@enumFromInt(1)},
+        observation.selected,
+    );
+}
+
 test "allow erasing replaces an installed conflict and preserves unrelated packages" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     var builder = GraphBuilder.init(arena_state.allocator());
