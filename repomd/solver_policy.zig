@@ -80,6 +80,8 @@ pub const PrepareOptions = struct {
     clean_deps: bool = false,
     /// Exact installed package names protected from erase or obsoletion.
     protected_names: []const []const u8 = &.{},
+    /// The source goal contains synthesized install-only multiversion jobs.
+    installonly_policy: bool = false,
 };
 
 pub const Prepared = struct {
@@ -91,6 +93,7 @@ pub const Prepared = struct {
     /// Installed package instances covered by protected-name policy.
     protected_packages: []const solver_model.PackageId,
     protected_policy: bool = false,
+    installonly_policy: bool = false,
     best: bool = false,
 
     pub fn solve(
@@ -252,7 +255,9 @@ pub fn prepareWithOptions(
         return error.UnsupportedPolicy;
     }
     for (base.package_states) |state| {
-        if (state.multiversion) return error.UnsupportedPolicy;
+        if (state.multiversion and !options.installonly_policy) {
+            return error.UnsupportedPolicy;
+        }
         if (state.replacement.kind != .none and
             (state.allow_uninstall or options.allow_erasing))
         {
@@ -266,6 +271,9 @@ pub fn prepareWithOptions(
     const directly_erased = try allocator.alloc(bool, package_count);
     defer allocator.free(directly_erased);
     @memset(directly_erased, false);
+    const installonly_erased = try allocator.alloc(bool, package_count);
+    defer allocator.free(installonly_erased);
+    @memset(installonly_erased, false);
     const cleanup_seeds = try allocator.alloc(bool, package_count);
     defer allocator.free(cleanup_seeds);
     @memset(cleanup_seeds, false);
@@ -353,6 +361,14 @@ pub fn prepareWithOptions(
                         if (job_index >= base.jobs.len) {
                             return error.InvalidFormula;
                         }
+                        if (options.installonly_policy and
+                            base.jobs[job_index].action == .erase and
+                            base.jobs[job_index].reason ==
+                                .installonly_limit and
+                            base.package_states[package_index].multiversion)
+                        {
+                            installonly_erased[package_index] = true;
+                        }
                         if (base.jobs[job_index].action == .erase and
                             (options.clean_deps or
                                 base.jobs[job_index].flags.clean_deps))
@@ -372,6 +388,33 @@ pub fn prepareWithOptions(
             &candidate_groups,
             &policy_candidates,
         );
+    }
+    // Multiversion removes distinct-EVRA same-name clauses, so rebuild the
+    // update pool that those clauses normally provide.
+    for (base.universe.packages) |package| {
+        const package_index: usize = @intFromEnum(package.id);
+        const state = base.package_states[package_index];
+        if (package.installed == null or
+            !state.multiversion or
+            state.replacement.kind == .none)
+        {
+            continue;
+        }
+        for (base.universe.packages) |candidate| {
+            const candidate_index: usize = @intFromEnum(candidate.id);
+            if (candidate.installed != null or
+                !base.package_states[candidate_index].multiversion or
+                solver_rules.isSource(candidate.source.nevra.arch) or
+                !std.mem.eql(
+                    u8,
+                    candidate.source.nevra.name,
+                    package.source.nevra.name,
+                ))
+            {
+                continue;
+            }
+            try replacement_candidates[package_index].append(candidate.id);
+        }
     }
     const cleanup_removals = if (clean_deps)
         try computeCleanupRemovals(
@@ -402,7 +445,12 @@ pub fn prepareWithOptions(
         const installed = package.installed orelse continue;
         _ = installed;
         const package_index: usize = @intFromEnum(package.id);
-        if (directly_erased[package_index] or
+        const installonly_update_eviction =
+            directly_erased[package_index] and
+            installonly_erased[package_index] and
+            base.package_states[package_index].replacement.kind != .none;
+        if ((directly_erased[package_index] and
+            !installonly_update_eviction) or
             (cleanup_removals[package_index] and
                 !protected[package_index]) or
             ((options.allow_erasing or
@@ -430,7 +478,6 @@ pub fn prepareWithOptions(
             );
             continue;
         }
-
         std.sort.heap(
             solver_model.PackageId,
             obsolete_candidates[package_index].items,
@@ -452,6 +499,7 @@ pub fn prepareWithOptions(
             obsolete_candidates[package_index].items,
         );
         if (package_candidates.items.len == 0) {
+            if (installonly_update_eviction) continue;
             try appendRetentionClause(
                 &clauses,
                 &literals,
@@ -656,6 +704,7 @@ pub fn prepareWithOptions(
         .cleanup_packages = owned_cleanup_packages,
         .protected_packages = owned_protected_packages,
         .protected_policy = options.protected_names.len != 0,
+        .installonly_policy = options.installonly_policy,
         .best = options.best,
     };
 }
@@ -1065,6 +1114,7 @@ fn solveSkippingBrokenJobs(
 ) SkipBrokenError!SkipBrokenResult {
     if (prepared.best or
         prepared.protected_policy or
+        prepared.installonly_policy or
         prepared.formula.jobs.len > solver_model.max_skip_broken_jobs or
         prepared.formula.replacement_kind != .none)
     {

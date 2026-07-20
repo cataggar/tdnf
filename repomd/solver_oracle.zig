@@ -91,38 +91,74 @@ pub fn solve(
     defer c.solver_free(solver);
     const solver_flags = try configureSolver(arena, solver, policy);
 
-    const problem_count = c.solver_solve(solver, &jobs);
-    if (problem_count < 0) {
-        return error.SolverFailed;
-    }
+    const installonly_evictions = try arena.alloc(bool, universe.packages.len);
+    @memset(installonly_evictions, false);
+    var problem_count: c.Id = 0;
+    var skip_broken = false;
+    var transaction: ?*c.Transaction = null;
+    defer if (transaction) |value| c.transaction_free(value);
+    var actions: []const solver_model.Action = &.{};
+    var synthesized_problem: ?solver_model.Problem = null;
+    var installonly_retries: u8 = 0;
 
-    const effective_jobs = try arena.alloc(EffectiveJob, state.job_ids.items.len);
-    for (effective_jobs, 0..) |*effective, index| {
-        const how = jobs.elements[index * 2];
-        const job_id = state.job_ids.items[index];
-        const input_job = if (job_id) |id|
-            goal.jobs[@intFromEnum(id)]
-        else
-            null;
-        effective.* = .{
-            .id = job_id,
-            .action = if (input_job) |job| job.action else try actionFromFlags(how),
-            .selection = if (input_job) |job|
-                try cloneSelection(arena, job.selection)
-            else
-                try selectionFromFlags(&state, how, jobs.elements[index * 2 + 1]),
-            .flags = .{
-                .clean_deps = how & c.SOLVER_CLEANDEPS != 0,
-                .force_best = how & c.SOLVER_FORCEBEST != 0,
-                .targeted = how & c.SOLVER_TARGETED != 0,
-                .not_by_user = how & c.SOLVER_NOTBYUSER != 0,
-                .weak = how & c.SOLVER_WEAK != 0,
+    while (true) {
+        if (transaction) |value| {
+            c.transaction_free(value);
+            transaction = null;
+        }
+        problem_count = c.solver_solve(solver, &jobs);
+        if (problem_count < 0) return error.SolverFailed;
+
+        skip_broken = problem_count != 0 and policy.skip_broken and
+            problemsAreSkippable(solver);
+        if (problem_count != 0 and !skip_broken) break;
+
+        transaction = c.solver_create_transaction(solver) orelse
+            return error.OutOfMemory;
+        actions = try collectActions(
+            arena,
+            &state,
+            universe,
+            goal,
+            solver,
+            transaction.?,
+            installonly_evictions,
+        );
+        if (protectedRemoval(universe, policy.protected_names, actions)) |package_id| {
+            synthesized_problem = .{
+                .kind = .protected_package,
+                .package = package_id,
+            };
+            break;
+        }
+        switch (try checkInstallonlyLimit(
+            arena,
+            &state,
+            universe,
+            policy,
+            transaction.?,
+            &jobs,
+            installonly_evictions,
+            installonly_retries != 0,
+        )) {
+            .satisfied => break,
+            .retry => {
+                installonly_retries += 1;
+                continue;
             },
-        };
+            .exceeded => |problem| {
+                synthesized_problem = problem;
+                break;
+            },
+        }
     }
 
-    const skip_broken = problem_count != 0 and policy.skip_broken and
-        problemsAreSkippable(solver);
+    const effective_jobs = try collectEffectiveJobs(
+        arena,
+        &state,
+        goal,
+        &jobs,
+    );
     if (problem_count != 0 and !skip_broken) {
         const problems = try collectProblems(arena, &state, universe, goal, solver);
         return .{
@@ -143,16 +179,9 @@ pub fn solve(
         try collectSkippedJobs(arena, &state, goal, solver)
     else
         &.{};
-    const transaction = c.solver_create_transaction(solver) orelse return error.OutOfMemory;
-    defer c.transaction_free(transaction);
-
-    const actions = try collectActions(arena, &state, universe, goal, solver, transaction);
-    if (protectedRemoval(universe, policy.protected_names, actions)) |package_id| {
+    if (synthesized_problem) |problem| {
         const problems = try arena.alloc(solver_model.Problem, 1);
-        problems[0] = .{
-            .kind = .protected_package,
-            .package = package_id,
-        };
+        problems[0] = problem;
         return .{
             .arena_state = arena_state,
             .outcome = .{
@@ -166,8 +195,9 @@ pub fn solve(
             .effective_solver_flags = solver_flags,
         };
     }
-    const selected = try collectSelected(arena, &state, transaction);
-    const order = try collectOrder(arena, &state, transaction);
+    const final_transaction = transaction orelse return error.UnsupportedResult;
+    const selected = try collectSelected(arena, &state, final_transaction);
+    const order = try collectOrder(arena, &state, final_transaction);
 
     return .{
         .arena_state = arena_state,
@@ -188,10 +218,7 @@ fn validateInputs(
     goal: solver_model.Goal,
     policy: solver_model.SolvePolicy,
 ) SolveError!void {
-    if (!policy.architecture.allow_multilib or
-        policy.installonly_limit != 0 or
-        policy.installonly_names.len != 0)
-    {
+    if (!policy.architecture.allow_multilib) {
         return error.UnsupportedPolicy;
     }
     var clean_deps = policy.clean_deps;
@@ -211,6 +238,7 @@ fn validateInputs(
         if (policy.best or
             policy.clean_deps or
             policy.protected_names.len != 0 or
+            policy.installonly_names.len != 0 or
             goal.jobs.len > solver_model.max_skip_broken_jobs)
         {
             return error.UnsupportedPolicy;
@@ -330,6 +358,20 @@ fn encodeJobs(
         c.queue_push2(jobs, how, encoded_selection.what);
         try state.job_ids.append(@enumFromInt(@as(u32, @intCast(index))));
     }
+    const installonly_job_start = state.job_ids.items.len;
+    for (policy.installonly_names, 0..) |name, name_index| {
+        if (!firstNameOccurrence(policy.installonly_names, name_index)) {
+            continue;
+        }
+        if (!hasInstalledName(universe, name)) continue;
+        c.queue_push2(
+            jobs,
+            c.SOLVER_SOLVABLE_NAME | c.SOLVER_MULTIVERSION,
+            c.pool_str2id(state.pool, try dupZ(arena, name), 1),
+        );
+        try state.job_ids.append(null);
+    }
+    const installonly_job_end = state.job_ids.items.len;
 
     if (policy.allow_erasing) {
         for (universe.packages) |package| {
@@ -361,11 +403,215 @@ fn encodeJobs(
             }
         }
     }
-
     for (0..state.job_ids.items.len) |index| {
+        if (index >= installonly_job_start and index < installonly_job_end) {
+            continue;
+        }
         if (policy.best) jobs.elements[index * 2] |= c.SOLVER_FORCEBEST;
         if (policy.clean_deps) jobs.elements[index * 2] |= c.SOLVER_CLEANDEPS;
     }
+}
+
+fn collectEffectiveJobs(
+    arena: std.mem.Allocator,
+    state: *const PoolState,
+    goal: solver_model.Goal,
+    jobs: *const c.Queue,
+) SolveError![]const EffectiveJob {
+    if (jobs.count < 0 or
+        @as(usize, @intCast(jobs.count)) != state.job_ids.items.len * 2)
+    {
+        return error.InvalidModel;
+    }
+    const effective_jobs = try arena.alloc(
+        EffectiveJob,
+        state.job_ids.items.len,
+    );
+    for (effective_jobs, 0..) |*effective, index| {
+        const how = jobs.elements[index * 2];
+        const job_id = state.job_ids.items[index];
+        const input_job = if (job_id) |id|
+            goal.jobs[@intFromEnum(id)]
+        else
+            null;
+        effective.* = .{
+            .id = job_id,
+            .action = if (input_job) |job|
+                job.action
+            else
+                try actionFromFlags(how),
+            .selection = if (input_job) |job|
+                try cloneSelection(arena, job.selection)
+            else
+                try selectionFromFlags(
+                    arena,
+                    state,
+                    how,
+                    jobs.elements[index * 2 + 1],
+                ),
+            .flags = .{
+                .clean_deps = how & c.SOLVER_CLEANDEPS != 0,
+                .force_best = how & c.SOLVER_FORCEBEST != 0,
+                .targeted = how & c.SOLVER_TARGETED != 0,
+                .not_by_user = how & c.SOLVER_NOTBYUSER != 0,
+                .weak = how & c.SOLVER_WEAK != 0,
+            },
+        };
+    }
+    return effective_jobs;
+}
+
+const InstallonlyLimitCheck = union(enum) {
+    satisfied,
+    retry,
+    exceeded: solver_model.Problem,
+};
+
+fn checkInstallonlyLimit(
+    arena: std.mem.Allocator,
+    state: *PoolState,
+    universe: *const solver_model.Universe,
+    policy: solver_model.SolvePolicy,
+    transaction: *c.Transaction,
+    jobs: *c.Queue,
+    installonly_evictions: []bool,
+    retried: bool,
+) SolveError!InstallonlyLimitCheck {
+    if (policy.installonly_names.len == 0) return .satisfied;
+    if (installonly_evictions.len != universe.packages.len) {
+        return error.InvalidModel;
+    }
+
+    const removed = try arena.alloc(bool, universe.packages.len);
+    @memset(removed, false);
+    var exceeded_name: ?[]const u8 = null;
+    var exceeded_package: ?solver_model.PackageId = null;
+    var exceeded_count: u64 = 0;
+
+    for (policy.installonly_names, 0..) |name, name_index| {
+        if (!firstNameOccurrence(policy.installonly_names, name_index)) {
+            continue;
+        }
+        var count: u64 = 0;
+        var name_package: ?solver_model.PackageId = null;
+        for (universe.packages) |package| {
+            if (package.installed != null and
+                std.mem.eql(u8, package.source.nevra.name, name))
+            {
+                count += 1;
+                if (name_package == null) name_package = package.id;
+            }
+        }
+        for (queueElements(&transaction.*.steps)) |solvid| {
+            const package_id = packageIdForSolvid(state, solvid) orelse {
+                if (isResultSentinel(solvid)) continue;
+                return error.UnsupportedResult;
+            };
+            const package = universe.package(package_id) orelse
+                return error.InvalidModel;
+            if (!std.mem.eql(u8, package.source.nevra.name, name)) continue;
+            const raw_type = c.transaction_type(
+                transaction,
+                solvid,
+                c.SOLVER_TRANSACTION_SHOW_MULTIINSTALL,
+            );
+            if (raw_type == c.SOLVER_TRANSACTION_MULTIINSTALL) {
+                count += 1;
+            } else if (raw_type == c.SOLVER_TRANSACTION_ERASE) {
+                if (count == 0) return error.UnsupportedResult;
+                removed[@intFromEnum(package_id)] = true;
+                count -= 1;
+            }
+        }
+
+        const limit: u64 = policy.installonly_limit;
+        if (count <= limit) continue;
+        var excess = count - limit;
+        if (exceeded_name == null) {
+            exceeded_name = name;
+            exceeded_package = name_package;
+            exceeded_count = excess;
+        }
+        if (retried) continue;
+
+        var candidates = std.array_list.Managed(
+            solver_model.PackageId,
+        ).init(arena);
+        for (universe.packages) |package| {
+            if (package.installed == null or
+                removed[@intFromEnum(package.id)] or
+                !std.mem.eql(u8, package.source.nevra.name, name))
+            {
+                continue;
+            }
+            try candidates.append(package.id);
+        }
+        std.sort.pdq(
+            solver_model.PackageId,
+            candidates.items,
+            universe,
+            installedOrderLessThan,
+        );
+        for (candidates.items) |package_id| {
+            if (excess == 0) break;
+            const package_index: usize = @intFromEnum(package_id);
+            removed[package_index] = true;
+            installonly_evictions[package_index] = true;
+            c.queue_push2(
+                jobs,
+                c.SOLVER_SOLVABLE | c.SOLVER_ERASE,
+                state.package_solvids[package_index],
+            );
+            try state.job_ids.append(null);
+            excess -= 1;
+        }
+    }
+
+    const name = exceeded_name orelse return .satisfied;
+    if (!retried) return .retry;
+    return .{ .exceeded = .{
+        .kind = .installonly_limit,
+        .package = exceeded_package,
+        .capability = .{ .name = try cloneString(arena, name) },
+        .count = @intCast(exceeded_count),
+    } };
+}
+
+fn installedOrderLessThan(
+    universe: *const solver_model.Universe,
+    left_id: solver_model.PackageId,
+    right_id: solver_model.PackageId,
+) bool {
+    const left = universe.package(left_id).?.installed.?;
+    const right = universe.package(right_id).?.installed.?;
+    if (left.install_order != right.install_order) {
+        return left.install_order < right.install_order;
+    }
+    if (left.rpmdb_hnum != right.rpmdb_hnum) {
+        return left.rpmdb_hnum < right.rpmdb_hnum;
+    }
+    return @intFromEnum(left_id) < @intFromEnum(right_id);
+}
+
+fn hasInstalledName(
+    universe: *const solver_model.Universe,
+    name: []const u8,
+) bool {
+    for (universe.packages) |package| {
+        if (package.installed != null and
+            std.mem.eql(u8, package.source.nevra.name, name))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn firstNameOccurrence(names: []const []const u8, index: usize) bool {
+    for (names[0..index]) |name| {
+        if (std.mem.eql(u8, name, names[index])) return false;
+    }
+    return true;
 }
 
 const EncodedSelection = struct {
@@ -427,6 +673,7 @@ fn actionFromFlags(how: c.Id) SolveError!solver_model.JobAction {
 }
 
 fn selectionFromFlags(
+    arena: std.mem.Allocator,
     state: *const PoolState,
     how: c.Id,
     what: c.Id,
@@ -435,6 +682,12 @@ fn selectionFromFlags(
         c.SOLVER_SOLVABLE_ALL => .all,
         c.SOLVER_SOLVABLE => .{
             .package = packageIdForSolvid(state, what) orelse return error.UnsupportedResult,
+        },
+        c.SOLVER_SOLVABLE_NAME => .{
+            .name = try cloneString(
+                arena,
+                std.mem.span(c.pool_id2str(state.pool, what)),
+            ),
         },
         else => error.UnsupportedResult,
     };
@@ -563,7 +816,11 @@ fn collectActions(
     goal: solver_model.Goal,
     solver: *c.Solver,
     transaction: *c.Transaction,
+    installonly_evictions: []const bool,
 ) SolveError![]const solver_model.Action {
+    if (installonly_evictions.len != universe.packages.len) {
+        return error.InvalidModel;
+    }
     var actions = std.array_list.Managed(solver_model.Action).init(arena);
     const mode = c.SOLVER_TRANSACTION_SHOW_ACTIVE |
         c.SOLVER_TRANSACTION_SHOW_ALL |
@@ -618,12 +875,22 @@ fn collectActions(
         }
 
         const decision = decisionReason(state, goal, solver, solvid);
+        const installonly_eviction = kind == .erase and
+            installonly_evictions[@intFromEnum(package_id)];
         try actions.append(.{
             .package = package_id,
             .prior = prior,
             .kind = kind,
-            .reason = if (kind == .obsolete) .obsoletes else decision.reason,
-            .requested_by = decision.requested_by,
+            .reason = if (kind == .obsolete)
+                .obsoletes
+            else if (installonly_eviction)
+                .installonly_limit
+            else
+                decision.reason,
+            .requested_by = if (installonly_eviction)
+                null
+            else
+                decision.requested_by,
         });
     }
 
@@ -698,6 +965,7 @@ fn requestReason(reason: solver_model.RequestReason) solver_model.TransactionRea
         .dependency => .dependency,
         .weak_dependency => .weak_dependency,
         .cleanup => .cleanup,
+        .installonly_limit => .installonly_limit,
         .policy => .policy,
     };
 }
