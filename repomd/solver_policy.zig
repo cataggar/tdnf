@@ -4,8 +4,8 @@
 //! obsoleting replacement is selected and ranks ordinary job and requirement
 //! candidates by repository priority, architecture, same-name package EVR,
 //! and common versioned provides. It also handles update-all, distro-sync-all,
-//! and weak dependency selection. Allow-erasing and cleanup policy remain
-//! separate follow-up work.
+//! weak dependency selection, and ordinary allow-erasing. Skip-broken and
+//! cleanup policy remain separate follow-up work.
 
 const std = @import("std");
 const query_index = @import("index.zig");
@@ -59,6 +59,7 @@ pub const PrepareError = error{
 
 pub const PrepareOptions = struct {
     best: bool = false,
+    allow_erasing: bool = false,
 };
 
 pub const Prepared = struct {
@@ -174,9 +175,14 @@ pub fn prepareWithOptions(
     if (base.architecture) |architecture| {
         if (!architecture.allow_multilib) return error.UnsupportedPolicy;
     }
+    if (options.allow_erasing and base.replacement_kind != .none) {
+        return error.UnsupportedPolicy;
+    }
     for (base.package_states) |state| {
         if (state.multiversion) return error.UnsupportedPolicy;
-        if (state.replacement.kind != .none and state.allow_uninstall) {
+        if (state.replacement.kind != .none and
+            (state.allow_uninstall or options.allow_erasing))
+        {
             return error.UnsupportedPolicy;
         }
     }
@@ -295,7 +301,8 @@ pub fn prepareWithOptions(
         _ = installed;
         const package_index: usize = @intFromEnum(package.id);
         if (directly_erased[package_index] or
-            (base.package_states[package_index].allow_uninstall and
+            ((options.allow_erasing or
+                base.package_states[package_index].allow_uninstall) and
                 base.package_states[package_index].replacement.kind == .none))
         {
             continue;
@@ -498,6 +505,7 @@ pub fn prepareWithOptions(
             .allocator = allocator,
             .universe = base.universe,
             .architecture = base.architecture,
+            .replacement_kind = base.replacement_kind,
             .clauses = owned_clauses,
             .literals = owned_literals,
             .weak_requests = weak_requests,
@@ -5240,6 +5248,47 @@ test "update with allow uninstall remains an explicit policy boundary" {
         error.UnsupportedPolicy,
         prepareInstalledRetention(std.testing.allocator, &base),
     );
+    try std.testing.expectError(
+        error.UnsupportedPolicy,
+        prepareWithOptions(
+            std.testing.allocator,
+            &base,
+            .{ .allow_erasing = true },
+        ),
+    );
+}
+
+test "allow erasing rejects replacement jobs without installed packages" {
+    const empty_model = metadata.RepositoryModel{};
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{
+            .id = "available",
+            .model = &empty_model,
+        }},
+    );
+    defer universe.deinit();
+
+    inline for ([_]solver_model.JobAction{ .update, .dist_sync }) |action| {
+        var base = try solver_rules.generateBase(
+            std.testing.allocator,
+            &universe,
+            .{ .jobs = &.{.{
+                .action = action,
+                .selection = .all,
+            }} },
+            testArchitecture(),
+        );
+        defer base.deinit();
+        try std.testing.expectError(
+            error.UnsupportedPolicy,
+            prepareWithOptions(
+                std.testing.allocator,
+                &base,
+                .{ .allow_erasing = true },
+            ),
+        );
+    }
 }
 
 test "distro sync obeys repository priority and retains orphans" {
@@ -5787,6 +5836,139 @@ test "retention blocks conflicts unless uninstall is explicitly allowed" {
     try std.testing.expectEqualSlices(
         bool,
         &.{ false, true },
+        allowed_result.satisfiable.values,
+    );
+}
+
+test "global allow erasing removes conflicts and retains unrelated packages" {
+    var installed_packages = [_]metadata.Package{
+        testPackage("conflicting", "1"),
+        testPackage("unrelated", "1"),
+    };
+    var available_relations = [_]metadata.Relation{
+        .{ .name = "conflicting" },
+    };
+    var available_packages = [_]metadata.Package{
+        testPackage("requested", "1"),
+    };
+    available_packages[0].conflicts = .{ .start = 0, .len = 1 };
+    const installed_model = metadata.RepositoryModel{
+        .packages = &installed_packages,
+    };
+    const available_model = metadata.RepositoryModel{
+        .packages = &available_packages,
+        .relations = &available_relations,
+    };
+    const installed_states = [_]solver_model.InstalledState{
+        .{ .rpmdb_hnum = 1, .reason = .user },
+        .{ .rpmdb_hnum = 2, .reason = .automatic },
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{
+            .{
+                .id = "@System",
+                .model = &installed_model,
+                .kind = .installed,
+                .installed_states = &installed_states,
+            },
+            .{ .id = "available", .model = &available_model },
+        },
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(2) },
+        }} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+
+    var blocked = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer blocked.deinit();
+    var blocked_result = try blocked.solve(std.testing.allocator);
+    defer blocked_result.deinit();
+    try std.testing.expect(blocked_result == .unsatisfiable);
+
+    var allowed = try prepareWithOptions(
+        std.testing.allocator,
+        &base,
+        .{ .allow_erasing = true },
+    );
+    defer allowed.deinit();
+    var allowed_result = try allowed.solve(std.testing.allocator);
+    defer allowed_result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, true, true },
+        allowed_result.satisfiable.values,
+    );
+}
+
+test "global allow erasing permits reverse dependency cascades" {
+    var installed_relations = [_]metadata.Relation{
+        .{ .name = "dependency" },
+    };
+    var installed_packages = [_]metadata.Package{
+        testPackage("dependency", "1"),
+        testPackage("application", "1"),
+    };
+    installed_packages[1].requires = .{ .start = 0, .len = 1 };
+    const installed_model = metadata.RepositoryModel{
+        .packages = &installed_packages,
+        .relations = &installed_relations,
+    };
+    const installed_states = [_]solver_model.InstalledState{
+        .{ .rpmdb_hnum = 1, .reason = .automatic },
+        .{ .rpmdb_hnum = 2, .reason = .user },
+    };
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &.{.{
+            .id = "@System",
+            .model = &installed_model,
+            .kind = .installed,
+            .installed_states = &installed_states,
+        }},
+    );
+    defer universe.deinit();
+    var base = try solver_rules.generateBase(
+        std.testing.allocator,
+        &universe,
+        .{ .jobs = &.{.{
+            .action = .erase,
+            .selection = .{ .package = @enumFromInt(0) },
+        }} },
+        testArchitecture(),
+    );
+    defer base.deinit();
+
+    var blocked = try prepareInstalledRetention(
+        std.testing.allocator,
+        &base,
+    );
+    defer blocked.deinit();
+    var blocked_result = try blocked.solve(std.testing.allocator);
+    defer blocked_result.deinit();
+    try std.testing.expect(blocked_result == .unsatisfiable);
+
+    var allowed = try prepareWithOptions(
+        std.testing.allocator,
+        &base,
+        .{ .allow_erasing = true },
+    );
+    defer allowed.deinit();
+    var allowed_result = try allowed.solve(std.testing.allocator);
+    defer allowed_result.deinit();
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, false },
         allowed_result.satisfiable.values,
     );
 }
