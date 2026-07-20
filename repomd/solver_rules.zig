@@ -583,6 +583,7 @@ pub fn generateBase(
         &universe_index,
         goal,
         install_candidates,
+        package_states,
     );
     try generateWeakRequests(&builder, &universe_index);
 
@@ -917,6 +918,7 @@ fn generateJobs(
     index: *const UniverseIndex,
     goal: solver_model.Goal,
     install_candidates: []const bool,
+    package_states: []const PackageState,
 ) GenerateError!void {
     var literals = std.array_list.Managed(Literal).init(allocator);
     defer literals.deinit();
@@ -984,7 +986,12 @@ fn generateJobs(
                     const erased = index.universe.package(
                         selected.packages[0],
                     ) orelse unreachable;
-                    if (erased.installed != null) {
+                    // A limit retry may erase an old instance while an update
+                    // job selects a newer same-name instance.
+                    const installonly_eviction =
+                        job.reason == .installonly_limit and
+                        package_states[@intFromEnum(erased.id)].multiversion;
+                    if (erased.installed != null and !installonly_eviction) {
                         var replacements = try index.matchingNames(
                             allocator,
                             erased.source.nevra.name,

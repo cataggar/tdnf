@@ -282,6 +282,7 @@ pub const RequestReason = enum {
     dependency,
     weak_dependency,
     cleanup,
+    installonly_limit,
     policy,
 };
 

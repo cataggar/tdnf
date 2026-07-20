@@ -1,5 +1,6 @@
 const std = @import("std");
 const metadata = @import("model.zig");
+const coordinator = @import("solver_coordinator.zig");
 const solver_model = @import("solver_model.zig");
 const oracle = @import("solver_oracle.zig");
 
@@ -209,6 +210,16 @@ fn actionForName(
     for (observation.outcome.actions) |action| {
         const package = graph.universe.package(action.package) orelse continue;
         if (std.mem.eql(u8, package.source.nevra.name, name)) return action;
+    }
+    return null;
+}
+
+fn actionForPackage(
+    observation: *const oracle.OwnedObservation,
+    package_id: solver_model.PackageId,
+) ?solver_model.Action {
+    for (observation.outcome.actions) |action| {
+        if (action.package == package_id) return action;
     }
     return null;
 }
@@ -1149,6 +1160,420 @@ test "protected automatic dependency is a clean-deps root" {
         solver_model.PackageId,
         &.{@enumFromInt(1)},
         observation.selected,
+    );
+}
+
+test "install-only first install is ordinary even with a zero limit" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(available, .{
+        .name = "kernel",
+        .version = "1",
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var installonly_policy = policy();
+    installonly_policy.installonly_names = &.{"kernel"};
+    installonly_policy.installonly_limit = 0;
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(0) },
+        }} },
+        installonly_policy,
+    );
+    defer observation.deinit();
+
+    try testing.expectEqual(@as(usize, 0), observation.outcome.problems.len);
+    try testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{@enumFromInt(0)},
+        observation.selected,
+    );
+    try testing.expectEqual(@as(usize, 1), observation.effective_jobs.len);
+
+    installonly_policy.skip_broken = true;
+    try testing.expectError(
+        error.UnsupportedPolicy,
+        oracle.solve(
+            testing.allocator,
+            &graph.universe,
+            .{ .jobs = &.{.{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(0) },
+            }} },
+            installonly_policy,
+        ),
+    );
+}
+
+test "install-only install and update retain the installed instance" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{
+        .name = "kernel",
+        .version = "1",
+    });
+    try builder.addPackage(available, .{
+        .name = "kernel",
+        .version = "2",
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var installonly_policy = policy();
+    installonly_policy.installonly_names = &.{"kernel"};
+    installonly_policy.installonly_limit = 3;
+    var installed_observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(1) },
+        }} },
+        installonly_policy,
+    );
+    defer installed_observation.deinit();
+    try testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{ @enumFromInt(0), @enumFromInt(1) },
+        installed_observation.selected,
+    );
+    try testing.expectEqual(@as(usize, 2), installed_observation.effective_jobs.len);
+    const multiversion = installed_observation.effective_jobs[1];
+    try testing.expectEqual(
+        solver_model.JobAction.multiversion,
+        multiversion.action,
+    );
+    try testing.expect(multiversion.id == null);
+    switch (multiversion.selection) {
+        .name => |name| try testing.expectEqualStrings("kernel", name),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var updated_observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .update,
+            .selection = .all,
+        }} },
+        installonly_policy,
+    );
+    defer updated_observation.deinit();
+    try testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{ @enumFromInt(0), @enumFromInt(1) },
+        updated_observation.selected,
+    );
+    var native = try coordinator.solveInstallonly(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .update,
+            .selection = .all,
+        }} },
+        installonly_policy,
+    );
+    defer native.deinit();
+    try testing.expectEqualSlices(
+        bool,
+        &.{ true, true },
+        native.weak_result.result.satisfiable.values,
+    );
+}
+
+test "install-only update without a replacement still enforces the limit" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    try builder.addPackage(installed, .{
+        .name = "kernel",
+        .version = "1",
+    });
+    try builder.addPackage(installed, .{
+        .name = "kernel",
+        .version = "2",
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var installonly_policy = policy();
+    installonly_policy.installonly_names = &.{"kernel"};
+    installonly_policy.installonly_limit = 1;
+    inline for ([_]solver_model.JobAction{ .update, .dist_sync }) |action| {
+        const goal = solver_model.Goal{ .jobs = &.{.{
+            .action = action,
+            .selection = .all,
+        }} };
+        var observation = try oracle.solve(
+            testing.allocator,
+            &graph.universe,
+            goal,
+            installonly_policy,
+        );
+        defer observation.deinit();
+        try testing.expectEqualSlices(
+            solver_model.PackageId,
+            &.{@enumFromInt(1)},
+            observation.selected,
+        );
+        const eviction = actionForPackage(
+            &observation,
+            @enumFromInt(0),
+        ) orelse return error.TestUnexpectedResult;
+        try testing.expectEqual(
+            solver_model.TransactionReason.installonly_limit,
+            eviction.reason,
+        );
+
+        var native = try coordinator.solveInstallonly(
+            testing.allocator,
+            &graph.universe,
+            goal,
+            installonly_policy,
+        );
+        defer native.deinit();
+        try testing.expectEqualSlices(
+            bool,
+            &.{ false, true },
+            native.weak_result.result.satisfiable.values,
+        );
+    }
+}
+
+test "install-only limit evicts install order across architectures" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{
+        .name = "kernel",
+        .version = "9",
+        .arch = "x86_64",
+    });
+    try builder.addPackage(installed, .{
+        .name = "kernel",
+        .version = "1",
+        .arch = "i686",
+    });
+    try builder.addPackage(available, .{
+        .name = "kernel",
+        .version = "2",
+        .arch = "noarch",
+    });
+    builder.repos.items[installed].installed_states.items[0].install_order = 10;
+    builder.repos.items[installed].installed_states.items[1].install_order = 20;
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var installonly_policy = policy();
+    installonly_policy.installonly_names = &.{ "kernel", "kernel" };
+    installonly_policy.installonly_limit = 2;
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(2) },
+        }} },
+        installonly_policy,
+    );
+    defer observation.deinit();
+
+    try testing.expectEqual(@as(usize, 0), observation.outcome.problems.len);
+    try testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{ @enumFromInt(1), @enumFromInt(2) },
+        observation.selected,
+    );
+    const eviction = actionForPackage(
+        &observation,
+        @enumFromInt(0),
+    ) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(solver_model.ActionKind.erase, eviction.kind);
+    try testing.expectEqual(
+        solver_model.TransactionReason.installonly_limit,
+        eviction.reason,
+    );
+    try testing.expect(eviction.requested_by == null);
+    var native = try coordinator.solveInstallonly(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(2) },
+        }} },
+        installonly_policy,
+    );
+    defer native.deinit();
+    try testing.expectEqualSlices(
+        bool,
+        &.{ false, true, true },
+        native.weak_result.result.satisfiable.values,
+    );
+
+    installonly_policy.installonly_limit = 1;
+    const explicit_goal = solver_model.Goal{ .jobs = &.{
+        .{
+            .action = .erase,
+            .selection = .{ .package = @enumFromInt(0) },
+        },
+        .{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(2) },
+        },
+    } };
+    var explicit = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        explicit_goal,
+        installonly_policy,
+    );
+    defer explicit.deinit();
+    try testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{@enumFromInt(2)},
+        explicit.selected,
+    );
+    const second_eviction = actionForPackage(
+        &explicit,
+        @enumFromInt(1),
+    ) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(
+        solver_model.TransactionReason.installonly_limit,
+        second_eviction.reason,
+    );
+    var explicit_native = try coordinator.solveInstallonly(
+        testing.allocator,
+        &graph.universe,
+        explicit_goal,
+        installonly_policy,
+    );
+    defer explicit_native.deinit();
+    try testing.expectEqualSlices(
+        bool,
+        &.{ false, false, true },
+        explicit_native.weak_result.result.satisfiable.values,
+    );
+}
+
+test "install-only residual overflow becomes a limit problem after one retry" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{
+        .name = "kernel",
+        .version = "1",
+    });
+    try builder.addPackage(available, .{
+        .name = "kernel",
+        .version = "2",
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var installonly_policy = policy();
+    installonly_policy.installonly_names = &.{"kernel"};
+    installonly_policy.installonly_limit = 0;
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(1) },
+        }} },
+        installonly_policy,
+    );
+    defer observation.deinit();
+
+    try testing.expectEqual(@as(usize, 1), observation.outcome.problems.len);
+    const problem = observation.outcome.problems[0];
+    try testing.expectEqual(
+        solver_model.ProblemKind.installonly_limit,
+        problem.kind,
+    );
+    try testing.expectEqual(@as(u32, 1), problem.count);
+    try testing.expectEqualStrings("kernel", problem.capability.?.name);
+    try testing.expectEqual(@as(usize, 0), observation.selected.len);
+    try testing.expectEqual(@as(usize, 3), observation.effective_jobs.len);
+    var native = try coordinator.solveInstallonly(
+        testing.allocator,
+        &graph.universe,
+        .{ .jobs = &.{.{
+            .action = .install,
+            .selection = .{ .package = @enumFromInt(1) },
+        }} },
+        installonly_policy,
+    );
+    defer native.deinit();
+    const overflow = switch (native.problem orelse
+        return error.TestUnexpectedResult) {
+        .installonly_limit => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expectEqual(problem.count, overflow.excess);
+}
+
+test "protected package takes precedence over install-only eviction" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(installed, .{
+        .name = "kernel",
+        .version = "1",
+    });
+    try builder.addPackage(available, .{
+        .name = "kernel",
+        .version = "2",
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    var combined_policy = policy();
+    combined_policy.installonly_names = &.{"kernel"};
+    combined_policy.installonly_limit = 1;
+    combined_policy.protected_names = &.{"kernel"};
+    const goal = solver_model.Goal{ .jobs = &.{.{
+        .action = .install,
+        .selection = .{ .package = @enumFromInt(1) },
+    }} };
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        combined_policy,
+    );
+    defer observation.deinit();
+    try testing.expectEqual(@as(usize, 1), observation.outcome.problems.len);
+    try testing.expectEqual(
+        solver_model.ProblemKind.protected_package,
+        observation.outcome.problems[0].kind,
+    );
+
+    var native = try coordinator.solveInstallonly(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        combined_policy,
+    );
+    defer native.deinit();
+    const package_id = switch (native.problem orelse
+        return error.TestUnexpectedResult) {
+        .protected_package => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expectEqual(
+        @as(solver_model.PackageId, @enumFromInt(0)),
+        package_id,
     );
 }
 
