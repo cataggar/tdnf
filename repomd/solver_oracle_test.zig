@@ -2,6 +2,7 @@ const std = @import("std");
 const metadata = @import("model.zig");
 const coordinator = @import("solver_coordinator.zig");
 const solver_model = @import("solver_model.zig");
+const solver_native = @import("solver_native.zig");
 const oracle = @import("solver_oracle.zig");
 const solver_policy = @import("solver_policy.zig");
 const solver_result = @import("solver_result.zig");
@@ -170,57 +171,13 @@ fn solveNative(
     goal: solver_model.Goal,
     solve_policy: solver_model.SolvePolicy,
 ) !solver_result.OwnedResult {
-    var base = try solver_rules.generateBase(
+    var solved = try solver_native.solve(
         allocator,
         universe,
         goal,
-        solve_policy.architecture,
+        solve_policy,
     );
-    defer base.deinit();
-    var prepared = try solver_policy.prepareWithOptions(
-        allocator,
-        &base,
-        .{
-            .best = solve_policy.best,
-            .allow_erasing = solve_policy.allow_erasing,
-            .clean_deps = solve_policy.clean_deps,
-            .protected_names = solve_policy.protected_names,
-        },
-    );
-    defer prepared.deinit();
-
-    if (solve_policy.skip_broken) {
-        var skipped = try prepared.solveSkipBroken(allocator);
-        defer skipped.deinit();
-        return switch (skipped.result) {
-            .satisfiable => |model| try solver_result.materialize(
-                allocator,
-                .{
-                    .prepared = &prepared,
-                    .model = model,
-                    .skipped_jobs = skipped.skipped_jobs,
-                },
-            ),
-            .unsatisfiable => error.TestUnexpectedResult,
-        };
-    }
-
-    var weak = try prepared.solveWeak(
-        allocator,
-        .{ .enabled = solve_policy.install_weak_deps },
-    );
-    defer weak.deinit();
-    return switch (weak.result) {
-        .satisfiable => |model| try solver_result.materialize(
-            allocator,
-            .{
-                .prepared = &prepared,
-                .model = model,
-                .accepted_weak = weak.accepted,
-            },
-        ),
-        .unsatisfiable => error.TestUnexpectedResult,
-    };
+    return solved.takeResult();
 }
 
 fn deriveNativeProblems(

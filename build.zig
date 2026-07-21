@@ -1256,6 +1256,23 @@ pub fn build(b: *Build) void {
 
     {
         const test_mod = b.createModule(.{
+            .root_source_file = b.path("repomd/solver_native.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        const tests = b.addTest(.{ .root_module = test_mod });
+        const run_tests = b.addRunArtifact(tests);
+        const native_solve_test_step = b.step(
+            "native-solve-test",
+            "Run reusable native solver entry point tests",
+        );
+        native_solve_test_step.dependOn(&run_tests.step);
+        zig_test_step.dependOn(&run_tests.step);
+    }
+
+    {
+        const test_mod = b.createModule(.{
             .root_source_file = b.path("repomd/root.zig"),
             .target = target,
             .optimize = optimize,
