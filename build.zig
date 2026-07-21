@@ -292,6 +292,12 @@ pub fn build(b: *Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    const solver_result_abi_mod = b.createModule(.{
+        .root_source_file = b.path("repomd/solver_result_abi.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    repomd_abi_mod.addImport("solver_result_abi", solver_result_abi_mod);
     repomd_abi_mod.addIncludePath(b.path("include"));
     {
         const tests = b.addTest(.{ .root_module = repomd_abi_mod });

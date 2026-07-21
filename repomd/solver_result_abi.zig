@@ -1,0 +1,75 @@
+pub const Package = extern struct {
+    pszRepository: ?[*:0]const u8,
+    pszName: ?[*:0]const u8,
+    pszVersion: ?[*:0]const u8,
+    pszRelease: ?[*:0]const u8,
+    pszArch: ?[*:0]const u8,
+    pszChecksumType: ?[*:0]const u8,
+    pszChecksumValue: ?[*:0]const u8,
+    pszLocationHref: ?[*:0]const u8,
+    pszLocationBase: ?[*:0]const u8,
+    pszSummary: ?[*:0]const u8,
+    nPackageSize: u64,
+    nInstalledSize: u64,
+    dwPackageId: u32,
+    dwRepositoryId: u32,
+    dwEpoch: u32,
+    dwRpmDbHnum: u32,
+    nRepositoryKind: c_int,
+    nHasEpoch: c_int,
+    nHasRpmDbHnum: c_int,
+    nChecksumIsPkgId: c_int,
+    nHasPackageSize: c_int,
+    nHasInstalledSize: c_int,
+};
+
+pub const Action = extern struct {
+    dwPackageRef: u32,
+    dwKind: u32,
+    dwReason: u32,
+    dwPriorOffset: u32,
+    dwPriorCount: u32,
+    dwRequestedJobId: u32,
+    nHasRequestedJobId: c_int,
+};
+
+pub const Relation = extern struct {
+    pszName: ?[*:0]const u8,
+    pszVersion: ?[*:0]const u8,
+    pszRelease: ?[*:0]const u8,
+    pszFlags: ?[*:0]const u8,
+    dwComparison: u32,
+    dwEpoch: u32,
+    dwSense: u32,
+    nHasEpoch: c_int,
+    nPre: c_int,
+};
+
+pub const Problem = extern struct {
+    capability: Relation,
+    dwKind: u32,
+    dwPackageRef: u32,
+    dwRelatedPackageRef: u32,
+    dwJobId: u32,
+    dwCount: u32,
+    nHasPackageRef: c_int,
+    nHasRelatedPackageRef: c_int,
+    nHasCapability: c_int,
+    nHasJobId: c_int,
+};
+
+pub const Result = extern struct {
+    pPackages: [*c]Package,
+    pdwSelectedPackageRefs: [*c]u32,
+    pActions: [*c]Action,
+    pdwPriorPackageRefs: [*c]u32,
+    pdwPriorHnums: [*c]u32,
+    pProblems: [*c]Problem,
+    pdwSkippedJobIds: [*c]u32,
+    dwPackageCount: u32,
+    dwSelectedPackageCount: u32,
+    dwActionCount: u32,
+    dwPriorPackageRefCount: u32,
+    dwProblemCount: u32,
+    dwSkippedJobCount: u32,
+};

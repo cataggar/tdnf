@@ -143,6 +143,151 @@ typedef struct _TDNF_REPOMD_NATIVE_TRANSACTION_PLAN
     TDNF_REPOMD_NATIVE_TRANSACTION_PROBLEM *pProblems;
 } TDNF_REPOMD_NATIVE_TRANSACTION_PLAN;
 
+typedef enum _TDNF_REPOMD_NATIVE_SOLVER_ACTION_KIND
+{
+    TDNF_REPOMD_NATIVE_SOLVER_ACTION_INSTALL = 1,
+    TDNF_REPOMD_NATIVE_SOLVER_ACTION_ERASE = 2,
+    TDNF_REPOMD_NATIVE_SOLVER_ACTION_UPGRADE = 3,
+    TDNF_REPOMD_NATIVE_SOLVER_ACTION_DOWNGRADE = 4,
+    TDNF_REPOMD_NATIVE_SOLVER_ACTION_REINSTALL = 5,
+    TDNF_REPOMD_NATIVE_SOLVER_ACTION_OBSOLETE = 6
+} TDNF_REPOMD_NATIVE_SOLVER_ACTION_KIND;
+
+typedef enum _TDNF_REPOMD_NATIVE_SOLVER_ACTION_REASON
+{
+    TDNF_REPOMD_NATIVE_SOLVER_REASON_USER = 1,
+    TDNF_REPOMD_NATIVE_SOLVER_REASON_DEPENDENCY = 2,
+    TDNF_REPOMD_NATIVE_SOLVER_REASON_WEAK_DEPENDENCY = 3,
+    TDNF_REPOMD_NATIVE_SOLVER_REASON_CLEANUP = 4,
+    TDNF_REPOMD_NATIVE_SOLVER_REASON_OBSOLETES = 5,
+    TDNF_REPOMD_NATIVE_SOLVER_REASON_INSTALL_ONLY = 6,
+    TDNF_REPOMD_NATIVE_SOLVER_REASON_POLICY = 7
+} TDNF_REPOMD_NATIVE_SOLVER_ACTION_REASON;
+
+typedef enum _TDNF_REPOMD_NATIVE_SOLVER_PROBLEM_KIND
+{
+    TDNF_REPOMD_NATIVE_SOLVER_PROBLEM_UNSATISFIED_REQUIREMENT = 1,
+    TDNF_REPOMD_NATIVE_SOLVER_PROBLEM_CONFLICT = 2,
+    TDNF_REPOMD_NATIVE_SOLVER_PROBLEM_OBSOLETES = 3,
+    TDNF_REPOMD_NATIVE_SOLVER_PROBLEM_NO_CANDIDATE = 4,
+    TDNF_REPOMD_NATIVE_SOLVER_PROBLEM_NOT_INSTALLABLE = 5,
+    TDNF_REPOMD_NATIVE_SOLVER_PROBLEM_PROTECTED_PACKAGE = 6,
+    TDNF_REPOMD_NATIVE_SOLVER_PROBLEM_INSTALL_ONLY_LIMIT = 7
+} TDNF_REPOMD_NATIVE_SOLVER_PROBLEM_KIND;
+
+typedef enum _TDNF_REPOMD_NATIVE_SOLVER_REPOSITORY_KIND
+{
+    TDNF_REPOMD_NATIVE_SOLVER_REPOSITORY_INSTALLED = 1,
+    TDNF_REPOMD_NATIVE_SOLVER_REPOSITORY_AVAILABLE = 2,
+    TDNF_REPOMD_NATIVE_SOLVER_REPOSITORY_COMMAND_LINE = 3
+} TDNF_REPOMD_NATIVE_SOLVER_REPOSITORY_KIND;
+
+typedef enum _TDNF_REPOMD_NATIVE_SOLVER_COMPARISON
+{
+    TDNF_REPOMD_NATIVE_SOLVER_COMPARISON_NONE = 0,
+    TDNF_REPOMD_NATIVE_SOLVER_COMPARISON_EQUAL = 1,
+    TDNF_REPOMD_NATIVE_SOLVER_COMPARISON_LESS = 2,
+    TDNF_REPOMD_NATIVE_SOLVER_COMPARISON_LESS_OR_EQUAL = 3,
+    TDNF_REPOMD_NATIVE_SOLVER_COMPARISON_GREATER = 4,
+    TDNF_REPOMD_NATIVE_SOLVER_COMPARISON_GREATER_OR_EQUAL = 5
+} TDNF_REPOMD_NATIVE_SOLVER_COMPARISON;
+
+/*
+ * One package referenced by a native solver result. Package references in
+ * the other result arrays are zero-based indexes into pPackages. Optional
+ * scalar values are accompanied by explicit nHas* fields.
+ */
+typedef struct _TDNF_REPOMD_NATIVE_SOLVER_PACKAGE
+{
+    const char *pszRepository;
+    const char *pszName;
+    const char *pszVersion;
+    const char *pszRelease;
+    const char *pszArch;
+    const char *pszChecksumType;
+    const char *pszChecksumValue;
+    const char *pszLocationHref;
+    const char *pszLocationBase;
+    const char *pszSummary;
+    uint64_t nPackageSize;
+    uint64_t nInstalledSize;
+    uint32_t dwPackageId;
+    uint32_t dwRepositoryId;
+    uint32_t dwEpoch;
+    uint32_t dwRpmDbHnum;
+    int nRepositoryKind;
+    int nHasEpoch;
+    int nHasRpmDbHnum;
+    int nChecksumIsPkgId;
+    int nHasPackageSize;
+    int nHasInstalledSize;
+} TDNF_REPOMD_NATIVE_SOLVER_PACKAGE;
+
+/*
+ * Canonical package decision. Prior package references occupy
+ * [dwPriorOffset, dwPriorOffset + dwPriorCount) in both
+ * pdwPriorPackageRefs and pdwPriorHnums.
+ */
+typedef struct _TDNF_REPOMD_NATIVE_SOLVER_ACTION
+{
+    uint32_t dwPackageRef;
+    uint32_t dwKind;
+    uint32_t dwReason;
+    uint32_t dwPriorOffset;
+    uint32_t dwPriorCount;
+    uint32_t dwRequestedJobId;
+    int nHasRequestedJobId;
+} TDNF_REPOMD_NATIVE_SOLVER_ACTION;
+
+typedef struct _TDNF_REPOMD_NATIVE_SOLVER_RELATION
+{
+    const char *pszName;
+    const char *pszVersion;
+    const char *pszRelease;
+    const char *pszFlags;
+    uint32_t dwComparison;
+    uint32_t dwEpoch;
+    uint32_t dwSense;
+    int nHasEpoch;
+    int nPre;
+} TDNF_REPOMD_NATIVE_SOLVER_RELATION;
+
+typedef struct _TDNF_REPOMD_NATIVE_SOLVER_PROBLEM
+{
+    TDNF_REPOMD_NATIVE_SOLVER_RELATION capability;
+    uint32_t dwKind;
+    uint32_t dwPackageRef;
+    uint32_t dwRelatedPackageRef;
+    uint32_t dwJobId;
+    uint32_t dwCount;
+    int nHasPackageRef;
+    int nHasRelatedPackageRef;
+    int nHasCapability;
+    int nHasJobId;
+} TDNF_REPOMD_NATIVE_SOLVER_PROBLEM;
+
+/*
+ * Owned canonical native solver output. Every pointer, including all strings,
+ * remains valid until TDNFRepoMdNativeSolverResultFree(). Array order matches
+ * the native materializer; the package table is ordered by native package id.
+ */
+typedef struct _TDNF_REPOMD_NATIVE_SOLVER_RESULT
+{
+    TDNF_REPOMD_NATIVE_SOLVER_PACKAGE *pPackages;
+    uint32_t *pdwSelectedPackageRefs;
+    TDNF_REPOMD_NATIVE_SOLVER_ACTION *pActions;
+    uint32_t *pdwPriorPackageRefs;
+    uint32_t *pdwPriorHnums;
+    TDNF_REPOMD_NATIVE_SOLVER_PROBLEM *pProblems;
+    uint32_t *pdwSkippedJobIds;
+    uint32_t dwPackageCount;
+    uint32_t dwSelectedPackageCount;
+    uint32_t dwActionCount;
+    uint32_t dwPriorPackageRefCount;
+    uint32_t dwProblemCount;
+    uint32_t dwSkippedJobCount;
+} TDNF_REPOMD_NATIVE_SOLVER_RESULT;
+
 #ifndef RPMDB_REPORT_PROGRESS
 #define RPMDB_REPORT_PROGRESS           (1 << 8)
 #define RPM_ADD_WITH_PKGID             (1 << 9)
@@ -405,6 +550,14 @@ TDNFRepoMdNativeTransactionPlanSolveV2(
 void
 TDNFRepoMdNativeTransactionPlanFree(
     TDNF_REPOMD_NATIVE_TRANSACTION_PLAN *pPlan
+    );
+
+/*
+ * Free a native solver result and all storage reachable from it. Accepts NULL.
+ */
+void
+TDNFRepoMdNativeSolverResultFree(
+    TDNF_REPOMD_NATIVE_SOLVER_RESULT *pResult
     );
 
 /*
