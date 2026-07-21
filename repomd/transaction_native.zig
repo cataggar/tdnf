@@ -10,6 +10,7 @@ const c = @cImport({
 });
 
 const model = @import("model.zig");
+const installed_repository = @import("installed_repository.zig");
 const pkgquery = @import("pkgquery.zig");
 const query_index = @import("index.zig");
 const rpmpkg = @import("rpmpkg.zig");
@@ -180,10 +181,7 @@ const ParsedTransaction = struct {
     }
 };
 
-const InstalledRepository = struct {
-    repository: model.RepositoryModel,
-    hnums: []const u32,
-};
+const InstalledRepository = installed_repository.Repository;
 
 const FinalBuildResult = struct {
     repository: model.RepositoryModel,
@@ -725,7 +723,19 @@ fn solveTransaction(
     config: ?*const c.tdnf_rpm_config,
 ) TransactionError!SolveResult {
     const items = try normalizeTransactionItems(arena, raw_items);
-    const installed = try loadInstalledRepositoryModel(arena, root_dir, config);
+    const source: installed_repository.Source = if (config) |rpm_config|
+        .{ .config = rpm_config }
+    else
+        .{ .root_dir = root_dir };
+    const installed = try installed_repository.loadModel(
+        arena,
+        source,
+        .{
+            .include_relations = true,
+            .include_files = true,
+            .include_changelogs = false,
+        },
+    );
     var tx = try parseTransaction(arena, items, installed);
     const final_build = try buildFinalRepository(arena, installed.repository, &tx);
 
@@ -972,69 +982,6 @@ fn mapTransactionError(err: anyerror) u32 {
     };
 }
 
-fn loadInstalledRepositoryModel(
-    arena: std.mem.Allocator,
-    root_dir: ?[*:0]const u8,
-    config: ?*const c.tdnf_rpm_config,
-) TransactionError!InstalledRepository {
-    var builder = RepositoryBuilder.init(arena);
-    var hnums = std.array_list.Managed(u32).init(arena);
-    const iter = if (config) |rpm_config|
-        c.tdnf_rpmdb_iter_open_config(rpm_config)
-    else
-        c.tdnf_rpmdb_iter_open(root_dir) orelse return error.RpmDbOpenFailed;
-    defer c.tdnf_rpmdb_iter_close(iter);
-
-    while (true) {
-        var blob_ptr: ?[*]const u8 = null;
-        var blob_len: usize = 0;
-        var hnum: u32 = 0;
-        const rc = c.tdnf_rpmdb_iter_next_header_blob_hnum(
-            iter,
-            &hnum,
-            &blob_ptr,
-            &blob_len,
-        );
-        if (rc == 0) {
-            break;
-        }
-        if (rc < 0) {
-            return error.RpmDbReadFailed;
-        }
-        const ptr = blob_ptr orelse continue;
-        if (blob_len == 0) {
-            continue;
-        }
-
-        const header = rpm_header.Header.parse(ptr[0..blob_len]) catch return error.InvalidRpmHeader;
-        if (header.getString(.name)) |name| {
-            if (std.mem.eql(u8, name, "gpg-pubkey")) {
-                continue;
-            }
-        }
-
-        const built = rpmpkg.buildFromHeader(arena, header, .{
-            .include_relations = true,
-            .include_files = true,
-            .include_changelogs = false,
-        }) catch |err| return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            else => error.InvalidRpmHeader,
-        };
-        _ = try builder.appendPackageView(.{
-            .pkg = built.package,
-            .relations = built.relations,
-            .files = built.files,
-        });
-        try hnums.append(hnum);
-    }
-
-    return .{
-        .repository = try builder.finish(),
-        .hnums = try hnums.toOwnedSlice(),
-    };
-}
-
 fn normalizeTransactionItems(
     allocator: std.mem.Allocator,
     raw_items: RawTransactionItems,
@@ -1118,7 +1065,7 @@ fn parseTransaction(
     installed: InstalledRepository,
 ) TransactionError!ParsedTransaction {
     const installed_repo = installed.repository;
-    if (installed.hnums.len != installed_repo.packages.len) {
+    if (installed.installed_states.len != installed_repo.packages.len) {
         setError("installed rpmdb hnum/package count mismatch", .{});
         return error.InvalidParameter;
     }
@@ -1251,12 +1198,14 @@ fn parseTransaction(
             if (tx.replace_mask[installed_index]) {
                 setError(
                     "installed hnum {d} is selected by multiple replacement items",
-                    .{installed.hnums[installed_index]},
+                    .{installed.installed_states[installed_index].rpmdb_hnum},
                 );
                 return error.InvalidParameter;
             }
             tx.replace_mask[installed_index] = true;
-            try tx.priors[added.input_index].append(installed.hnums[installed_index]);
+            try tx.priors[added.input_index].append(
+                installed.installed_states[installed_index].rpmdb_hnum,
+            );
         }
     }
 
@@ -2200,7 +2149,9 @@ fn findInstalledEraseMatch(
         if (selected[index]) {
             continue;
         }
-        if (wanted_hnum != 0 and installed.hnums[index] != wanted_hnum) {
+        if (wanted_hnum != 0 and
+            installed.installed_states[index].rpmdb_hnum != wanted_hnum)
+        {
             continue;
         }
         if (!std.mem.eql(u8, pkg.nevra.name, query.name)) {
@@ -2303,7 +2254,7 @@ test "verified transaction input never reopens diagnostic path" {
     const tx = try parseTransaction(
         arena_state.allocator(),
         inputs,
-        .{ .repository = .{}, .hnums = &.{} },
+        .{ .repository = .{}, .installed_states = &.{} },
     );
     try std.testing.expectEqual(@as(usize, 1), tx.added.items.len);
     try std.testing.expectEqualStrings(
@@ -2355,13 +2306,17 @@ test "duplicate NEVRA erases map and validate by exact rpmdb hnum" {
         provider,
         consumer,
     };
-    const installed_hnums = [_]u32{ 41, 73, 89 };
+    const installed_states = [_]installed_repository.InstalledState{
+        .{ .rpmdb_hnum = 41 },
+        .{ .rpmdb_hnum = 73 },
+        .{ .rpmdb_hnum = 89 },
+    };
     const installed = InstalledRepository{
         .repository = .{
             .packages = @constCast(&installed_packages),
             .relations = @constCast(&relations),
         },
-        .hnums = &installed_hnums,
+        .installed_states = &installed_states,
     };
 
     const second_only = [_]TransactionInput{.{

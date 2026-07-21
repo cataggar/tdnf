@@ -14,11 +14,10 @@ const c = @cImport({
 });
 
 const available_loader = @import("available_loader.zig");
+const installed_repository = @import("installed_repository.zig");
 const model = @import("model.zig");
 const pkgquery = @import("pkgquery.zig");
 const query_index = @import("index.zig");
-const rpmpkg = @import("rpmpkg.zig");
-const rpm_header = @import("rpm_header");
 const repomd_xml = @import("repomd.zig");
 
 extern fn TDNFUtilsFormatSize(unSize: u64, ppszFormattedSize: ?*?[*:0]u8) u32;
@@ -115,64 +114,6 @@ const AdvisoryRef = struct {
 const SearchRef = union(enum) {
     package: PackageRef,
     advisory: AdvisoryRef,
-};
-
-const RepositoryBuilder = struct {
-    allocator: std.mem.Allocator,
-    packages: std.array_list.Managed(model.Package),
-    relations: std.array_list.Managed(model.Relation),
-    files: std.array_list.Managed(model.FileEntry),
-    changelogs: std.array_list.Managed(model.ChangelogEntry),
-
-    fn init(allocator: std.mem.Allocator) RepositoryBuilder {
-        return .{
-            .allocator = allocator,
-            .packages = std.array_list.Managed(model.Package).init(allocator),
-            .relations = std.array_list.Managed(model.Relation).init(allocator),
-            .files = std.array_list.Managed(model.FileEntry).init(allocator),
-            .changelogs = std.array_list.Managed(model.ChangelogEntry).init(allocator),
-        };
-    }
-
-    fn deinit(self: *RepositoryBuilder) void {
-        self.packages.deinit();
-        self.relations.deinit();
-        self.files.deinit();
-        self.changelogs.deinit();
-    }
-
-    fn appendBuiltPackage(self: *RepositoryBuilder, built: rpmpkg.BuiltPackage) !void {
-        var pkg = built.package;
-        const relation_base = self.relations.items.len;
-        const file_base = self.files.items.len;
-        const changelog_base = self.changelogs.items.len;
-
-        try self.relations.appendSlice(built.relations);
-        try self.files.appendSlice(built.files);
-        try self.changelogs.appendSlice(built.changelogs);
-
-        pkg.provides.start += relation_base;
-        pkg.requires.start += relation_base;
-        pkg.conflicts.start += relation_base;
-        pkg.obsoletes.start += relation_base;
-        pkg.recommends.start += relation_base;
-        pkg.suggests.start += relation_base;
-        pkg.supplements.start += relation_base;
-        pkg.enhances.start += relation_base;
-        pkg.files.start += file_base;
-        pkg.changelogs.start += changelog_base;
-
-        try self.packages.append(pkg);
-    }
-
-    fn finish(self: *RepositoryBuilder) !model.RepositoryModel {
-        return .{
-            .packages = try self.packages.toOwnedSlice(),
-            .relations = try self.relations.toOwnedSlice(),
-            .files = try self.files.toOwnedSlice(),
-            .changelogs = try self.changelogs.toOwnedSlice(),
-        };
-    }
 };
 
 const LoadedDataset = struct {
@@ -1481,61 +1422,22 @@ fn loadInstalledDataset(root_dir: ?[*:0]const u8, config: ?*const c.tdnf_rpm_con
     errdefer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const repository = try loadInstalledRepositoryModel(arena, root_dir, config, options);
+    const source: installed_repository.Source = if (config) |rpm_config|
+        .{ .config = rpm_config }
+    else
+        .{ .root_dir = root_dir };
+    const loaded = try installed_repository.loadModel(arena, source, .{
+        .include_relations = options.need_relations,
+        .include_files = options.need_files,
+        .include_changelogs = options.need_changelogs,
+    });
 
     return .{
         .kind = .installed,
         .repo_id = system_repo_name,
         .arena_state = arena_state,
-        .repository = repository,
+        .repository = loaded.repository,
     };
-}
-
-fn loadInstalledRepositoryModel(arena: std.mem.Allocator, root_dir: ?[*:0]const u8, config: ?*const c.tdnf_rpm_config, options: InstalledLoadOptions) !model.RepositoryModel {
-    var builder = RepositoryBuilder.init(arena);
-    errdefer builder.deinit();
-
-    const iter = if (config) |rpm_config|
-        c.tdnf_rpmdb_iter_open_config(rpm_config)
-    else
-        c.tdnf_rpmdb_iter_open(root_dir) orelse return error.RpmDbOpenFailed;
-    defer c.tdnf_rpmdb_iter_close(iter);
-
-    while (true) {
-        var blob_ptr: ?[*]const u8 = null;
-        var blob_len: usize = 0;
-        const rc = c.tdnf_rpmdb_iter_next_header_blob(iter, &blob_ptr, &blob_len);
-        if (rc == 0) {
-            break;
-        }
-        if (rc < 0) {
-            return error.RpmDbReadFailed;
-        }
-        const ptr = blob_ptr orelse continue;
-        if (blob_len == 0) {
-            continue;
-        }
-
-        const blob = ptr[0..blob_len];
-        const header = rpm_header.Header.parse(blob) catch return error.InvalidRpmHeader;
-        if (header.getString(.name)) |name| {
-            if (std.mem.eql(u8, name, "gpg-pubkey")) {
-                continue;
-            }
-        }
-
-        const built = rpmpkg.buildFromHeader(arena, header, .{
-            .include_relations = options.need_relations,
-            .include_files = options.need_files,
-            .include_changelogs = options.need_changelogs,
-        }) catch |err| return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            else => error.InvalidRpmHeader,
-        };
-        try builder.appendBuiltPackage(built);
-    }
-
-    return try builder.finish();
 }
 
 fn readSmallFile(allocator: std.mem.Allocator, path: []const u8, max_len: usize) ![]u8 {
