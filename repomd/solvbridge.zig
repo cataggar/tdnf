@@ -16,42 +16,16 @@ const c = @cImport({
 
 pub const libsolv = c;
 
+const available_loader = @import("available_loader.zig");
 const model = @import("model.zig");
 const rpmpkg = @import("rpmpkg.zig");
-const repomd_xml = @import("repomd.zig");
-const primary_xml = @import("primary.zig");
-const filelists_xml = @import("filelists.zig");
-const other_xml = @import("other.zig");
-const updateinfo_xml = @import("updateinfo.zig");
 const rpm_header = @import("rpm_header");
 const rpm_pkgfile = @import("rpm_pkgfile");
-
-const max_metadata_bytes = 256 * 1024 * 1024;
 
 threadlocal var last_native_error_buf: [512]u8 = undefined;
 threadlocal var last_native_error_len: usize = 0;
 
-const DecompressError = error{
-    OutOfMemory,
-    UnsupportedCompressor,
-    DecompressFailed,
-};
-
-pub const LoadError = error{
-    InvalidRepoMetadata,
-    OutOfMemory,
-    FileNotFound,
-    AccessDenied,
-    NameTooLong,
-    BadPathName,
-    NotDir,
-    IsDir,
-    FileTooBig,
-    StreamTooLong,
-    FileSystemIo,
-    UnsupportedCompressor,
-    DecompressFailed,
-};
+pub const LoadError = available_loader.LoadError;
 
 pub const BuildError = error{
     InvalidRepoMetadata,
@@ -398,113 +372,19 @@ pub fn loadRepositoryModel(
     updateinfo_path: ?[]const u8,
     other_path: ?[]const u8,
 ) LoadError!model.RepositoryModel {
-    const repomd_bytes = try readMetadataFile(allocator, repomd_path);
-    const parsed_repomd = repomd_xml.parse(allocator, repomd_bytes) catch |err| return switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.InvalidRepoMetadata,
+    return available_loader.loadModel(allocator, .{
+        .repomd = repomd_path,
+        .primary = primary_path,
+        .filelists = filelists_path,
+        .updateinfo = updateinfo_path,
+        .other = other_path,
+    }) catch |err| {
+        setError(
+            "failed to load repository metadata under {s}: {t}",
+            .{ repomd_path, err },
+        );
+        return err;
     };
-
-    const primary_bytes = try readMetadataFile(allocator, primary_path);
-    var parsed_primary = primary_xml.parse(allocator, primary_bytes) catch |err| return switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.InvalidRepoMetadata,
-    };
-
-    if (filelists_path) |path| {
-        const filelists_bytes = try readMetadataFile(allocator, path);
-        filelists_xml.parseAndApply(allocator, filelists_bytes, &parsed_primary) catch |err| return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            else => error.InvalidRepoMetadata,
-        };
-    }
-
-    if (other_path) |path| {
-        const other_bytes = try readMetadataFile(allocator, path);
-        other_xml.parseAndApply(allocator, other_bytes, &parsed_primary) catch |err| return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            else => error.InvalidRepoMetadata,
-        };
-    }
-
-    const parsed_updateinfo = if (updateinfo_path) |path| blk: {
-        const updateinfo_bytes = try readMetadataFile(allocator, path);
-        break :blk updateinfo_xml.parse(allocator, updateinfo_bytes) catch |err| return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            else => error.InvalidRepoMetadata,
-        };
-    } else model.ParsedUpdateInfo{};
-
-    return model.repositoryModelFromParts(parsed_repomd, parsed_primary, parsed_updateinfo);
-}
-
-fn readMetadataFile(allocator: std.mem.Allocator, path: []const u8) LoadError![]u8 {
-    const raw = readFileAlloc(allocator, path) catch |err| {
-        setError("failed to read metadata file {s}: {t}", .{ path, err });
-        return mapReadError(err);
-    };
-    return decompressMetadata(allocator, path, raw) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.UnsupportedCompressor => blk: {
-            setError("unsupported metadata compression for {s}", .{path});
-            break :blk error.UnsupportedCompressor;
-        },
-        error.DecompressFailed => blk: {
-            setError("failed to decompress metadata file {s}", .{path});
-            break :blk error.DecompressFailed;
-        },
-    };
-}
-
-fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    var io_state: std.Io.Threaded = .init(allocator, .{});
-    defer io_state.deinit();
-    return std.Io.Dir.cwd().readFileAlloc(
-        io_state.io(),
-        path,
-        allocator,
-        .limited(max_metadata_bytes),
-    );
-}
-
-fn mapReadError(err: anyerror) LoadError {
-    return switch (err) {
-        error.FileNotFound => error.FileNotFound,
-        error.AccessDenied => error.AccessDenied,
-        error.NameTooLong => error.NameTooLong,
-        error.BadPathName => error.BadPathName,
-        error.NotDir => error.NotDir,
-        error.IsDir => error.IsDir,
-        error.OutOfMemory => error.OutOfMemory,
-        error.FileTooBig => error.FileTooBig,
-        error.StreamTooLong => error.StreamTooLong,
-        else => error.FileSystemIo,
-    };
-}
-
-fn decompressMetadata(
-    allocator: std.mem.Allocator,
-    path: []const u8,
-    bytes: []const u8,
-) DecompressError![]u8 {
-    var input = std.Io.Reader.fixed(bytes);
-
-    if (std.mem.endsWith(u8, path, ".gz")) {
-        var decoder: std.compress.flate.Decompress = .init(&input, .gzip, &.{});
-        return decoder.reader.allocRemaining(allocator, .unlimited) catch error.DecompressFailed;
-    }
-    if (std.mem.endsWith(u8, path, ".zst") or std.mem.endsWith(u8, path, ".zstd")) {
-        var decoder: std.compress.zstd.Decompress = .init(&input, &.{}, .{});
-        return decoder.reader.allocRemaining(allocator, .unlimited) catch error.DecompressFailed;
-    }
-    if (std.mem.endsWith(u8, path, ".xz")) {
-        const start_buf = allocator.alloc(u8, 0) catch return error.OutOfMemory;
-        var decoder = std.compress.xz.Decompress.init(&input, allocator, start_buf) catch return error.DecompressFailed;
-        return decoder.reader.allocRemaining(allocator, .unlimited) catch error.DecompressFailed;
-    }
-
-    const out = allocator.alloc(u8, bytes.len) catch return error.OutOfMemory;
-    @memcpy(out, bytes);
-    return out;
 }
 
 const BuildRepoOptions = struct {
