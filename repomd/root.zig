@@ -24,6 +24,7 @@ pub const solver_model = @import("solver_model.zig");
 pub const solver_coordinator = @import("solver_coordinator.zig");
 pub const solver_policy = @import("solver_policy.zig");
 pub const solver_result = @import("solver_result.zig");
+pub const solver_result_c = @import("solver_result_c.zig");
 pub const solver_rules = @import("solver_rules.zig");
 pub const solver_search = @import("solver_search.zig");
 
@@ -65,6 +66,12 @@ pub export fn TDNFRepoMdLastError() [*:0]const u8 {
     }
     last_error_buf[last_error_len] = 0;
     return @ptrCast(&last_error_buf);
+}
+
+pub export fn TDNFRepoMdNativeSolverResultFree(
+    result: ?*c.TDNF_REPOMD_NATIVE_SOLVER_RESULT,
+) void {
+    solver_result_c.freeOwnedResult(@ptrCast(result));
 }
 
 pub export fn TDNFRepoMdParseBuffer(
@@ -243,6 +250,7 @@ comptime {
     _ = @import("solver_coordinator.zig");
     _ = @import("solver_policy.zig");
     _ = @import("solver_result.zig");
+    _ = @import("solver_result_c.zig");
     _ = @import("solver_rules.zig");
     _ = @import("solver_search.zig");
     _ = @import("transaction_native.zig");
