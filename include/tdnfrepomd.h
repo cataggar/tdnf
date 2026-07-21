@@ -13,6 +13,8 @@ extern "C" {
 
 typedef struct s_Repo Repo;
 typedef struct _TDNF_PKG_INFO TDNF_PKG_INFO, *PTDNF_PKG_INFO;
+typedef struct _TDNF_SOLVED_PKG_INFO
+    TDNF_SOLVED_PKG_INFO, *PTDNF_SOLVED_PKG_INFO;
 typedef struct _TDNF_REPOQUERY_ARGS TDNF_REPOQUERY_ARGS, *PTDNF_REPOQUERY_ARGS;
 
 typedef struct tdnf_repomd_doc TDNF_REPOMD_DOC;
@@ -288,6 +290,35 @@ typedef struct _TDNF_REPOMD_NATIVE_SOLVER_RESULT
     uint32_t dwSkippedJobCount;
 } TDNF_REPOMD_NATIVE_SOLVER_RESULT;
 
+typedef enum _TDNF_REPOMD_NATIVE_SOLVER_COMPARE_STATUS
+{
+    TDNF_REPOMD_NATIVE_SOLVER_COMPARE_PROJECTED_MATCH = 1,
+    TDNF_REPOMD_NATIVE_SOLVER_COMPARE_MISMATCH = 2,
+    TDNF_REPOMD_NATIVE_SOLVER_COMPARE_UNSUPPORTED = 3,
+    TDNF_REPOMD_NATIVE_SOLVER_COMPARE_INVALID = 4
+} TDNF_REPOMD_NATIVE_SOLVER_COMPARE_STATUS;
+
+typedef enum _TDNF_REPOMD_NATIVE_SOLVER_COMPARE_REASON
+{
+    TDNF_REPOMD_NATIVE_SOLVER_COMPARE_REASON_NONE = 0,
+    TDNF_REPOMD_NATIVE_SOLVER_COMPARE_REASON_NATIVE_PROBLEMS = 1,
+    TDNF_REPOMD_NATIVE_SOLVER_COMPARE_REASON_SKIPPED_JOBS = 2,
+    TDNF_REPOMD_NATIVE_SOLVER_COMPARE_REASON_PRIOR_ACTION = 3,
+    TDNF_REPOMD_NATIVE_SOLVER_COMPARE_REASON_NATIVE_ACTION_KIND = 4,
+    TDNF_REPOMD_NATIVE_SOLVER_COMPARE_REASON_LEGACY_ACTION_BUCKET = 5,
+    TDNF_REPOMD_NATIVE_SOLVER_COMPARE_REASON_DUPLICATE_KEY = 6
+} TDNF_REPOMD_NATIVE_SOLVER_COMPARE_REASON;
+
+typedef struct _TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT
+{
+    uint32_t dwStatus;
+    uint32_t dwReason;
+    uint32_t dwActionKind;
+    uint32_t dwDifferenceIndex;
+    uint32_t dwNativeCount;
+    uint32_t dwLegacyCount;
+} TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT;
+
 #ifndef RPMDB_REPORT_PROGRESS
 #define RPMDB_REPORT_PROGRESS           (1 << 8)
 #define RPM_ADD_WITH_PKGID             (1 << 9)
@@ -558,6 +589,24 @@ TDNFRepoMdNativeTransactionPlanFree(
 void
 TDNFRepoMdNativeSolverResultFree(
     TDNF_REPOMD_NATIVE_SOLVER_RESULT *pResult
+    );
+
+/*
+ * Compare the exact install/erase target projection of a native result with
+ * the authoritative legacy solved-package buckets. This deliberately ignores
+ * selected packages, action reasons/request provenance, unresolved/user-
+ * install names, and UI flags. Priors, other action kinds, native problems,
+ * skipped jobs, legacy upgrade/downgrade/reinstall/obsolete/unneeded buckets,
+ * and duplicate projected identities produce UNSUPPORTED rather than MATCH.
+ *
+ * A successful call returns zero and always sets pComparison. Mismatch and
+ * unsupported statuses are comparison outcomes, not API errors.
+ */
+uint32_t
+TDNFRepoMdNativeSolverResultCompare(
+    const TDNF_REPOMD_NATIVE_SOLVER_RESULT *pNative,
+    const TDNF_SOLVED_PKG_INFO *pLegacy,
+    TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT *pComparison
     );
 
 /*
