@@ -1,12 +1,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const metadata = @import("model.zig");
+const result_abi = @import("solver_result_abi.zig");
 const solver_model = @import("solver_model.zig");
 
-const c = @cImport({
-    @cInclude("stdlib.h");
-    @cInclude("tdnfrepomd.h");
-});
+extern "c" fn calloc(count: usize, size: usize) ?*anyopaque;
+extern "c" fn free(pointer: ?*anyopaque) void;
 
 pub const BuildError = error{
     InvalidInput,
@@ -27,7 +26,7 @@ var alloc_test_fail_after: ?usize = null;
 var alloc_test_call_count: usize = 0;
 var alloc_test_active_count: usize = 0;
 
-pub fn buildOwned(input: Input) BuildError!*c.TDNF_REPOMD_NATIVE_SOLVER_RESULT {
+pub fn buildOwned(input: Input) BuildError!*result_abi.Result {
     const package_total = input.universe.packages.len;
     _ = try countU32(package_total);
     const selected_count = try countU32(input.selected.len);
@@ -100,7 +99,7 @@ pub fn buildOwned(input: Input) BuildError!*c.TDNF_REPOMD_NATIVE_SOLVER_RESULT {
         @constCast(&[_]u32{});
     @memset(package_refs, invalid_package_ref);
 
-    const result = try callocOne(c.TDNF_REPOMD_NATIVE_SOLVER_RESULT);
+    const result = try callocOne(result_abi.Result);
     result.dwPackageCount = package_count;
     result.dwSelectedPackageCount = selected_count;
     result.dwActionCount = action_count;
@@ -110,18 +109,18 @@ pub fn buildOwned(input: Input) BuildError!*c.TDNF_REPOMD_NATIVE_SOLVER_RESULT {
     errdefer freeOwned(result);
 
     result.pPackages = try callocArray(
-        c.TDNF_REPOMD_NATIVE_SOLVER_PACKAGE,
+        result_abi.Package,
         package_count,
     );
     result.pdwSelectedPackageRefs = try callocArray(u32, selected_count);
     result.pActions = try callocArray(
-        c.TDNF_REPOMD_NATIVE_SOLVER_ACTION,
+        result_abi.Action,
         action_count,
     );
     result.pdwPriorPackageRefs = try callocArray(u32, prior_count);
     result.pdwPriorHnums = try callocArray(u32, prior_count);
     result.pProblems = try callocArray(
-        c.TDNF_REPOMD_NATIVE_SOLVER_PROBLEM,
+        result_abi.Problem,
         problem_count,
     );
     result.pdwSkippedJobIds = try callocArray(u32, skipped_count);
@@ -147,7 +146,7 @@ pub fn buildOwned(input: Input) BuildError!*c.TDNF_REPOMD_NATIVE_SOLVER_RESULT {
 
     var prior_offset: u32 = 0;
     for (input.outcome.actions, 0..) |action, index| {
-        const out: *c.TDNF_REPOMD_NATIVE_SOLVER_ACTION =
+        const out: *result_abi.Action =
             @ptrCast(&result.pActions[index]);
         out.dwPackageRef = try getPackageRef(package_refs, action.package);
         out.dwKind = mapActionKind(action.kind);
@@ -170,7 +169,7 @@ pub fn buildOwned(input: Input) BuildError!*c.TDNF_REPOMD_NATIVE_SOLVER_RESULT {
     }
 
     for (input.outcome.problems, 0..) |problem, index| {
-        const out: *c.TDNF_REPOMD_NATIVE_SOLVER_PROBLEM =
+        const out: *result_abi.Problem =
             @ptrCast(&result.pProblems[index]);
         out.dwKind = mapProblemKind(problem.kind);
         out.dwCount = problem.count;
@@ -203,13 +202,13 @@ pub fn buildOwned(input: Input) BuildError!*c.TDNF_REPOMD_NATIVE_SOLVER_RESULT {
 }
 
 pub fn freeOwnedResult(
-    result: ?*c.TDNF_REPOMD_NATIVE_SOLVER_RESULT,
+    result: ?*result_abi.Result,
 ) void {
     freeOwned(result);
 }
 
 fn fillPackage(
-    out: *c.TDNF_REPOMD_NATIVE_SOLVER_PACKAGE,
+    out: *result_abi.Package,
     universe: *const solver_model.Universe,
     package: *const solver_model.UniversePackage,
 ) BuildError!void {
@@ -250,7 +249,7 @@ fn fillPackage(
 }
 
 fn fillRelation(
-    out: *c.TDNF_REPOMD_NATIVE_SOLVER_RELATION,
+    out: *result_abi.Relation,
     relation: metadata.Relation,
 ) BuildError!void {
     out.pszName = try dupCString(relation.name);
@@ -423,7 +422,7 @@ fn dupOptionalCString(
 }
 
 fn freeOwned(
-    result_raw: ?*c.TDNF_REPOMD_NATIVE_SOLVER_RESULT,
+    result_raw: ?*result_abi.Result,
 ) void {
     const result = result_raw orelse return;
     if (result.pProblems != null) {
@@ -473,7 +472,7 @@ fn adapterCalloc(count: usize, size: usize) ?*anyopaque {
         }
     }
 
-    const raw = c.calloc(count, size);
+    const raw = calloc(count, size);
     if (raw != null and builtin.is_test and alloc_test_enabled) {
         alloc_test_active_count += 1;
     }
@@ -482,7 +481,7 @@ fn adapterCalloc(count: usize, size: usize) ?*anyopaque {
 
 fn freeAllocation(pointer_raw: ?*anyopaque) void {
     const pointer = pointer_raw orelse return;
-    c.free(pointer);
+    free(pointer);
     if (builtin.is_test and alloc_test_enabled) {
         std.debug.assert(alloc_test_active_count > 0);
         alloc_test_active_count -= 1;
@@ -637,13 +636,13 @@ test "C adapter owns canonical package action problem and skipped-job data" {
     try std.testing.expectEqual(@as(u32, 42), installed.dwRpmDbHnum);
     try std.testing.expectEqualStrings(
         "library",
-        std.mem.span(installed.pszName),
+        std.mem.span(installed.pszName.?),
     );
 
     const available = result.pPackages[1];
     try std.testing.expectEqualStrings(
         "new build",
-        std.mem.span(available.pszSummary),
+        std.mem.span(available.pszSummary.?),
     );
     try std.testing.expectEqual(@as(u64, 300), available.nPackageSize);
     try std.testing.expectEqual(@as(c_int, 1), available.nHasPackageSize);
@@ -668,7 +667,7 @@ test "C adapter owns canonical package action problem and skipped-job data" {
     try std.testing.expectEqual(@as(u32, 5), problem.capability.dwComparison);
     try std.testing.expectEqualStrings(
         "library-api",
-        std.mem.span(problem.capability.pszName),
+        std.mem.span(problem.capability.pszName.?),
     );
     try std.testing.expectEqual(@as(u32, 1), result.pdwSkippedJobIds[0]);
 
@@ -677,15 +676,15 @@ test "C adapter owns canonical package action problem and skipped-job data" {
     fixture.relation_name[0] = 'X';
     try std.testing.expectEqualStrings(
         "library",
-        std.mem.span(installed.pszName),
+        std.mem.span(installed.pszName.?),
     );
     try std.testing.expectEqualStrings(
         "new build",
-        std.mem.span(available.pszSummary),
+        std.mem.span(available.pszSummary.?),
     );
     try std.testing.expectEqualStrings(
         "library-api",
-        std.mem.span(problem.capability.pszName),
+        std.mem.span(problem.capability.pszName.?),
     );
 }
 

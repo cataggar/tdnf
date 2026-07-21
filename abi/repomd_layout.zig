@@ -1,8 +1,24 @@
 const std = @import("std");
+const solver_result_abi = @import("solver_result_abi");
 const c = @cImport({
     @cInclude("tdnf.h");
     @cInclude("tdnfrepomd.h");
 });
+
+fn expectSameLayout(
+    comptime zig_type: type,
+    comptime c_type: type,
+    comptime fields: anytype,
+) !void {
+    try std.testing.expectEqual(@sizeOf(c_type), @sizeOf(zig_type));
+    try std.testing.expectEqual(@alignOf(c_type), @alignOf(zig_type));
+    inline for (fields) |field| {
+        try std.testing.expectEqual(
+            @offsetOf(c_type, field),
+            @offsetOf(zig_type, field),
+        );
+    }
+}
 
 test "public configuration layout remains stable" {
     const pointer_size = @sizeOf(*anyopaque);
@@ -297,4 +313,98 @@ test "native solver problem and result layouts remain stable" {
             @offsetOf(c.TDNF_REPOMD_NATIVE_SOLVER_RESULT, field[0]),
         );
     }
+}
+
+test "native solver Zig ABI mirror matches the public C layouts" {
+    try expectSameLayout(
+        solver_result_abi.Package,
+        c.TDNF_REPOMD_NATIVE_SOLVER_PACKAGE,
+        .{
+            "pszRepository",
+            "pszName",
+            "pszVersion",
+            "pszRelease",
+            "pszArch",
+            "pszChecksumType",
+            "pszChecksumValue",
+            "pszLocationHref",
+            "pszLocationBase",
+            "pszSummary",
+            "nPackageSize",
+            "nInstalledSize",
+            "dwPackageId",
+            "dwRepositoryId",
+            "dwEpoch",
+            "dwRpmDbHnum",
+            "nRepositoryKind",
+            "nHasEpoch",
+            "nHasRpmDbHnum",
+            "nChecksumIsPkgId",
+            "nHasPackageSize",
+            "nHasInstalledSize",
+        },
+    );
+    try expectSameLayout(
+        solver_result_abi.Action,
+        c.TDNF_REPOMD_NATIVE_SOLVER_ACTION,
+        .{
+            "dwPackageRef",
+            "dwKind",
+            "dwReason",
+            "dwPriorOffset",
+            "dwPriorCount",
+            "dwRequestedJobId",
+            "nHasRequestedJobId",
+        },
+    );
+    try expectSameLayout(
+        solver_result_abi.Relation,
+        c.TDNF_REPOMD_NATIVE_SOLVER_RELATION,
+        .{
+            "pszName",
+            "pszVersion",
+            "pszRelease",
+            "pszFlags",
+            "dwComparison",
+            "dwEpoch",
+            "dwSense",
+            "nHasEpoch",
+            "nPre",
+        },
+    );
+    try expectSameLayout(
+        solver_result_abi.Problem,
+        c.TDNF_REPOMD_NATIVE_SOLVER_PROBLEM,
+        .{
+            "capability",
+            "dwKind",
+            "dwPackageRef",
+            "dwRelatedPackageRef",
+            "dwJobId",
+            "dwCount",
+            "nHasPackageRef",
+            "nHasRelatedPackageRef",
+            "nHasCapability",
+            "nHasJobId",
+        },
+    );
+    try expectSameLayout(
+        solver_result_abi.Result,
+        c.TDNF_REPOMD_NATIVE_SOLVER_RESULT,
+        .{
+            "pPackages",
+            "pdwSelectedPackageRefs",
+            "pActions",
+            "pdwPriorPackageRefs",
+            "pdwPriorHnums",
+            "pProblems",
+            "pdwSkippedJobIds",
+            "dwPackageCount",
+            "dwSelectedPackageCount",
+            "dwActionCount",
+            "dwPriorPackageRefCount",
+            "dwProblemCount",
+            "dwSkippedJobCount",
+        },
+    );
 }
