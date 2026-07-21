@@ -8,6 +8,8 @@ const solver_model = @import("solver_model.zig");
 const solver_native = @import("solver_native.zig");
 const solver_result_abi = @import("solver_result_abi.zig");
 const solver_result_c = @import("solver_result_c.zig");
+const solver_shadow = @import("solver_shadow.zig");
+const solver_shadow_abi = @import("solver_shadow_abi.zig");
 const solver_visibility = @import("solver_visibility.zig");
 
 pub const system_repository_id = "@System";
@@ -182,6 +184,26 @@ pub fn produce(
     };
 }
 
+pub fn compare(
+    parent_allocator: std.mem.Allocator,
+    input: Input,
+    legacy: *const solver_shadow_abi.LegacyResult,
+    comparison: *solver_shadow_abi.Comparison,
+) (ProduceError ||
+    solver_result_c.BuildError ||
+    solver_shadow.CompareError)!void {
+    var solved = try produce(parent_allocator, input);
+    defer solved.deinit();
+    const native = try solved.buildOwnedC();
+    defer solver_result_c.freeOwnedResult(native);
+    try solver_shadow.compare(
+        parent_allocator,
+        native,
+        legacy,
+        comparison,
+    );
+}
+
 const fixture_repomd =
     \\<?xml version="1.0" encoding="UTF-8"?>
     \\<repomd xmlns="http://linux.duke.edu/metadata/repo">
@@ -319,6 +341,41 @@ test "live producer owns loaded inputs and exact install result" {
     );
 }
 
+test "live comparison observes the exact legacy install projection" {
+    var fixture = try Fixture.create();
+    defer fixture.cleanup();
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var cache_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var repositories: [1]RepositoryInput = undefined;
+    var jobs: [1]JobInput = undefined;
+    const input = fixtureInput(
+        &fixture,
+        &root_buffer,
+        &cache_buffer,
+        &repositories,
+        &jobs,
+    );
+    var legacy_package = std.mem.zeroes(
+        solver_shadow_abi.LegacyPackage,
+    );
+    legacy_package.pszName = "candidate";
+    legacy_package.pszRepoName = "repo";
+    legacy_package.pszVersion = "1.0";
+    legacy_package.pszRelease = "1";
+    legacy_package.pszArch = "x86_64";
+    var legacy = std.mem.zeroes(solver_shadow_abi.LegacyResult);
+    legacy.pPkgsToInstall = @ptrCast(&legacy_package);
+    var comparison = std.mem.zeroes(solver_shadow_abi.Comparison);
+
+    try compare(
+        std.testing.allocator,
+        input,
+        &legacy,
+        &comparison,
+    );
+    try std.testing.expectEqual(@as(u32, 1), comparison.dwStatus);
+}
+
 test "live producer fails closed on unsupported and ambiguous input" {
     var fixture = try Fixture.create();
     defer fixture.cleanup();
@@ -380,6 +437,16 @@ fn allocationFailureCase(
     );
 }
 
+fn comparisonAllocationFailureCase(
+    allocator: std.mem.Allocator,
+    input: Input,
+    legacy: *const solver_shadow_abi.LegacyResult,
+) !void {
+    var comparison = std.mem.zeroes(solver_shadow_abi.Comparison);
+    try compare(allocator, input, legacy, &comparison);
+    try std.testing.expectEqual(@as(u32, 1), comparison.dwStatus);
+}
+
 test "live producer cleans every allocation failure" {
     var fixture = try Fixture.create();
     defer fixture.cleanup();
@@ -398,5 +465,37 @@ test "live producer cleans every allocation failure" {
         std.testing.allocator,
         allocationFailureCase,
         .{input},
+    );
+}
+
+test "live comparison cleans every allocation failure" {
+    var fixture = try Fixture.create();
+    defer fixture.cleanup();
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var cache_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var repositories: [1]RepositoryInput = undefined;
+    var jobs: [1]JobInput = undefined;
+    const input = fixtureInput(
+        &fixture,
+        &root_buffer,
+        &cache_buffer,
+        &repositories,
+        &jobs,
+    );
+    var legacy_package = std.mem.zeroes(
+        solver_shadow_abi.LegacyPackage,
+    );
+    legacy_package.pszName = "candidate";
+    legacy_package.pszRepoName = "repo";
+    legacy_package.pszVersion = "1.0";
+    legacy_package.pszRelease = "1";
+    legacy_package.pszArch = "x86_64";
+    var legacy = std.mem.zeroes(solver_shadow_abi.LegacyResult);
+    legacy.pPkgsToInstall = @ptrCast(&legacy_package);
+
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        comparisonAllocationFailureCase,
+        .{ input, &legacy },
     );
 }
