@@ -1,5 +1,6 @@
 const std = @import("std");
 const filelists_xml = @import("filelists.zig");
+const metadata_integrity = @import("metadata_integrity.zig");
 const model = @import("model.zig");
 const other_xml = @import("other.zig");
 const primary_xml = @import("primary.zig");
@@ -36,6 +37,12 @@ pub const Paths = struct {
     filelists: ?[]const u8 = null,
     updateinfo: ?[]const u8 = null,
     other: ?[]const u8 = null,
+};
+
+pub const CacheOptions = struct {
+    include_filelists: bool = true,
+    include_updateinfo: bool = false,
+    include_other: bool = false,
 };
 
 /// Move-only owner for a repository model and every slice it borrows.
@@ -76,17 +83,69 @@ pub fn loadModel(
         else => error.InvalidRepoMetadata,
     };
 
-    const primary_bytes = try readMetadataFile(allocator, paths.primary);
+    return loadResolvedModel(
+        allocator,
+        parsed_repomd,
+        .{
+            .primary = paths.primary,
+            .filelists = paths.filelists,
+            .updateinfo = paths.updateinfo,
+            .other = paths.other,
+        },
+    );
+}
+
+const ResolvedPaths = struct {
+    primary: []const u8,
+    filelists: ?[]const u8,
+    updateinfo: ?[]const u8,
+    other: ?[]const u8,
+};
+
+const ResolvedBytes = struct {
+    primary: []const u8,
+    filelists: ?[]const u8,
+    updateinfo: ?[]const u8,
+    other: ?[]const u8,
+};
+
+fn loadResolvedModel(
+    allocator: std.mem.Allocator,
+    parsed_repomd: model.ParsedRepoMd,
+    paths: ResolvedPaths,
+) LoadError!model.RepositoryModel {
+    const bytes = ResolvedBytes{
+        .primary = try readMetadataFile(allocator, paths.primary),
+        .filelists = if (paths.filelists) |path|
+            try readMetadataFile(allocator, path)
+        else
+            null,
+        .updateinfo = if (paths.updateinfo) |path|
+            try readMetadataFile(allocator, path)
+        else
+            null,
+        .other = if (paths.other) |path|
+            try readMetadataFile(allocator, path)
+        else
+            null,
+    };
+    return parseResolvedModel(allocator, parsed_repomd, bytes);
+}
+
+fn parseResolvedModel(
+    allocator: std.mem.Allocator,
+    parsed_repomd: model.ParsedRepoMd,
+    bytes: ResolvedBytes,
+) LoadError!model.RepositoryModel {
     var parsed_primary = primary_xml.parse(
         allocator,
-        primary_bytes,
+        bytes.primary,
     ) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         else => error.InvalidRepoMetadata,
     };
 
-    if (paths.filelists) |path| {
-        const filelists_bytes = try readMetadataFile(allocator, path);
+    if (bytes.filelists) |filelists_bytes| {
         filelists_xml.parseAndApply(
             allocator,
             filelists_bytes,
@@ -97,8 +156,7 @@ pub fn loadModel(
         };
     }
 
-    if (paths.other) |path| {
-        const other_bytes = try readMetadataFile(allocator, path);
+    if (bytes.other) |other_bytes| {
         other_xml.parseAndApply(
             allocator,
             other_bytes,
@@ -109,8 +167,7 @@ pub fn loadModel(
         };
     }
 
-    const parsed_updateinfo = if (paths.updateinfo) |path| blk: {
-        const updateinfo_bytes = try readMetadataFile(allocator, path);
+    const parsed_updateinfo = if (bytes.updateinfo) |updateinfo_bytes| blk: {
         break :blk updateinfo_xml.parse(
             allocator,
             updateinfo_bytes,
@@ -125,6 +182,219 @@ pub fn loadModel(
         parsed_primary,
         parsed_updateinfo,
     );
+}
+
+/// Load cached metadata rooted at a repository cache directory.
+/// The allocator owns all returned model storage and must have arena lifetime.
+pub fn loadCacheModel(
+    allocator: std.mem.Allocator,
+    cache_dir: []const u8,
+    options: CacheOptions,
+) LoadError!model.RepositoryModel {
+    var io_state: std.Io.Threaded = .init(allocator, .{});
+    defer io_state.deinit();
+    const io = io_state.io();
+    const cache_root = std.Io.Dir.cwd().openDir(
+        io,
+        cache_dir,
+        .{},
+    ) catch |err| return mapReadError(err);
+    defer cache_root.close(io);
+
+    const repomd_bytes = try readCacheMetadataFile(
+        allocator,
+        cache_root,
+        io,
+        "repodata/repomd.xml",
+        null,
+    );
+    const parsed_repomd = repomd_xml.parse(
+        allocator,
+        repomd_bytes,
+    ) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.InvalidRepoMetadata,
+    };
+
+    var primary_record: ?*const model.Record = null;
+    var filelists_record: ?*const model.Record = null;
+    var updateinfo_record: ?*const model.Record = null;
+    var other_record: ?*const model.Record = null;
+    for (parsed_repomd.pRecords) |*record| {
+        const raw_type = model.spanZ(record.pszType) orelse continue;
+        const href = model.spanZ(record.pszLocationHref) orelse continue;
+        try validateCacheMetadataPath(href);
+        switch (model.kindFromRawType(raw_type)) {
+            .primary => if (primary_record == null) {
+                primary_record = record;
+            },
+            .filelists => if (options.include_filelists and
+                filelists_record == null)
+            {
+                filelists_record = record;
+            },
+            .updateinfo => if (options.include_updateinfo and
+                updateinfo_record == null)
+            {
+                updateinfo_record = record;
+            },
+            .other => if (options.include_other and other_record == null) {
+                other_record = record;
+            },
+            else => {},
+        }
+    }
+
+    const primary = primary_record orelse
+        return error.InvalidRepoMetadata;
+    return parseResolvedModel(allocator, parsed_repomd, .{
+        .primary = try readCacheMetadataFile(
+            allocator,
+            cache_root,
+            io,
+            model.spanZ(primary.pszLocationHref).?,
+            primary,
+        ),
+        .filelists = if (filelists_record) |record|
+            try readCacheMetadataFile(
+                allocator,
+                cache_root,
+                io,
+                model.spanZ(record.pszLocationHref).?,
+                record,
+            )
+        else
+            null,
+        .updateinfo = if (updateinfo_record) |record|
+            try readCacheMetadataFile(
+                allocator,
+                cache_root,
+                io,
+                model.spanZ(record.pszLocationHref).?,
+                record,
+            )
+        else
+            null,
+        .other = if (other_record) |record|
+            try readCacheMetadataFile(
+                allocator,
+                cache_root,
+                io,
+                model.spanZ(record.pszLocationHref).?,
+                record,
+            )
+        else
+            null,
+    });
+}
+
+fn validateCacheMetadataPath(
+    href: []const u8,
+) LoadError!void {
+    if (href.len == 0 or
+        std.fs.path.isAbsolute(href) or
+        std.mem.indexOfScalar(u8, href, '\\') != null)
+    {
+        return error.InvalidRepoMetadata;
+    }
+    var components = std.mem.splitScalar(u8, href, '/');
+    while (components.next()) |component| {
+        if (std.mem.eql(u8, component, ".") or
+            std.mem.eql(u8, component, ".."))
+        {
+            return error.InvalidRepoMetadata;
+        }
+    }
+}
+
+fn readCacheMetadataFile(
+    allocator: std.mem.Allocator,
+    cache_root: std.Io.Dir,
+    io: std.Io,
+    path: []const u8,
+    record: ?*const model.Record,
+) LoadError![]u8 {
+    const file = try openCacheFile(cache_root, io, path);
+    defer file.close(io);
+    var reader = file.reader(io, &.{});
+    const raw = reader.interface.allocRemaining(
+        allocator,
+        .limited(max_metadata_bytes),
+    ) catch |err| return switch (err) {
+        error.ReadFailed => mapReadError(reader.err.?),
+        error.OutOfMemory => error.OutOfMemory,
+        error.StreamTooLong => error.StreamTooLong,
+    };
+    if (record) |metadata| {
+        if (metadata.nHasSize != 0 and raw.len != metadata.nSize) {
+            return error.InvalidRepoMetadata;
+        }
+        if (!metadata_integrity.digestMatches(metadata.checksum, raw)) {
+            return error.InvalidRepoMetadata;
+        }
+    }
+    const open = decompressMetadata(
+        allocator,
+        path,
+        raw,
+    ) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.UnsupportedCompressor => error.UnsupportedCompressor,
+        error.DecompressFailed => error.DecompressFailed,
+    };
+    if (record) |metadata| {
+        if (metadata.nHasOpenSize != 0 and
+            open.len != metadata.nOpenSize)
+        {
+            return error.InvalidRepoMetadata;
+        }
+        if ((metadata.openChecksum.pszType != null or
+            metadata.openChecksum.pszValue != null) and
+            !metadata_integrity.digestMatches(
+                metadata.openChecksum,
+                open,
+            ))
+        {
+            return error.InvalidRepoMetadata;
+        }
+    }
+    return open;
+}
+
+fn openCacheFile(
+    cache_root: std.Io.Dir,
+    io: std.Io,
+    path: []const u8,
+) LoadError!std.Io.File {
+    try validateCacheMetadataPath(path);
+    var components = std.mem.splitScalar(u8, path, '/');
+    var component = components.next() orelse
+        return error.InvalidRepoMetadata;
+    var current = cache_root;
+    var owns_current = false;
+    defer if (owns_current) current.close(io);
+
+    while (components.next()) |next| {
+        const child = current.openDir(io, component, .{
+            .follow_symlinks = false,
+        }) catch |err| return switch (err) {
+            error.NotDir, error.SymLinkLoop => error.AccessDenied,
+            else => mapReadError(err),
+        };
+        if (owns_current) current.close(io);
+        current = child;
+        owns_current = true;
+        component = next;
+    }
+
+    return current.openFile(io, component, .{
+        .allow_directory = false,
+        .follow_symlinks = false,
+        .resolve_beneath = true,
+    }) catch |err| return switch (err) {
+        error.SymLinkLoop => error.AccessDenied,
+        else => mapReadError(err),
+    };
 }
 
 fn readMetadataFile(
@@ -492,4 +762,159 @@ test "loader maps missing malformed and corrupt metadata" {
             ),
         },
     ));
+}
+
+test "cache loader rejects metadata paths outside the cache" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "cache/repodata");
+    try tmp.dir.writeFile(
+        std.testing.io,
+        .{
+            .sub_path = "cache/repodata/repomd.xml",
+            .data =
+            \\<?xml version="1.0" encoding="UTF-8"?>
+            \\<repomd xmlns="http://linux.duke.edu/metadata/repo">
+            \\  <data type="primary">
+            \\    <location href="../primary.xml"/>
+            \\  </data>
+            \\</repomd>
+            ,
+        },
+    );
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cache_dir = std.fmt.bufPrint(
+        &path_buffer,
+        ".zig-cache/tmp/{s}/cache",
+        .{&tmp.sub_path},
+    ) catch @panic("cache path too long");
+    var arena_state = std.heap.ArenaAllocator.init(
+        std.testing.allocator,
+    );
+    defer arena_state.deinit();
+    try std.testing.expectError(
+        error.InvalidRepoMetadata,
+        loadCacheModel(arena_state.allocator(), cache_dir, .{}),
+    );
+}
+
+test "cache loader rejects metadata symlink escapes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "cache/repodata");
+    try tmp.dir.createDir(std.testing.io, "outside", .default_dir);
+    try tmp.dir.writeFile(
+        std.testing.io,
+        .{
+            .sub_path = "cache/repodata/repomd.xml",
+            .data =
+            \\<?xml version="1.0" encoding="UTF-8"?>
+            \\<repomd xmlns="http://linux.duke.edu/metadata/repo">
+            \\  <data type="primary">
+            \\    <location href="repodata/link/primary.xml"/>
+            \\  </data>
+            \\</repomd>
+            ,
+        },
+    );
+    try tmp.dir.writeFile(
+        std.testing.io,
+        .{
+            .sub_path = "outside/primary.xml",
+            .data = fixture_primary,
+        },
+    );
+    try tmp.dir.symLink(
+        std.testing.io,
+        "../../outside",
+        "cache/repodata/link",
+        .{ .is_directory = true },
+    );
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cache_dir = std.fmt.bufPrint(
+        &path_buffer,
+        ".zig-cache/tmp/{s}/cache",
+        .{&tmp.sub_path},
+    ) catch @panic("cache path too long");
+    var arena_state = std.heap.ArenaAllocator.init(
+        std.testing.allocator,
+    );
+    defer arena_state.deinit();
+    try std.testing.expectError(
+        error.AccessDenied,
+        loadCacheModel(arena_state.allocator(), cache_dir, .{}),
+    );
+}
+
+test "cache loader rejects unverified sidecars" {
+    const documents = [_][]const u8{
+        \\<?xml version="1.0" encoding="UTF-8"?>
+        \\<repomd xmlns="http://linux.duke.edu/metadata/repo">
+        \\  <data type="primary">
+        \\    <location href="repodata/primary.xml"/>
+        \\  </data>
+        \\</repomd>
+        ,
+        \\<?xml version="1.0" encoding="UTF-8"?>
+        \\<repomd xmlns="http://linux.duke.edu/metadata/repo">
+        \\  <data type="primary">
+        \\    <checksum type="sha256">0000000000000000000000000000000000000000000000000000000000000000</checksum>
+        \\    <location href="repodata/primary.xml"/>
+        \\  </data>
+        \\</repomd>
+        ,
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for (documents, 0..) |document, index| {
+        var cache_buffer: [64]u8 = undefined;
+        const cache = std.fmt.bufPrint(
+            &cache_buffer,
+            "cache-{d}",
+            .{index},
+        ) catch unreachable;
+        var repodata_buffer: [64]u8 = undefined;
+        const repodata = std.fmt.bufPrint(
+            &repodata_buffer,
+            "{s}/repodata",
+            .{cache},
+        ) catch unreachable;
+        try tmp.dir.createDirPath(std.testing.io, repodata);
+        var repomd_buffer: [96]u8 = undefined;
+        const repomd_path = std.fmt.bufPrint(
+            &repomd_buffer,
+            "{s}/repomd.xml",
+            .{repodata},
+        ) catch unreachable;
+        try tmp.dir.writeFile(
+            std.testing.io,
+            .{ .sub_path = repomd_path, .data = document },
+        );
+        var primary_buffer: [96]u8 = undefined;
+        const primary_path = std.fmt.bufPrint(
+            &primary_buffer,
+            "{s}/primary.xml",
+            .{repodata},
+        ) catch unreachable;
+        try tmp.dir.writeFile(
+            std.testing.io,
+            .{ .sub_path = primary_path, .data = fixture_primary },
+        );
+
+        var absolute_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const cache_dir = std.fmt.bufPrint(
+            &absolute_buffer,
+            ".zig-cache/tmp/{s}/{s}",
+            .{ &tmp.sub_path, cache },
+        ) catch @panic("cache path too long");
+        var arena_state = std.heap.ArenaAllocator.init(
+            std.testing.allocator,
+        );
+        defer arena_state.deinit();
+        try std.testing.expectError(
+            error.InvalidRepoMetadata,
+            loadCacheModel(arena_state.allocator(), cache_dir, .{}),
+        );
+    }
 }

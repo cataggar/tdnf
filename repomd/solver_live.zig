@@ -1,0 +1,402 @@
+//! Owning live-input adapter for strict native shadow solves.
+
+const std = @import("std");
+const available_loader = @import("available_loader.zig");
+const installed_repository = @import("installed_repository.zig");
+const solver_identity = @import("solver_identity.zig");
+const solver_model = @import("solver_model.zig");
+const solver_native = @import("solver_native.zig");
+const solver_result_abi = @import("solver_result_abi.zig");
+const solver_result_c = @import("solver_result_c.zig");
+const solver_visibility = @import("solver_visibility.zig");
+
+pub const system_repository_id = "@System";
+
+pub const RepositoryInput = struct {
+    id: []const u8,
+    cache_dir: []const u8,
+    snapshot_file: ?[]const u8 = null,
+    priority: i32 = solver_model.default_repository_priority,
+    cost: u32 = solver_model.default_repository_cost,
+};
+
+pub const JobInput = struct {
+    selector: solver_identity.AvailableSelector,
+};
+
+pub const Input = struct {
+    repositories: []const RepositoryInput,
+    rpmdb: installed_repository.Source,
+    native_arch: []const u8,
+    jobs: []const JobInput,
+};
+
+pub const ProduceError =
+    available_loader.LoadError ||
+    installed_repository.LoadError ||
+    solver_model.UniverseInitError ||
+    solver_identity.InitError ||
+    solver_identity.ResolveError ||
+    solver_visibility.BuildError ||
+    solver_native.ProjectedSolveError ||
+    error{
+        InvalidInput,
+        UnsupportedInput,
+    };
+
+/// Move-only owner for every model used by a strict live shadow solve.
+pub const OwnedSolve = struct {
+    arena_state: std.heap.ArenaAllocator,
+    universe: *solver_model.Universe,
+    solved: solver_native.OwnedSolveResult,
+
+    pub fn deinit(self: *OwnedSolve) void {
+        self.solved.deinit();
+        // Universe arrays share the enclosing arena and are released below.
+        self.arena_state.deinit();
+        self.* = undefined;
+    }
+
+    pub fn buildOwnedC(
+        self: *const OwnedSolve,
+    ) solver_result_c.BuildError!*solver_result_abi.Result {
+        return self.solved.buildOwnedC();
+    }
+};
+
+pub fn produce(
+    parent_allocator: std.mem.Allocator,
+    input: Input,
+) ProduceError!OwnedSolve {
+    if (input.repositories.len == 0 or
+        input.jobs.len == 0 or
+        input.native_arch.len == 0)
+    {
+        return error.InvalidInput;
+    }
+
+    var arena_state = std.heap.ArenaAllocator.init(parent_allocator);
+    errdefer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const repository_inputs = try arena.alloc(
+        solver_model.RepositoryInput,
+        input.repositories.len + 1,
+    );
+    const models = try arena.alloc(
+        @import("model.zig").RepositoryModel,
+        input.repositories.len + 1,
+    );
+
+    const installed = try installed_repository.loadModel(
+        arena,
+        input.rpmdb,
+        .{
+            .include_relations = true,
+            .include_files = true,
+            .include_changelogs = false,
+        },
+    );
+    models[0] = installed.repository;
+    repository_inputs[0] = .{
+        .id = system_repository_id,
+        .model = &models[0],
+        .kind = .installed,
+        .installed_states = installed.installed_states,
+    };
+
+    for (input.repositories, models[1..], 0..) |
+        repository,
+        *loaded,
+        index,
+    | {
+        if (repository.id.len == 0 or
+            repository.cache_dir.len == 0)
+        {
+            return error.InvalidInput;
+        }
+        if (repository.snapshot_file != null) {
+            return error.UnsupportedInput;
+        }
+        if (repository.priority == std.math.minInt(i32)) {
+            return error.UnsupportedInput;
+        }
+        loaded.* = try available_loader.loadCacheModel(
+            arena,
+            repository.cache_dir,
+            .{
+                .include_filelists = true,
+                .include_updateinfo = false,
+                .include_other = false,
+            },
+        );
+        repository_inputs[index + 1] = .{
+            .id = try arena.dupe(u8, repository.id),
+            .model = loaded,
+            .priority = repository.priority,
+            .cost = repository.cost,
+        };
+    }
+
+    const universe = try arena.create(solver_model.Universe);
+    universe.* = try solver_model.Universe.init(arena, repository_inputs);
+    errdefer universe.deinit();
+
+    var identity = try solver_identity.Index.init(
+        parent_allocator,
+        universe,
+    );
+    defer identity.deinit();
+    const jobs = try arena.alloc(solver_model.Job, input.jobs.len);
+    for (input.jobs, jobs) |job, *translated| {
+        translated.* = .{
+            .action = .install,
+            .selection = .{
+                .package = try identity.resolveAvailable(job.selector),
+            },
+            .reason = .user,
+        };
+    }
+
+    var visibility = try solver_visibility.Projection.init(
+        parent_allocator,
+        universe,
+        .{},
+    );
+    defer visibility.deinit();
+    const native_arch = try arena.dupe(u8, input.native_arch);
+    var solved = try solver_native.solveProjected(
+        parent_allocator,
+        universe,
+        &visibility,
+        .{ .jobs = jobs },
+        .{
+            .architecture = .{ .native_arch = native_arch },
+        },
+    );
+    errdefer solved.deinit();
+
+    return .{
+        .arena_state = arena_state,
+        .universe = universe,
+        .solved = solved,
+    };
+}
+
+const fixture_repomd =
+    \\<?xml version="1.0" encoding="UTF-8"?>
+    \\<repomd xmlns="http://linux.duke.edu/metadata/repo">
+    \\  <data type="primary">
+    \\    <checksum type="sha256">048be7ad0199c0267a884bf2bf58df47c7fed78db55809e599d0473cd245a77f</checksum>
+    \\    <location href="repodata/primary.xml"/>
+    \\    <size>387</size>
+    \\  </data>
+    \\</repomd>
+;
+
+const fixture_primary =
+    \\<?xml version="1.0" encoding="UTF-8"?>
+    \\<metadata xmlns="http://linux.duke.edu/metadata/common" packages="1">
+    \\  <package type="rpm">
+    \\    <name>candidate</name>
+    \\    <arch>x86_64</arch>
+    \\    <version epoch="0" ver="1.0" rel="1"/>
+    \\    <checksum type="sha256" pkgid="YES">abcdef</checksum>
+    \\    <summary>candidate</summary>
+    \\    <location href="packages/candidate.rpm"/>
+    \\  </package>
+    \\</metadata>
+;
+
+const Fixture = struct {
+    tmp: std.testing.TmpDir,
+
+    fn create() !Fixture {
+        var fixture = Fixture{ .tmp = std.testing.tmpDir(.{}) };
+        errdefer fixture.tmp.cleanup();
+        try fixture.tmp.dir.createDirPath(
+            std.testing.io,
+            "cache/repodata",
+        );
+        try fixture.tmp.dir.writeFile(
+            std.testing.io,
+            .{
+                .sub_path = "cache/repodata/repomd.xml",
+                .data = fixture_repomd,
+            },
+        );
+        try fixture.tmp.dir.writeFile(
+            std.testing.io,
+            .{
+                .sub_path = "cache/repodata/primary.xml",
+                .data = fixture_primary,
+            },
+        );
+        return fixture;
+    }
+
+    fn cleanup(self: *Fixture) void {
+        self.tmp.cleanup();
+        self.* = undefined;
+    }
+
+    fn path(
+        self: *const Fixture,
+        buffer: *[std.Io.Dir.max_path_bytes]u8,
+        suffix: []const u8,
+    ) [:0]const u8 {
+        return std.fmt.bufPrintZ(
+            buffer,
+            ".zig-cache/tmp/{s}/{s}",
+            .{ &self.tmp.sub_path, suffix },
+        ) catch @panic("fixture path too long");
+    }
+};
+
+fn fixtureInput(
+    fixture: *const Fixture,
+    root_buffer: *[std.Io.Dir.max_path_bytes]u8,
+    cache_buffer: *[std.Io.Dir.max_path_bytes]u8,
+    repositories: *[1]RepositoryInput,
+    jobs: *[1]JobInput,
+) Input {
+    repositories[0] = .{
+        .id = "repo",
+        .cache_dir = fixture.path(cache_buffer, "cache"),
+    };
+    jobs[0] = .{
+        .selector = .{
+            .repository = "repo",
+            .name = "candidate",
+            .epoch = null,
+            .version = "1.0",
+            .release = "1",
+            .arch = "x86_64",
+        },
+    };
+    return .{
+        .repositories = repositories,
+        .rpmdb = .{ .root_dir = fixture.path(root_buffer, "") },
+        .native_arch = "x86_64",
+        .jobs = jobs,
+    };
+}
+
+test "live producer owns loaded inputs and exact install result" {
+    var fixture = try Fixture.create();
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var cache_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var repositories: [1]RepositoryInput = undefined;
+    var jobs: [1]JobInput = undefined;
+    var solved = try produce(
+        std.testing.allocator,
+        fixtureInput(
+            &fixture,
+            &root_buffer,
+            &cache_buffer,
+            &repositories,
+            &jobs,
+        ),
+    );
+    fixture.cleanup();
+    defer solved.deinit();
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        solved.solved.result.selected.len,
+    );
+    const selected = solved.universe.package(
+        solved.solved.result.selected[0],
+    ).?;
+    try std.testing.expectEqualStrings(
+        "candidate",
+        selected.source.nevra.name,
+    );
+    const c_result = try solved.buildOwnedC();
+    defer solver_result_c.freeOwnedResult(c_result);
+    try std.testing.expectEqual(
+        @as(u32, 1),
+        c_result.dwSelectedPackageCount,
+    );
+}
+
+test "live producer fails closed on unsupported and ambiguous input" {
+    var fixture = try Fixture.create();
+    defer fixture.cleanup();
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var cache_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var repositories: [1]RepositoryInput = undefined;
+    var jobs: [1]JobInput = undefined;
+    const input = fixtureInput(
+        &fixture,
+        &root_buffer,
+        &cache_buffer,
+        &repositories,
+        &jobs,
+    );
+    var repository = input.repositories[0];
+    repository.snapshot_file = "snapshot";
+    repositories[0] = repository;
+    try std.testing.expectError(
+        error.UnsupportedInput,
+        produce(std.testing.allocator, input),
+    );
+
+    repository.snapshot_file = null;
+    repository.cost = solver_model.default_repository_cost + 1;
+    repositories[0] = repository;
+    try std.testing.expectError(
+        error.UnsupportedRepositoryCost,
+        produce(std.testing.allocator, input),
+    );
+
+    repository.cost = solver_model.default_repository_cost;
+    repository.priority = std.math.minInt(i32);
+    repositories[0] = repository;
+    try std.testing.expectError(
+        error.UnsupportedInput,
+        produce(std.testing.allocator, input),
+    );
+
+    repository.priority = solver_model.default_repository_priority;
+    repositories[0] = repository;
+    var job = input.jobs[0];
+    job.selector.name = "missing";
+    jobs[0] = job;
+    try std.testing.expectError(
+        error.PackageNotFound,
+        produce(std.testing.allocator, input),
+    );
+}
+
+fn allocationFailureCase(
+    allocator: std.mem.Allocator,
+    input: Input,
+) !void {
+    var solved = try produce(allocator, input);
+    defer solved.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        solved.solved.result.selected.len,
+    );
+}
+
+test "live producer cleans every allocation failure" {
+    var fixture = try Fixture.create();
+    defer fixture.cleanup();
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var cache_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var repositories: [1]RepositoryInput = undefined;
+    var jobs: [1]JobInput = undefined;
+    const input = fixtureInput(
+        &fixture,
+        &root_buffer,
+        &cache_buffer,
+        &repositories,
+        &jobs,
+    );
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        allocationFailureCase,
+        .{input},
+    );
+}
