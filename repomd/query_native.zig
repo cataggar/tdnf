@@ -13,13 +13,13 @@ const c = @cImport({
     @cInclude("rpmdb.h");
 });
 
+const available_loader = @import("available_loader.zig");
 const model = @import("model.zig");
 const pkgquery = @import("pkgquery.zig");
 const query_index = @import("index.zig");
 const rpmpkg = @import("rpmpkg.zig");
 const rpm_header = @import("rpm_header");
 const repomd_xml = @import("repomd.zig");
-const solv_bridge = @import("solvbridge.zig");
 
 extern fn TDNFUtilsFormatSize(unSize: u64, ppszFormattedSize: ?*?[*:0]u8) u32;
 
@@ -1434,10 +1434,16 @@ fn loadAvailableDataset(raw_repo: c.TDNF_REPOMD_NATIVE_REPO_INPUT, options: Avai
     }
 
     const primary = primary_path orelse return error.InvalidRepoMetadata;
-    const repository = solv_bridge.loadRepositoryModel(arena, repomd_path, primary, filelists_path, updateinfo_path, other_path) catch |err| {
+    const repository = available_loader.loadModel(arena, .{
+        .repomd = repomd_path,
+        .primary = primary,
+        .filelists = filelists_path,
+        .updateinfo = updateinfo_path,
+        .other = other_path,
+    }) catch |err| {
         setError(
-            "failed to load repo '{s}' metadata: {s}",
-            .{ repo_id, std.mem.span(solv_bridge.TDNFRepoMdNativeLastError()) },
+            "failed to load repo '{s}' metadata: {t}",
+            .{ repo_id, err },
         );
         return switch (err) {
             error.InvalidRepoMetadata => error.InvalidRepoMetadata,
