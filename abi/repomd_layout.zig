@@ -1,5 +1,6 @@
 const std = @import("std");
 const solver_result_abi = @import("solver_result_abi");
+const solver_shadow_abi = @import("solver_shadow_abi");
 const c = @cImport({
     @cInclude("tdnf.h");
     @cInclude("tdnfrepomd.h");
@@ -407,4 +408,173 @@ test "native solver Zig ABI mirror matches the public C layouts" {
             "dwSkippedJobCount",
         },
     );
+}
+
+test "native solver shadow ABI mirror matches the public C layouts" {
+    try expectSameLayout(
+        solver_shadow_abi.LegacyPackage,
+        c.TDNF_PKG_INFO,
+        .{
+            "dwEpoch",
+            "dwInstallSizeBytes",
+            "dwDownloadSizeBytes",
+            "nChecksumType",
+            "pszName",
+            "pszRepoName",
+            "pszVersion",
+            "pszArch",
+            "pszEVR",
+            "pszSummary",
+            "pszURL",
+            "pszLicense",
+            "pszDescription",
+            "pszFormattedSize",
+            "pszFormattedDownloadSize",
+            "pszRelease",
+            "pszLocation",
+            "pppszDependencies",
+            "ppszFileList",
+            "pszSourcePkg",
+            "pbChecksum",
+            "pChangeLogEntries",
+            "pNext",
+        },
+    );
+    try expectSameLayout(
+        solver_shadow_abi.LegacyResult,
+        c.TDNF_SOLVED_PKG_INFO,
+        .{
+            "nNeedAction",
+            "nNeedDownload",
+            "nAlterType",
+            "pPkgsNotAvailable",
+            "pPkgsExisting",
+            "pPkgsToInstall",
+            "pPkgsToDowngrade",
+            "pPkgsToUpgrade",
+            "pPkgsToRemove",
+            "pPkgsUnNeeded",
+            "pPkgsToReinstall",
+            "pPkgsObsoleted",
+            "pPkgsRemovedByDowngrade",
+            "ppszPkgsNotResolved",
+            "ppszPkgsUserInstall",
+        },
+    );
+    try expectSameLayout(
+        solver_shadow_abi.Comparison,
+        c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT,
+        .{
+            "dwStatus",
+            "dwReason",
+            "dwActionKind",
+            "dwDifferenceIndex",
+            "dwNativeCount",
+            "dwLegacyCount",
+        },
+    );
+}
+
+test "native solver shadow C layouts remain stable" {
+    const pointer_size = @sizeOf(*anyopaque);
+    const package_size: usize = if (pointer_size == 8) 168 else 92;
+    const result_pointer_offset: usize = if (pointer_size == 8) 16 else 12;
+    const result_size: usize = if (pointer_size == 8) 112 else 60;
+
+    try std.testing.expect(pointer_size == 4 or pointer_size == 8);
+    try std.testing.expectEqual(pointer_size, @alignOf(c.TDNF_PKG_INFO));
+    try std.testing.expectEqual(package_size, @sizeOf(c.TDNF_PKG_INFO));
+    inline for (.{
+        .{ "dwEpoch", 0 },
+        .{ "dwInstallSizeBytes", 4 },
+        .{ "dwDownloadSizeBytes", 8 },
+        .{ "nChecksumType", 12 },
+    }) |field| {
+        try std.testing.expectEqual(
+            @as(usize, field[1]),
+            @offsetOf(c.TDNF_PKG_INFO, field[0]),
+        );
+    }
+    inline for (.{
+        .{ "pszName", 0 },
+        .{ "pszRepoName", 1 },
+        .{ "pszVersion", 2 },
+        .{ "pszArch", 3 },
+        .{ "pszEVR", 4 },
+        .{ "pszSummary", 5 },
+        .{ "pszURL", 6 },
+        .{ "pszLicense", 7 },
+        .{ "pszDescription", 8 },
+        .{ "pszFormattedSize", 9 },
+        .{ "pszFormattedDownloadSize", 10 },
+        .{ "pszRelease", 11 },
+        .{ "pszLocation", 12 },
+        .{ "pppszDependencies", 13 },
+        .{ "ppszFileList", 14 },
+        .{ "pszSourcePkg", 15 },
+        .{ "pbChecksum", 16 },
+        .{ "pChangeLogEntries", 17 },
+        .{ "pNext", 18 },
+    }) |field| {
+        try std.testing.expectEqual(
+            16 + field[1] * pointer_size,
+            @offsetOf(c.TDNF_PKG_INFO, field[0]),
+        );
+    }
+
+    try std.testing.expectEqual(pointer_size, @alignOf(
+        c.TDNF_SOLVED_PKG_INFO,
+    ));
+    try std.testing.expectEqual(result_size, @sizeOf(
+        c.TDNF_SOLVED_PKG_INFO,
+    ));
+    inline for (.{
+        .{ "nNeedAction", 0 },
+        .{ "nNeedDownload", 4 },
+        .{ "nAlterType", 8 },
+    }) |field| {
+        try std.testing.expectEqual(
+            @as(usize, field[1]),
+            @offsetOf(c.TDNF_SOLVED_PKG_INFO, field[0]),
+        );
+    }
+    inline for (.{
+        .{ "pPkgsNotAvailable", 0 },
+        .{ "pPkgsExisting", 1 },
+        .{ "pPkgsToInstall", 2 },
+        .{ "pPkgsToDowngrade", 3 },
+        .{ "pPkgsToUpgrade", 4 },
+        .{ "pPkgsToRemove", 5 },
+        .{ "pPkgsUnNeeded", 6 },
+        .{ "pPkgsToReinstall", 7 },
+        .{ "pPkgsObsoleted", 8 },
+        .{ "pPkgsRemovedByDowngrade", 9 },
+        .{ "ppszPkgsNotResolved", 10 },
+        .{ "ppszPkgsUserInstall", 11 },
+    }) |field| {
+        try std.testing.expectEqual(
+            result_pointer_offset + field[1] * pointer_size,
+            @offsetOf(c.TDNF_SOLVED_PKG_INFO, field[0]),
+        );
+    }
+
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(
+        c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT,
+    ));
+    try std.testing.expectEqual(@as(usize, 4), @alignOf(
+        c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT,
+    ));
+    inline for (.{
+        .{ "dwStatus", 0 },
+        .{ "dwReason", 4 },
+        .{ "dwActionKind", 8 },
+        .{ "dwDifferenceIndex", 12 },
+        .{ "dwNativeCount", 16 },
+        .{ "dwLegacyCount", 20 },
+    }) |field| {
+        try std.testing.expectEqual(
+            @as(usize, field[1]),
+            @offsetOf(c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT, field[0]),
+        );
+    }
 }

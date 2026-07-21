@@ -25,6 +25,7 @@ pub const solver_coordinator = @import("solver_coordinator.zig");
 pub const solver_policy = @import("solver_policy.zig");
 pub const solver_result = @import("solver_result.zig");
 pub const solver_result_c = @import("solver_result_c.zig");
+pub const solver_shadow = @import("solver_shadow.zig");
 pub const solver_rules = @import("solver_rules.zig");
 pub const solver_search = @import("solver_search.zig");
 
@@ -72,6 +73,47 @@ pub export fn TDNFRepoMdNativeSolverResultFree(
     result: ?*c.TDNF_REPOMD_NATIVE_SOLVER_RESULT,
 ) void {
     solver_result_c.freeOwnedResult(@ptrCast(result));
+}
+
+pub export fn TDNFRepoMdNativeSolverResultCompare(
+    native: ?*const c.TDNF_REPOMD_NATIVE_SOLVER_RESULT,
+    legacy: ?*const c.TDNF_SOLVED_PKG_INFO,
+    comparison: ?*c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT,
+) u32 {
+    clearError();
+    const output = comparison orelse {
+        setError("null native solver comparison output", .{});
+        return c.ERROR_TDNF_INVALID_PARAMETER;
+    };
+    output.* = std.mem.zeroes(c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT);
+    output.dwStatus = c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_INVALID;
+    const native_result = native orelse {
+        setError("null native solver result", .{});
+        return c.ERROR_TDNF_INVALID_PARAMETER;
+    };
+    const legacy_result = legacy orelse {
+        setError("null legacy solver result", .{});
+        return c.ERROR_TDNF_INVALID_PARAMETER;
+    };
+
+    solver_shadow.compare(
+        std.heap.c_allocator,
+        @ptrCast(native_result),
+        @ptrCast(@alignCast(legacy_result)),
+        @ptrCast(output),
+    ) catch |err| {
+        return switch (err) {
+            error.OutOfMemory => blk: {
+                setError("out of memory comparing native solver result", .{});
+                break :blk c.ERROR_TDNF_OUT_OF_MEMORY;
+            },
+            error.InvalidInput => blk: {
+                setError("invalid native solver comparison input", .{});
+                break :blk c.ERROR_TDNF_INVALID_PARAMETER;
+            },
+        };
+    };
+    return 0;
 }
 
 pub export fn TDNFRepoMdParseBuffer(
@@ -251,6 +293,7 @@ comptime {
     _ = @import("solver_policy.zig");
     _ = @import("solver_result.zig");
     _ = @import("solver_result_c.zig");
+    _ = @import("solver_shadow.zig");
     _ = @import("solver_rules.zig");
     _ = @import("solver_search.zig");
     _ = @import("transaction_native.zig");
@@ -281,6 +324,26 @@ test "repomd header ABI matches Zig structs" {
     try testing.expectEqual(@offsetOf(c_header.TDNF_REPOMD_RECORD, "nHasSize"), @offsetOf(TDNF_REPOMD_RECORD, "nHasSize"));
     try testing.expectEqual(@offsetOf(c_header.TDNF_REPOMD_RECORD, "nHasOpenSize"), @offsetOf(TDNF_REPOMD_RECORD, "nHasOpenSize"));
     try testing.expectEqual(@offsetOf(c_header.TDNF_REPOMD_RECORD, "nHasDatabaseVersion"), @offsetOf(TDNF_REPOMD_RECORD, "nHasDatabaseVersion"));
+}
+
+test "native solver comparison wrapper initializes invalid output" {
+    var comparison = std.mem.zeroes(
+        c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT,
+    );
+    const result = TDNFRepoMdNativeSolverResultCompare(
+        null,
+        null,
+        &comparison,
+    );
+
+    try std.testing.expectEqual(
+        @as(u32, c.ERROR_TDNF_INVALID_PARAMETER),
+        result,
+    );
+    try std.testing.expectEqual(
+        @as(u32, c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_INVALID),
+        comparison.dwStatus,
+    );
 }
 
 test "parses repomd records with revision checksums sizes and database versions" {
