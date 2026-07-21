@@ -902,11 +902,27 @@ fn appendBeU64(list: *std.array_list.Managed(u8), value: u64) !void {
 pub fn makeMinimalTransactionHeaderForTest(
     allocator: std.mem.Allocator,
 ) ![]u8 {
+    return makeMinimalHeaderForTest(
+        allocator,
+        "verified-package",
+        "1.0",
+        "1",
+        "noarch",
+    );
+}
+
+pub fn makeMinimalHeaderForTest(
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    version: []const u8,
+    release: []const u8,
+    arch: []const u8,
+) ![]u8 {
     const header_blob = try buildHeaderBlob(allocator, &.{
-        .{ .string = .{ .tag = @intFromEnum(rpm_header.TagId.name), .value = "verified-package" } },
-        .{ .string = .{ .tag = @intFromEnum(rpm_header.TagId.version), .value = "1.0" } },
-        .{ .string = .{ .tag = @intFromEnum(rpm_header.TagId.release), .value = "1" } },
-        .{ .string = .{ .tag = @intFromEnum(rpm_header.TagId.arch), .value = "noarch" } },
+        .{ .string = .{ .tag = @intFromEnum(rpm_header.TagId.name), .value = name } },
+        .{ .string = .{ .tag = @intFromEnum(rpm_header.TagId.version), .value = version } },
+        .{ .string = .{ .tag = @intFromEnum(rpm_header.TagId.release), .value = release } },
+        .{ .string = .{ .tag = @intFromEnum(rpm_header.TagId.arch), .value = arch } },
     });
     defer allocator.free(header_blob);
     const standalone = try buildStandaloneHeader(
