@@ -10,6 +10,56 @@
 
 static
 uint32_t
+TDNFGoalObserveNativeSolver(
+    PTDNF pTdnf,
+    const Queue *pQueueJobs,
+    const TDNF_SOLVED_PKG_INFO *pInfo,
+    uint32_t dwExcludeCount,
+    int nAllowErasing,
+    int nAutoErase,
+    int nReInstall,
+    int nProblems
+);
+
+static
+uint32_t
+TDNFGoalBuildNativeSolverRepoInputs(
+    PTDNF pTdnf,
+    PTDNF_REPOMD_NATIVE_SOLVER_LIVE_REPOSITORY *ppRepos,
+    uint32_t *pdwRepoCount
+);
+
+static
+void
+TDNFGoalFreeNativeSolverRepoInputs(
+    PTDNF_REPOMD_NATIVE_SOLVER_LIVE_REPOSITORY pRepos,
+    uint32_t dwRepoCount
+);
+
+static
+uint32_t
+TDNFGoalBuildNativeSolverJobs(
+    PTDNF pTdnf,
+    const Queue *pQueueJobs,
+    PTDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB *ppJobs,
+    uint32_t *pdwJobCount
+);
+
+static
+void
+TDNFGoalFreeNativeSolverJobs(
+    PTDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB pJobs,
+    uint32_t dwJobCount
+);
+
+static
+int
+TDNFGoalAllPackagesConsidered(
+    const Pool *pPool
+);
+
+static
+uint32_t
 TDNFGoalGetAllResultsIgnoreNoData(
     Transaction* pTrans,
     const Solver* pSolv,
@@ -418,6 +468,24 @@ TDNFSolv(
                   nReInstall);
     BAIL_ON_TDNF_ERROR(dwError);
 
+    if(pTdnf->pArgs->nDebugSolver)
+    {
+        uint32_t dwShadowError = TDNFGoalObserveNativeSolver(
+                                     pTdnf,
+                                     pQueueJobs,
+                                     pInfo,
+                                     dwExcludeCount,
+                                     nAllowErasing,
+                                     nAutoErase,
+                                     nReInstall,
+                                     nProblems);
+        if(dwShadowError)
+        {
+            pr_info("native-solver-shadow: unavailable (%u)\n",
+                    dwShadowError);
+        }
+    }
+
     *ppInfo = pInfo;
 
 cleanup:
@@ -570,6 +638,349 @@ cleanup:
 
 error:
     goto cleanup;
+}
+
+static
+uint32_t
+TDNFGoalObserveNativeSolver(
+    PTDNF pTdnf,
+    const Queue *pQueueJobs,
+    const TDNF_SOLVED_PKG_INFO *pInfo,
+    uint32_t dwExcludeCount,
+    int nAllowErasing,
+    int nAutoErase,
+    int nReInstall,
+    int nProblems
+    )
+{
+    uint32_t dwError = 0;
+    uint32_t dwRepoCount = 0;
+    uint32_t dwJobCount = 0;
+    PTDNF_REPOMD_NATIVE_SOLVER_LIVE_REPOSITORY pRepos = NULL;
+    PTDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB pJobs = NULL;
+    const char *pszNativeArch = NULL;
+    char *pszNativeArchOwned = NULL;
+    TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT comparison = {0};
+
+    if(!pTdnf || !pTdnf->pArgs || !pTdnf->pConf || !pTdnf->pSack ||
+       !pTdnf->pSack->pPool || !pTdnf->pRpmConfig || !pQueueJobs || !pInfo)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+    if(dwExcludeCount || nAllowErasing || nAutoErase || nReInstall ||
+       nProblems || pTdnf->pArgs->nBest || pTdnf->pArgs->nSkipBroken ||
+       pTdnf->pArgs->nAllDeps || pTdnf->pConf->ppszMinVersions ||
+       pTdnf->pConf->ppszPkgLocks ||
+       pTdnf->pConf->ppszProtectedPkgs ||
+       pTdnf->pConf->ppszInstallOnlyPkgs ||
+       !TDNFGoalAllPackagesConsidered(pTdnf->pSack->pPool))
+    {
+        dwError = ERROR_TDNF_CALL_NOT_SUPPORTED;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    if(!IsNullOrEmptyString(pTdnf->pArgs->pszArch))
+    {
+        pszNativeArch = pTdnf->pArgs->pszArch;
+    }
+    else
+    {
+        dwError = TDNFGetKernelArch(&pszNativeArchOwned);
+        BAIL_ON_TDNF_ERROR(dwError);
+        pszNativeArch = pszNativeArchOwned;
+    }
+    if(IsNullOrEmptyString(pszNativeArch))
+    {
+        dwError = ERROR_TDNF_NO_DATA;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    dwError = TDNFGoalBuildNativeSolverRepoInputs(
+                  pTdnf,
+                  &pRepos,
+                  &dwRepoCount);
+    BAIL_ON_TDNF_ERROR(dwError);
+    dwError = TDNFGoalBuildNativeSolverJobs(
+                  pTdnf,
+                  pQueueJobs,
+                  &pJobs,
+                  &dwJobCount);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    dwError = TDNFRepoMdNativeSolverLiveCompare(
+                  pRepos,
+                  dwRepoCount,
+                  pJobs,
+                  dwJobCount,
+                  pTdnf->pRpmConfig,
+                  pszNativeArch,
+                  pInfo,
+                  &comparison);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    switch(comparison.dwStatus)
+    {
+        case TDNF_REPOMD_NATIVE_SOLVER_COMPARE_PROJECTED_MATCH:
+            pr_info("native-solver-shadow: projected match\n");
+            break;
+        case TDNF_REPOMD_NATIVE_SOLVER_COMPARE_MISMATCH:
+            pr_err("native-solver-shadow: mismatch action=%u index=%u "
+                   "native=%u legacy=%u\n",
+                   comparison.dwActionKind,
+                   comparison.dwDifferenceIndex,
+                   comparison.dwNativeCount,
+                   comparison.dwLegacyCount);
+            break;
+        case TDNF_REPOMD_NATIVE_SOLVER_COMPARE_UNSUPPORTED:
+            pr_info("native-solver-shadow: comparison unsupported "
+                    "reason=%u action=%u\n",
+                    comparison.dwReason,
+                    comparison.dwActionKind);
+            break;
+        default:
+            dwError = ERROR_TDNF_CALL_NOT_SUPPORTED;
+            BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+cleanup:
+    TDNF_SAFE_FREE_MEMORY(pszNativeArchOwned);
+    TDNFGoalFreeNativeSolverJobs(pJobs, dwJobCount);
+    TDNFGoalFreeNativeSolverRepoInputs(pRepos, dwRepoCount);
+    return dwError;
+error:
+    goto cleanup;
+}
+
+static
+uint32_t
+TDNFGoalBuildNativeSolverRepoInputs(
+    PTDNF pTdnf,
+    PTDNF_REPOMD_NATIVE_SOLVER_LIVE_REPOSITORY *ppRepos,
+    uint32_t *pdwRepoCount
+    )
+{
+    uint32_t dwError = 0;
+    uint32_t dwCount = 0;
+    PTDNF_REPOMD_NATIVE_SOLVER_LIVE_REPOSITORY pRepos = NULL;
+    PTDNF_REPO_DATA pRepoData = NULL;
+
+    if(!pTdnf || !ppRepos || !pdwRepoCount)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    for(pRepoData = pTdnf->pRepos; pRepoData; pRepoData = pRepoData->pNext)
+    {
+        if(pRepoData->nEnabled && pRepoData->nHasMetaData &&
+           !IsNullOrEmptyString(pRepoData->pszId))
+        {
+            dwCount++;
+        }
+    }
+    if(!dwCount)
+    {
+        dwError = ERROR_TDNF_NO_DATA;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    dwError = TDNFAllocateMemory(
+                  dwCount,
+                  sizeof(TDNF_REPOMD_NATIVE_SOLVER_LIVE_REPOSITORY),
+                  (void **)&pRepos);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    dwCount = 0;
+    for(pRepoData = pTdnf->pRepos; pRepoData; pRepoData = pRepoData->pNext)
+    {
+        if(!pRepoData->nEnabled || !pRepoData->nHasMetaData ||
+           IsNullOrEmptyString(pRepoData->pszId))
+        {
+            continue;
+        }
+        dwError = TDNFGetCachePath(
+                      pTdnf,
+                      pRepoData,
+                      NULL,
+                      NULL,
+                      (char **)&pRepos[dwCount].pszCacheDir);
+        BAIL_ON_TDNF_ERROR(dwError);
+
+        pRepos[dwCount].pszId = pRepoData->pszId;
+        pRepos[dwCount].pszSnapshotFile = pRepoData->pszSnapshotFile;
+        pRepos[dwCount].nPriority = pRepoData->nPriority;
+        pRepos[dwCount].dwCost =
+            TDNF_REPOMD_NATIVE_SOLVER_DEFAULT_REPOSITORY_COST;
+        dwCount++;
+    }
+
+    *ppRepos = pRepos;
+    *pdwRepoCount = dwCount;
+
+cleanup:
+    return dwError;
+error:
+    TDNFGoalFreeNativeSolverRepoInputs(pRepos, dwCount);
+    goto cleanup;
+}
+
+static
+void
+TDNFGoalFreeNativeSolverRepoInputs(
+    PTDNF_REPOMD_NATIVE_SOLVER_LIVE_REPOSITORY pRepos,
+    uint32_t dwRepoCount
+    )
+{
+    uint32_t dwIndex = 0;
+
+    if(!pRepos)
+    {
+        return;
+    }
+    for(dwIndex = 0; dwIndex < dwRepoCount; dwIndex++)
+    {
+        char *pszCacheDir = (char *)pRepos[dwIndex].pszCacheDir;
+        TDNF_SAFE_FREE_MEMORY(pszCacheDir);
+        pRepos[dwIndex].pszCacheDir = NULL;
+    }
+    TDNF_SAFE_FREE_MEMORY(pRepos);
+}
+
+static
+uint32_t
+TDNFGoalBuildNativeSolverJobs(
+    PTDNF pTdnf,
+    const Queue *pQueueJobs,
+    PTDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB *ppJobs,
+    uint32_t *pdwJobCount
+    )
+{
+    uint32_t dwError = 0;
+    uint32_t dwCount = 0;
+    uint32_t dwIndex = 0;
+    PTDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB pJobs = NULL;
+    Pool *pPool = NULL;
+
+    if(!pTdnf || !pTdnf->pSack || !pTdnf->pSack->pPool || !pQueueJobs ||
+       !ppJobs || !pdwJobCount || pQueueJobs->count <= 0 ||
+       pQueueJobs->count % 2 != 0)
+    {
+        dwError = ERROR_TDNF_INVALID_PARAMETER;
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    pPool = pTdnf->pSack->pPool;
+    dwCount = (uint32_t)pQueueJobs->count / 2;
+    dwError = TDNFAllocateMemory(
+                  dwCount,
+                  sizeof(TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB),
+                  (void **)&pJobs);
+    BAIL_ON_TDNF_ERROR(dwError);
+
+    for(dwIndex = 0; dwIndex < dwCount; dwIndex++)
+    {
+        Id how = pQueueJobs->elements[dwIndex * 2];
+        Id dwPkgId = pQueueJobs->elements[dwIndex * 2 + 1];
+        Solvable *pSolvable = NULL;
+
+        if(how != (SOLVER_SOLVABLE | SOLVER_INSTALL) ||
+           dwPkgId <= 0 || dwPkgId >= pPool->nsolvables)
+        {
+            dwError = ERROR_TDNF_CALL_NOT_SUPPORTED;
+            BAIL_ON_TDNF_ERROR(dwError);
+        }
+        pSolvable = pool_id2solvable(pPool, dwPkgId);
+        if(!pSolvable || !pSolvable->repo ||
+           pSolvable->repo == pPool->installed ||
+           pSolvable->repo == pTdnf->pSolvCmdLineRepo ||
+           IsNullOrEmptyString(pSolvable->repo->name) ||
+           !strcmp(pSolvable->repo->name, CMDLINE_REPO_NAME))
+        {
+            dwError = ERROR_TDNF_CALL_NOT_SUPPORTED;
+            BAIL_ON_TDNF_ERROR(dwError);
+        }
+
+        pJobs[dwIndex].pszRepository = pSolvable->repo->name;
+        dwError = SolvGetNevraFromId(
+                      pTdnf->pSack,
+                      dwPkgId,
+                      &pJobs[dwIndex].dwEpoch,
+                      (char **)&pJobs[dwIndex].pszName,
+                      (char **)&pJobs[dwIndex].pszVersion,
+                      (char **)&pJobs[dwIndex].pszRelease,
+                      (char **)&pJobs[dwIndex].pszArch,
+                      NULL);
+        BAIL_ON_TDNF_ERROR(dwError);
+    }
+
+    *ppJobs = pJobs;
+    *pdwJobCount = dwCount;
+
+cleanup:
+    return dwError;
+error:
+    TDNFGoalFreeNativeSolverJobs(pJobs, dwCount);
+    goto cleanup;
+}
+
+static
+void
+TDNFGoalFreeNativeSolverJobs(
+    PTDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB pJobs,
+    uint32_t dwJobCount
+    )
+{
+    uint32_t dwIndex = 0;
+
+    if(!pJobs)
+    {
+        return;
+    }
+    for(dwIndex = 0; dwIndex < dwJobCount; dwIndex++)
+    {
+        char *pszName = (char *)pJobs[dwIndex].pszName;
+        char *pszVersion = (char *)pJobs[dwIndex].pszVersion;
+        char *pszRelease = (char *)pJobs[dwIndex].pszRelease;
+        char *pszArch = (char *)pJobs[dwIndex].pszArch;
+        TDNF_SAFE_FREE_MEMORY(pszName);
+        TDNF_SAFE_FREE_MEMORY(pszVersion);
+        TDNF_SAFE_FREE_MEMORY(pszRelease);
+        TDNF_SAFE_FREE_MEMORY(pszArch);
+        pJobs[dwIndex].pszName = NULL;
+        pJobs[dwIndex].pszVersion = NULL;
+        pJobs[dwIndex].pszRelease = NULL;
+        pJobs[dwIndex].pszArch = NULL;
+    }
+    TDNF_SAFE_FREE_MEMORY(pJobs);
+}
+
+static
+int
+TDNFGoalAllPackagesConsidered(
+    const Pool *pPool
+    )
+{
+    Id dwPkgId = 0;
+
+    if(!pPool)
+    {
+        return 0;
+    }
+    if(!pPool->considered)
+    {
+        return 1;
+    }
+    for(dwPkgId = 1; dwPkgId < pPool->nsolvables; dwPkgId++)
+    {
+        Solvable *pSolvable = pool_id2solvable((Pool *)pPool, dwPkgId);
+        if(pSolvable && pSolvable->repo &&
+           !MAPTST(pPool->considered, dwPkgId))
+        {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 uint32_t

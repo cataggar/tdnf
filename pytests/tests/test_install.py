@@ -6,6 +6,8 @@
 # of the License are located in the COPYING file of this distribution.
 #
 
+import shutil
+
 import pytest
 
 PKGNAME_OBSED_VER = "tdnf-test-dummy-obsoleted=0.1"
@@ -71,6 +73,33 @@ def test_install_testonly(utils):
 
     utils.run(['tdnf', 'install', '-y', '--nogpgcheck', '--testonly', pkgname])
     assert not utils.check_package(pkgname)
+
+
+def test_install_debugsolver_native_shadow(utils):
+    pkgname = utils.config["mulversion_pkgname"]
+    utils.erase_package(pkgname)
+
+    try:
+        ret = utils.run([
+            'tdnf', 'install', '-y', '--nogpgcheck', '--testonly',
+            '--debugsolver', '--noautoremove', pkgname,
+        ])
+        assert ret['retval'] == 0
+        assert 'native-solver-shadow: projected match' in \
+            '\n'.join(ret['stdout'] + ret['stderr'])
+        assert not utils.check_package(pkgname)
+        shutil.rmtree('debugdata', ignore_errors=True)
+
+        ret = utils.run([
+            'tdnf', 'install', '-y', '--nogpgcheck', '--urls',
+            '--debugsolver', '--noautoremove', '--alldeps', pkgname,
+        ])
+        assert ret['retval'] == 0
+        assert 'native-solver-shadow: unavailable' in \
+            '\n'.join(ret['stdout'] + ret['stderr'])
+        assert not utils.check_package(pkgname)
+    finally:
+        shutil.rmtree('debugdata', ignore_errors=True)
 
 
 # install multiple packages, one that doesn't exist

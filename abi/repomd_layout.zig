@@ -1,6 +1,7 @@
 const std = @import("std");
 const solver_result_abi = @import("solver_result_abi");
 const solver_shadow_abi = @import("solver_shadow_abi");
+const solver_live_abi = @import("solver_live_abi");
 const c = @cImport({
     @cInclude("tdnf.h");
     @cInclude("tdnfrepomd.h");
@@ -471,6 +472,35 @@ test "native solver shadow ABI mirror matches the public C layouts" {
             "dwDifferenceIndex",
             "dwNativeCount",
             "dwLegacyCount",
+        },
+    );
+}
+
+test "native solver live ABI mirrors match the public C layouts" {
+    try expectSameLayout(
+        solver_live_abi.Repository,
+        c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_REPOSITORY,
+        .{
+            "pszId",
+            "pszCacheDir",
+            "pszSnapshotFile",
+            "nPriority",
+            "dwCost",
+        },
+    );
+    try expectSameLayout(
+        solver_live_abi.Job,
+        c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB,
+        .{
+            "pszRepository",
+            "pszName",
+            "pszVersion",
+            "pszRelease",
+            "pszArch",
+            "pszChecksumType",
+            "pszChecksumValue",
+            "dwEpoch",
+            "nChecksumIsPkgId",
         },
     );
 }

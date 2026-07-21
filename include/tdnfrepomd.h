@@ -319,6 +319,34 @@ typedef struct _TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT
     uint32_t dwLegacyCount;
 } TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT;
 
+typedef struct _TDNF_REPOMD_NATIVE_SOLVER_LIVE_REPOSITORY
+{
+    const char *pszId;
+    const char *pszCacheDir;
+    const char *pszSnapshotFile;
+    int32_t nPriority;
+    uint32_t dwCost;
+} TDNF_REPOMD_NATIVE_SOLVER_LIVE_REPOSITORY,
+ *PTDNF_REPOMD_NATIVE_SOLVER_LIVE_REPOSITORY;
+
+typedef struct _TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB
+{
+    const char *pszRepository;
+    const char *pszName;
+    const char *pszVersion;
+    const char *pszRelease;
+    const char *pszArch;
+    const char *pszChecksumType;
+    const char *pszChecksumValue;
+    uint32_t dwEpoch;
+    int nChecksumIsPkgId;
+} TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB,
+ *PTDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB;
+
+enum {
+    TDNF_REPOMD_NATIVE_SOLVER_DEFAULT_REPOSITORY_COST = 1000
+};
+
 #ifndef RPMDB_REPORT_PROGRESS
 #define RPMDB_REPORT_PROGRESS           (1 << 8)
 #define RPM_ADD_WITH_PKGID             (1 << 9)
@@ -605,6 +633,24 @@ TDNFRepoMdNativeSolverResultFree(
 uint32_t
 TDNFRepoMdNativeSolverResultCompare(
     const TDNF_REPOMD_NATIVE_SOLVER_RESULT *pNative,
+    const TDNF_SOLVED_PKG_INFO *pLegacy,
+    TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT *pComparison
+    );
+
+/*
+ * Produce a strict native solve from live cached metadata and rpmdb inputs,
+ * then compare its exact install/erase projection with the authoritative
+ * legacy result. This operation is observational: it does not mutate any
+ * input and returns mismatch or unsupported as comparison statuses.
+ */
+uint32_t
+TDNFRepoMdNativeSolverLiveCompare(
+    const TDNF_REPOMD_NATIVE_SOLVER_LIVE_REPOSITORY *pRepositories,
+    uint32_t dwRepositoryCount,
+    const TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB *pJobs,
+    uint32_t dwJobCount,
+    const tdnf_rpm_config *pRpmConfig,
+    const char *pszNativeArch,
     const TDNF_SOLVED_PKG_INFO *pLegacy,
     TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT *pComparison
     );
