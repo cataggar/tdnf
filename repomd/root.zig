@@ -24,6 +24,7 @@ pub const query_native = @import("query_native.zig");
 pub const transaction_native = @import("transaction_native.zig");
 pub const solver_model = @import("solver_model.zig");
 pub const solver_identity = @import("solver_identity.zig");
+pub const solver_live = @import("solver_live.zig");
 pub const solver_native = @import("solver_native.zig");
 pub const solver_visibility = @import("solver_visibility.zig");
 pub const solver_coordinator = @import("solver_coordinator.zig");
