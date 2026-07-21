@@ -186,13 +186,8 @@ pub const RepositoryIndex = struct {
         var results = std.array_list.Managed(PackageIndex).init(allocator);
         defer results.deinit();
 
-        const is_glob = containsGlobMeta(trimmed);
         for (self.repository.packages, 0..) |pkg, package_index| {
-            const matches = if (is_glob)
-                globMatch(trimmed, pkg.nevra.name, options.ignore_case)
-            else
-                asciiEql(trimmed, pkg.nevra.name, options.ignore_case);
-            if (matches) {
+            if (nameMatchesPattern(trimmed, pkg.nevra.name, options)) {
                 try results.append(package_index);
             }
         }
@@ -401,6 +396,18 @@ pub const RepositoryIndex = struct {
         _ = self;
     }
 };
+
+pub fn nameMatchesPattern(
+    pattern: []const u8,
+    name: []const u8,
+    options: NameMatchOptions,
+) bool {
+    const trimmed = trimAsciiWhitespace(pattern);
+    return if (containsGlobMeta(trimmed))
+        globMatch(trimmed, name, options.ignore_case)
+    else
+        asciiEql(trimmed, name, options.ignore_case);
+}
 
 pub fn compareEvr(
     left_epoch: ?u32,

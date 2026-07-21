@@ -15,6 +15,7 @@ pub const RepositoryKind = enum {
 };
 
 pub const default_repository_priority: i32 = 50;
+pub const default_repository_cost: u32 = 1000;
 
 pub const InstallReason = enum {
     unknown,
@@ -34,7 +35,7 @@ pub const RepositoryInput = struct {
     kind: RepositoryKind = .available,
     /// Lower values are preferred, matching tdnf repository priority.
     priority: i32 = default_repository_priority,
-    cost: u32 = 1000,
+    cost: u32 = default_repository_cost,
     installed_states: []const InstalledState = &.{},
 };
 
