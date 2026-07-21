@@ -19,6 +19,8 @@
 # its place.
 
 import os
+import shutil
+
 import pytest
 
 REPOFILENAME = "snapshot-obsoletes.repo"
@@ -103,14 +105,19 @@ def test_install_obsoleted_via_snapshot_does_not_pull_obsoleting(utils):
     utils.erase_package(PKGNAME_OBSOLETED)
     utils.erase_package(PKGNAME_OBSOLETING)
 
-    ret = utils.run([
-        "tdnf", "-y", "--nogpgcheck",
-        "--disablerepo=*", "--repoid", REPONAME,
-        "install", PKGNAME_OBSOLETED,
-    ])
-    assert ret['retval'] == 0, (
-        f"install of {PKGNAME_OBSOLETED} via snapshot repo failed: {ret['stderr']}"
-    )
+    try:
+        ret = utils.run([
+            "tdnf", "-y", "--nogpgcheck", "--debugsolver", "--noautoremove",
+            "--disablerepo=*", "--repoid", REPONAME,
+            "install", PKGNAME_OBSOLETED,
+        ])
+        assert ret['retval'] == 0, (
+            f"install of {PKGNAME_OBSOLETED} via snapshot repo failed: {ret['stderr']}"
+        )
+        assert "native-solver-shadow: projected match" in \
+            "\n".join(ret['stdout'] + ret['stderr'])
+    finally:
+        shutil.rmtree("debugdata", ignore_errors=True)
 
     # The obsoleted package (or its exact-version equivalent) must be present.
     assert utils.check_package(PKGNAME_OBSOLETED), (

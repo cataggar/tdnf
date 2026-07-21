@@ -133,6 +133,61 @@ pub export fn TDNFRepoMdNativeSolverLiveCompare(
     legacy: ?*const c.TDNF_SOLVED_PKG_INFO,
     comparison: ?*c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT,
 ) u32 {
+    return nativeSolverLiveCompare(
+        raw_repositories,
+        repository_count,
+        raw_jobs,
+        job_count,
+        null,
+        0,
+        false,
+        rpm_config,
+        raw_native_arch,
+        legacy,
+        comparison,
+    );
+}
+
+pub export fn TDNFRepoMdNativeSolverLiveCompareV2(
+    raw_repositories: ?[*]const c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_REPOSITORY,
+    repository_count: u32,
+    raw_jobs: ?[*]const c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB,
+    job_count: u32,
+    raw_hidden_available: ?[*]const c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB,
+    hidden_available_count: u32,
+    rpm_config: ?*const c.tdnf_rpm_config,
+    raw_native_arch: ?[*:0]const u8,
+    legacy: ?*const c.TDNF_SOLVED_PKG_INFO,
+    comparison: ?*c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT,
+) u32 {
+    return nativeSolverLiveCompare(
+        raw_repositories,
+        repository_count,
+        raw_jobs,
+        job_count,
+        raw_hidden_available,
+        hidden_available_count,
+        true,
+        rpm_config,
+        raw_native_arch,
+        legacy,
+        comparison,
+    );
+}
+
+fn nativeSolverLiveCompare(
+    raw_repositories: ?[*]const c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_REPOSITORY,
+    repository_count: u32,
+    raw_jobs: ?[*]const c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB,
+    job_count: u32,
+    raw_hidden_available: ?[*]const c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB,
+    hidden_available_count: u32,
+    has_considered: bool,
+    rpm_config: ?*const c.tdnf_rpm_config,
+    raw_native_arch: ?[*:0]const u8,
+    legacy: ?*const c.TDNF_SOLVED_PKG_INFO,
+    comparison: ?*c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT,
+) u32 {
     clearError();
     const output = comparison orelse {
         setError("null native live comparison output", .{});
@@ -198,7 +253,6 @@ pub export fn TDNFRepoMdNativeSolverLiveCompare(
             .cost = raw.dwCost,
         };
     }
-
     const jobs = allocator.alloc(
         solver_live.JobInput,
         job_count,
@@ -208,48 +262,44 @@ pub export fn TDNFRepoMdNativeSolverLiveCompare(
     };
     defer allocator.free(jobs);
     for (jobs_ptr[0..job_count], jobs) |raw, *job| {
-        const checksum = if (raw.pszChecksumType == null and
-            raw.pszChecksumValue == null)
-            null
-        else if (spanRequired(raw.pszChecksumType)) |kind|
-            if (spanRequired(raw.pszChecksumValue)) |value|
-                solver_identity.Checksum{
-                    .kind = kind,
-                    .value = value,
-                    .is_pkgid = raw.nChecksumIsPkgId != 0,
-                }
-            else {
-                setError("invalid native live job checksum", .{});
-                return c.ERROR_TDNF_INVALID_PARAMETER;
-            }
-        else {
-            setError("invalid native live job checksum", .{});
+        job.* = liveJobFromC(raw) orelse {
+            setError("invalid native live job selector", .{});
             return c.ERROR_TDNF_INVALID_PARAMETER;
         };
-        job.* = .{ .selector = .{
-            .repository = spanRequired(raw.pszRepository) orelse {
-                setError("invalid native live job repository", .{});
-                return c.ERROR_TDNF_INVALID_PARAMETER;
-            },
-            .name = spanRequired(raw.pszName) orelse {
-                setError("invalid native live job name", .{});
-                return c.ERROR_TDNF_INVALID_PARAMETER;
-            },
-            .epoch = raw.dwEpoch,
-            .version = spanRequired(raw.pszVersion) orelse {
-                setError("invalid native live job version", .{});
-                return c.ERROR_TDNF_INVALID_PARAMETER;
-            },
-            .release = spanRequired(raw.pszRelease) orelse {
-                setError("invalid native live job release", .{});
-                return c.ERROR_TDNF_INVALID_PARAMETER;
-            },
-            .arch = spanRequired(raw.pszArch) orelse {
-                setError("invalid native live job architecture", .{});
-                return c.ERROR_TDNF_INVALID_PARAMETER;
-            },
-            .checksum = checksum,
-        } };
+    }
+    var hidden_available: ?[]solver_live.JobInput = null;
+    defer if (hidden_available) |hidden| allocator.free(hidden);
+    if (has_considered) {
+        if (hidden_available_count != 0 and raw_hidden_available == null) {
+            setError("null native live hidden available packages", .{});
+            return c.ERROR_TDNF_INVALID_PARAMETER;
+        }
+        const hidden = allocator.alloc(
+            solver_live.JobInput,
+            hidden_available_count,
+        ) catch {
+            setError(
+                "out of memory translating native live visibility",
+                .{},
+            );
+            return c.ERROR_TDNF_OUT_OF_MEMORY;
+        };
+        if (raw_hidden_available) |hidden_ptr| {
+            for (hidden_ptr[0..hidden_available_count], hidden) |
+                raw,
+                *item,
+            | {
+                item.* = liveJobFromC(raw) orelse {
+                    allocator.free(hidden);
+                    setError(
+                        "invalid native live hidden package selector",
+                        .{},
+                    );
+                    return c.ERROR_TDNF_INVALID_PARAMETER;
+                };
+            }
+        }
+        hidden_available = hidden;
     }
 
     solver_live.compare(
@@ -259,6 +309,7 @@ pub export fn TDNFRepoMdNativeSolverLiveCompare(
             .rpmdb = .{ .config = config },
             .native_arch = native_arch,
             .jobs = jobs,
+            .hidden_available = hidden_available,
         },
         @ptrCast(@alignCast(legacy_result)),
         @ptrCast(output),
@@ -270,6 +321,34 @@ pub export fn TDNFRepoMdNativeSolverLiveCompare(
             c.ERROR_TDNF_CALL_NOT_SUPPORTED;
     };
     return 0;
+}
+
+fn liveJobFromC(
+    raw: c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB,
+) ?solver_live.JobInput {
+    const checksum = if (raw.pszChecksumType == null and
+        raw.pszChecksumValue == null)
+        null
+    else if (spanRequired(raw.pszChecksumType)) |kind|
+        if (spanRequired(raw.pszChecksumValue)) |value|
+            solver_identity.Checksum{
+                .kind = kind,
+                .value = value,
+                .is_pkgid = raw.nChecksumIsPkgId != 0,
+            }
+        else
+            return null
+    else
+        return null;
+    return .{ .selector = .{
+        .repository = spanRequired(raw.pszRepository) orelse return null,
+        .name = spanRequired(raw.pszName) orelse return null,
+        .epoch = raw.dwEpoch,
+        .version = spanRequired(raw.pszVersion) orelse return null,
+        .release = spanRequired(raw.pszRelease) orelse return null,
+        .arch = spanRequired(raw.pszArch) orelse return null,
+        .checksum = checksum,
+    } };
 }
 
 fn spanRequired(value: ?[*:0]const u8) ?[]const u8 {
@@ -519,6 +598,33 @@ test "native live comparison wrapper initializes invalid output" {
         c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT,
     );
     const result = TDNFRepoMdNativeSolverLiveCompare(
+        null,
+        0,
+        null,
+        0,
+        null,
+        null,
+        null,
+        &comparison,
+    );
+
+    try std.testing.expectEqual(
+        @as(u32, c.ERROR_TDNF_INVALID_PARAMETER),
+        result,
+    );
+    try std.testing.expectEqual(
+        @as(u32, c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_INVALID),
+        comparison.dwStatus,
+    );
+}
+
+test "native live comparison v2 wrapper initializes invalid output" {
+    var comparison = std.mem.zeroes(
+        c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT,
+    );
+    const result = TDNFRepoMdNativeSolverLiveCompareV2(
+        null,
+        0,
         null,
         0,
         null,

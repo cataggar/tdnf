@@ -8,6 +8,7 @@ const std = @import("std");
 const metadata = @import("model.zig");
 const query_index = @import("index.zig");
 const solver_model = @import("solver_model.zig");
+const solver_visibility = @import("solver_visibility.zig");
 
 pub const Literal = enum(u64) {
     _,
@@ -198,6 +199,7 @@ const UniverseIndex = struct {
     allocator: std.mem.Allocator,
     universe: *const solver_model.Universe,
     architecture: solver_model.ArchitecturePolicy,
+    visibility: ?*const solver_visibility.Projection,
     names: std.StringHashMap(PackageIdList),
     provides: std.StringHashMap(ProviderList),
     files: std.StringHashMap(PackageIdList),
@@ -206,11 +208,13 @@ const UniverseIndex = struct {
         allocator: std.mem.Allocator,
         universe: *const solver_model.Universe,
         architecture: solver_model.ArchitecturePolicy,
+        visibility: ?*const solver_visibility.Projection,
     ) error{OutOfMemory}!UniverseIndex {
         var index = UniverseIndex{
             .allocator = allocator,
             .universe = universe,
             .architecture = architecture,
+            .visibility = visibility,
             .names = std.StringHashMap(PackageIdList).init(allocator),
             .provides = std.StringHashMap(ProviderList).init(allocator),
             .files = std.StringHashMap(PackageIdList).init(allocator),
@@ -417,6 +421,9 @@ const UniverseIndex = struct {
         package: solver_model.UniversePackage,
     ) bool {
         if (package.installed != null) return true;
+        if (self.visibility) |visibility| {
+            if (!visibility.isVisible(package.id).?) return false;
+        }
         if (isSource(package.source.nevra.arch)) return false;
         return architectureAllows(
             self.architecture.force_arch orelse self.architecture.native_arch,
@@ -538,10 +545,47 @@ pub fn generateBase(
     goal: solver_model.Goal,
     architecture: solver_model.ArchitecturePolicy,
 ) GenerateError!OwnedFormula {
+    return generateBaseInternal(
+        allocator,
+        universe,
+        goal,
+        architecture,
+        null,
+    );
+}
+
+pub fn generateProjectedBase(
+    allocator: std.mem.Allocator,
+    universe: *const solver_model.Universe,
+    visibility: *const solver_visibility.Projection,
+    goal: solver_model.Goal,
+    architecture: solver_model.ArchitecturePolicy,
+) GenerateError!OwnedFormula {
+    return generateBaseInternal(
+        allocator,
+        universe,
+        goal,
+        architecture,
+        visibility,
+    );
+}
+
+fn generateBaseInternal(
+    allocator: std.mem.Allocator,
+    universe: *const solver_model.Universe,
+    goal: solver_model.Goal,
+    architecture: solver_model.ArchitecturePolicy,
+    visibility: ?*const solver_visibility.Projection,
+) GenerateError!OwnedFormula {
     if (!architecture.allow_multilib) return error.UnsupportedPolicy;
     if (goal.jobs.len > std.math.maxInt(u32)) return error.TooManyClauses;
 
-    var universe_index = try UniverseIndex.init(allocator, universe, architecture);
+    var universe_index = try UniverseIndex.init(
+        allocator,
+        universe,
+        architecture,
+        visibility,
+    );
     defer universe_index.deinit();
 
     const package_states = try allocator.alloc(PackageState, universe.packages.len);
@@ -568,7 +612,12 @@ pub fn generateBase(
     var builder = FormulaBuilder.init(allocator);
     defer builder.deinit();
 
-    try generateNotInstallable(&builder, universe, architecture);
+    try generateNotInstallable(
+        &builder,
+        universe,
+        architecture,
+        visibility,
+    );
     try generateRequirements(&builder, &universe_index);
     try generateConflicts(&builder, &universe_index);
     try generateObsoletes(&builder, &universe_index);
@@ -725,11 +774,20 @@ fn generateNotInstallable(
     builder: *FormulaBuilder,
     universe: *const solver_model.Universe,
     architecture: solver_model.ArchitecturePolicy,
+    visibility: ?*const solver_visibility.Projection,
 ) GenerateError!void {
     const wanted_arch = architecture.force_arch orelse architecture.native_arch;
     for (universe.packages) |package| {
-        if (package.installed != null or isSource(package.source.nevra.arch) or
-            architectureAllows(wanted_arch, package.source.nevra.arch))
+        const is_visible = if (visibility) |projection|
+            projection.isVisible(package.id).?
+        else
+            true;
+        if (package.installed != null) {
+            continue;
+        }
+        if (is_visible and
+            (isSource(package.source.nevra.arch) or
+                architectureAllows(wanted_arch, package.source.nevra.arch)))
         {
             continue;
         }

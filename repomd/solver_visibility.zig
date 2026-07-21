@@ -27,9 +27,11 @@ pub const HiddenReason = packed struct {
     snapshot: bool = false,
     exclude: bool = false,
     minimum_version: bool = false,
+    considered: bool = false,
 
     pub fn any(self: HiddenReason) bool {
-        return self.snapshot or self.exclude or self.minimum_version;
+        return self.snapshot or self.exclude or self.minimum_version or
+            self.considered;
     }
 };
 
@@ -41,6 +43,7 @@ pub const BuildError = error{
     SnapshotRepositoryNotAvailable,
     InvalidExcludePattern,
     InvalidMinimumVersion,
+    InvalidConsideredLength,
 };
 
 /// Move-only PackageId-aligned visibility projection.
@@ -108,6 +111,33 @@ pub const Projection = struct {
             is_visible.* = !reasons.any();
         }
 
+        return .{
+            .allocator = allocator,
+            .visible = visible,
+            .hidden_reasons = hidden_reasons,
+        };
+    }
+
+    /// Copy an authoritative PackageId-aligned considered mask.
+    pub fn initConsidered(
+        allocator: std.mem.Allocator,
+        universe: *const solver_model.Universe,
+        considered: []const bool,
+    ) BuildError!Projection {
+        if (considered.len != universe.packages.len) {
+            return error.InvalidConsideredLength;
+        }
+
+        const visible = try allocator.dupe(bool, considered);
+        errdefer allocator.free(visible);
+        const hidden_reasons = try allocator.alloc(
+            HiddenReason,
+            universe.packages.len,
+        );
+        errdefer allocator.free(hidden_reasons);
+        for (considered, hidden_reasons) |is_considered, *reasons| {
+            reasons.* = .{ .considered = !is_considered };
+        }
         return .{
             .allocator = allocator,
             .visible = visible,
@@ -488,6 +518,47 @@ test "visibility rejects invalid snapshot and policy inputs" {
             }},
         }),
     );
+    try std.testing.expectError(
+        error.InvalidConsideredLength,
+        Projection.initConsidered(
+            std.testing.allocator,
+            &universe,
+            &.{true},
+        ),
+    );
+}
+
+test "visibility copies an authoritative considered mask" {
+    var packages = [_]model.Package{
+        testPackage("visible", null, "1", "1", "x86_64"),
+        testPackage("hidden", null, "1", "1", "x86_64"),
+    };
+    const inputs = [_]solver_model.RepositoryInput{.{
+        .id = "repo",
+        .model = &.{ .packages = &packages },
+    }};
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &inputs,
+    );
+    defer universe.deinit();
+    var considered = [_]bool{ true, false };
+    var projection = try Projection.initConsidered(
+        std.testing.allocator,
+        &universe,
+        &considered,
+    );
+    defer projection.deinit();
+    considered[1] = true;
+
+    try std.testing.expect(projection.isVisible(@enumFromInt(0)).?);
+    try std.testing.expect(!projection.isVisible(@enumFromInt(1)).?);
+    try std.testing.expect(
+        projection.hiddenReason(@enumFromInt(1)).?.considered,
+    );
+    try std.testing.expect(
+        !projection.hiddenReason(@enumFromInt(1)).?.snapshot,
+    );
 }
 
 fn allocationFailureCase(
@@ -504,6 +575,15 @@ fn allocationFailureCase(
         universe.packages.len,
         projection.visible.len,
     );
+    const considered = try allocator.alloc(bool, universe.packages.len);
+    defer allocator.free(considered);
+    @memset(considered, true);
+    var exact = try Projection.initConsidered(
+        allocator,
+        universe,
+        considered,
+    );
+    defer exact.deinit();
 }
 
 test "visibility projection cleans every allocation failure" {

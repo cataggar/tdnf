@@ -75,9 +75,6 @@ pub fn solve(
 }
 
 /// Strict pre-runtime entry point for already translated live inputs.
-///
-/// Hidden-package semantics remain unsupported until they are frozen against
-/// libsolv's live considered map.
 pub fn solveProjected(
     allocator: std.mem.Allocator,
     universe: *const solver_model.Universe,
@@ -90,13 +87,21 @@ pub fn solveProjected(
     {
         return error.InvalidVisibility;
     }
-    for (visibility.visible) |is_visible| {
-        if (!is_visible) return error.UnsupportedVisibility;
-    }
-
     var identity = try solver_identity.Index.init(allocator, universe);
     defer identity.deinit();
-    return solve(allocator, universe, goal, policy);
+    if (!hasHiddenPackages(visibility)) {
+        return solve(allocator, universe, goal, policy);
+    }
+    if (policy.installonly_names.len != 0) {
+        return error.UnsupportedVisibility;
+    }
+    return solveOrdinaryProjected(
+        allocator,
+        universe,
+        visibility,
+        goal,
+        policy,
+    );
 }
 
 fn solveOrdinary(
@@ -105,12 +110,37 @@ fn solveOrdinary(
     goal: solver_model.Goal,
     policy: solver_model.SolvePolicy,
 ) SolveError!OwnedSolveResult {
-    var base = try solver_rules.generateBase(
+    return solveOrdinaryProjected(
         allocator,
         universe,
+        null,
         goal,
-        policy.architecture,
+        policy,
     );
+}
+
+fn solveOrdinaryProjected(
+    allocator: std.mem.Allocator,
+    universe: *const solver_model.Universe,
+    visibility: ?*const solver_visibility.Projection,
+    goal: solver_model.Goal,
+    policy: solver_model.SolvePolicy,
+) SolveError!OwnedSolveResult {
+    var base = if (visibility) |projection|
+        try solver_rules.generateProjectedBase(
+            allocator,
+            universe,
+            projection,
+            goal,
+            policy.architecture,
+        )
+    else
+        try solver_rules.generateBase(
+            allocator,
+            universe,
+            goal,
+            policy.architecture,
+        );
     defer base.deinit();
     var prepared = try solver_policy.prepareWithOptions(
         allocator,
@@ -134,6 +164,7 @@ fn solveOrdinary(
         if (prepared.protectedRemoval(model) != null) {
             return error.ProtectedPackage;
         }
+
         return .{
             .universe = universe,
             .result = try solver_result.materialize(allocator, .{
@@ -166,6 +197,15 @@ fn solveOrdinary(
         }),
         .effective_job_count = goal.jobs.len,
     };
+}
+
+fn hasHiddenPackages(
+    visibility: *const solver_visibility.Projection,
+) bool {
+    for (visibility.visible) |is_visible| {
+        if (!is_visible) return true;
+    }
+    return false;
 }
 
 fn solveInstallonly(
@@ -281,7 +321,7 @@ test "projected solve materializes and deep copies an exact install" {
     try std.testing.expectEqual(@as(u32, 1), c_result.dwActionCount);
 }
 
-test "projected solve rejects hidden and misaligned visibility" {
+test "projected solve rejects an exact hidden available install" {
     var packages = [_]@import("model.zig").Package{
         testPackage("candidate"),
     };
@@ -301,16 +341,33 @@ test "projected solve rejects hidden and misaligned visibility" {
     );
     defer hidden.deinit();
     try std.testing.expectError(
-        error.UnsupportedVisibility,
+        error.Unsatisfiable,
         solveProjected(
             std.testing.allocator,
             &universe,
             &hidden,
-            .{ .jobs = &.{} },
+            .{ .jobs = &.{.{
+                .action = .install,
+                .selection = .{ .package = @enumFromInt(0) },
+            }} },
             testPolicy(),
         ),
     );
+}
 
+test "projected solve rejects misaligned visibility" {
+    var packages = [_]@import("model.zig").Package{
+        testPackage("candidate"),
+    };
+    const inputs = [_]solver_model.RepositoryInput{.{
+        .id = "repo",
+        .model = &.{ .packages = &packages },
+    }};
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &inputs,
+    );
+    defer universe.deinit();
     const invalid = solver_visibility.Projection{
         .allocator = std.testing.allocator,
         .visible = &.{},
@@ -325,6 +382,65 @@ test "projected solve rejects hidden and misaligned visibility" {
             .{ .jobs = &.{} },
             testPolicy(),
         ),
+    );
+}
+
+test "projected solve keeps a hidden installed package" {
+    var packages = [_]@import("model.zig").Package{
+        testPackage("installed"),
+    };
+    const installed_states = [_]solver_model.InstalledState{
+        .{ .rpmdb_hnum = 1 },
+    };
+    const inputs = [_]solver_model.RepositoryInput{.{
+        .id = "@System",
+        .model = &.{ .packages = &packages },
+        .kind = .installed,
+        .installed_states = &installed_states,
+    }};
+    var universe = try solver_model.Universe.init(
+        std.testing.allocator,
+        &inputs,
+    );
+    defer universe.deinit();
+    var hidden = try solver_visibility.Projection.initConsidered(
+        std.testing.allocator,
+        &universe,
+        &.{false},
+    );
+    defer hidden.deinit();
+
+    var solved = try solveProjected(
+        std.testing.allocator,
+        &universe,
+        &hidden,
+        .{ .jobs = &.{} },
+        testPolicy(),
+    );
+    defer solved.deinit();
+    try std.testing.expectEqualSlices(
+        solver_model.PackageId,
+        &.{@enumFromInt(0)},
+        solved.result.selected,
+    );
+
+    var erase_policy = testPolicy();
+    erase_policy.allow_erasing = true;
+    var erased = try solveProjected(
+        std.testing.allocator,
+        &universe,
+        &hidden,
+        .{ .jobs = &.{.{
+            .action = .erase,
+            .selection = .{ .package = @enumFromInt(0) },
+        }} },
+        erase_policy,
+    );
+    defer erased.deinit();
+    try std.testing.expectEqual(@as(usize, 0), erased.result.selected.len);
+    try std.testing.expectEqual(
+        solver_model.ActionKind.erase,
+        erased.result.outcome.actions[0].kind,
     );
 }
 

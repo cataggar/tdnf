@@ -656,6 +656,27 @@ TDNFRepoMdNativeSolverLiveCompare(
     );
 
 /*
+ * Version 2 additionally accepts the exact available-package complement of
+ * the authoritative Pool.considered map. Entries use the live-job selector
+ * layout but are visibility inputs, not jobs. A null pointer is valid only
+ * when dwHiddenAvailableCount is zero. Clear installed-package bits are
+ * intentionally omitted: libsolv retains those packages as providers.
+ */
+uint32_t
+TDNFRepoMdNativeSolverLiveCompareV2(
+    const TDNF_REPOMD_NATIVE_SOLVER_LIVE_REPOSITORY *pRepositories,
+    uint32_t dwRepositoryCount,
+    const TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB *pJobs,
+    uint32_t dwJobCount,
+    const TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB *pHiddenAvailable,
+    uint32_t dwHiddenAvailableCount,
+    const tdnf_rpm_config *pRpmConfig,
+    const char *pszNativeArch,
+    const TDNF_SOLVED_PKG_INFO *pLegacy,
+    TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT *pComparison
+    );
+
+/*
  * Run the native metadata-backed implementation of repoquery-style
  * selectors and field population. `pRepoqueryArgs` uses the public
  * TDNF_REPOQUERY_ARGS layout from tdnftypes.h.
