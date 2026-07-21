@@ -31,6 +31,8 @@ pub const Input = struct {
     rpmdb: installed_repository.Source,
     native_arch: []const u8,
     jobs: []const JobInput,
+    /// Null means the caller did not provide an authoritative considered map.
+    hidden_available: ?[]const JobInput = null,
 };
 
 pub const ProduceError =
@@ -116,7 +118,9 @@ pub fn produce(
         {
             return error.InvalidInput;
         }
-        if (repository.snapshot_file != null) {
+        if (repository.snapshot_file != null and
+            input.hidden_available == null)
+        {
             return error.UnsupportedInput;
         }
         if (repository.priority == std.math.minInt(i32)) {
@@ -159,7 +163,21 @@ pub fn produce(
         };
     }
 
-    var visibility = try solver_visibility.Projection.init(
+    var visibility = if (input.hidden_available) |hidden| blk: {
+        const considered = try arena.alloc(bool, universe.packages.len);
+        @memset(considered, true);
+        for (hidden) |item| {
+            const package = try identity.resolveAvailable(item.selector);
+            const package_index: usize = @intFromEnum(package);
+            if (!considered[package_index]) return error.InvalidInput;
+            considered[package_index] = false;
+        }
+        break :blk try solver_visibility.Projection.initConsidered(
+            parent_allocator,
+            universe,
+            considered,
+        );
+    } else try solver_visibility.Projection.init(
         parent_allocator,
         universe,
         .{},
@@ -425,6 +443,44 @@ test "live producer fails closed on unsupported and ambiguous input" {
     );
 }
 
+test "live producer applies an authoritative considered projection" {
+    var fixture = try Fixture.create();
+    defer fixture.cleanup();
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var cache_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var repositories: [1]RepositoryInput = undefined;
+    var jobs: [1]JobInput = undefined;
+    var input = fixtureInput(
+        &fixture,
+        &root_buffer,
+        &cache_buffer,
+        &repositories,
+        &jobs,
+    );
+    input.hidden_available = input.jobs;
+    try std.testing.expectError(
+        error.Unsatisfiable,
+        produce(std.testing.allocator, input),
+    );
+
+    var repository = input.repositories[0];
+    repository.snapshot_file = "authoritative-considered";
+    repositories[0] = repository;
+    input.hidden_available = &.{};
+    var solved = try produce(std.testing.allocator, input);
+    defer solved.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        solved.solved.result.selected.len,
+    );
+
+    input.hidden_available = &.{ jobs[0], jobs[0] };
+    try std.testing.expectError(
+        error.InvalidInput,
+        produce(std.testing.allocator, input),
+    );
+}
+
 fn allocationFailureCase(
     allocator: std.mem.Allocator,
     input: Input,
@@ -454,13 +510,14 @@ test "live producer cleans every allocation failure" {
     var cache_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var repositories: [1]RepositoryInput = undefined;
     var jobs: [1]JobInput = undefined;
-    const input = fixtureInput(
+    var input = fixtureInput(
         &fixture,
         &root_buffer,
         &cache_buffer,
         &repositories,
         &jobs,
     );
+    input.hidden_available = &.{};
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,
         allocationFailureCase,
@@ -475,13 +532,14 @@ test "live comparison cleans every allocation failure" {
     var cache_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var repositories: [1]RepositoryInput = undefined;
     var jobs: [1]JobInput = undefined;
-    const input = fixtureInput(
+    var input = fixtureInput(
         &fixture,
         &root_buffer,
         &cache_buffer,
         &repositories,
         &jobs,
     );
+    input.hidden_available = &.{};
     var legacy_package = std.mem.zeroes(
         solver_shadow_abi.LegacyPackage,
     );

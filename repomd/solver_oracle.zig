@@ -2,6 +2,7 @@ const std = @import("std");
 const metadata = @import("model.zig");
 const solver_model = @import("solver_model.zig");
 const solver_rules = @import("solver_rules.zig");
+const solver_visibility = @import("solver_visibility.zig");
 const solv_bridge = @import("solvbridge.zig");
 
 const c = solv_bridge.libsolv;
@@ -60,9 +61,14 @@ const PoolState = struct {
     pool: *c.Pool,
     package_solvids: []c.Id,
     job_ids: std.array_list.Managed(?solver_model.JobId),
+    considered: ?*c.Map,
 
     fn deinit(self: *PoolState) void {
         self.job_ids.deinit();
+        if (self.considered) |considered| {
+            self.pool.*.considered = null;
+            c.map_free(considered);
+        }
         c.pool_free(self.pool);
     }
 };
@@ -73,13 +79,55 @@ pub fn solve(
     goal: solver_model.Goal,
     policy: solver_model.SolvePolicy,
 ) SolveError!OwnedObservation {
+    return solveInternal(
+        allocator,
+        universe,
+        null,
+        goal,
+        policy,
+    );
+}
+
+pub fn solveProjected(
+    allocator: std.mem.Allocator,
+    universe: *const solver_model.Universe,
+    visibility: *const solver_visibility.Projection,
+    goal: solver_model.Goal,
+    policy: solver_model.SolvePolicy,
+) SolveError!OwnedObservation {
+    if (visibility.visible.len != universe.packages.len or
+        visibility.hidden_reasons.len != universe.packages.len)
+    {
+        return error.InvalidModel;
+    }
+    return solveInternal(
+        allocator,
+        universe,
+        visibility,
+        goal,
+        policy,
+    );
+}
+
+fn solveInternal(
+    allocator: std.mem.Allocator,
+    universe: *const solver_model.Universe,
+    visibility: ?*const solver_visibility.Projection,
+    goal: solver_model.Goal,
+    policy: solver_model.SolvePolicy,
+) SolveError!OwnedObservation {
     try validateInputs(universe, goal, policy);
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     errdefer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var state = try buildPool(arena, universe, policy);
+    var state = try buildPool(
+        arena,
+        universe,
+        policy,
+        visibility,
+    );
     defer state.deinit();
 
     var jobs: c.Queue = undefined;
@@ -289,6 +337,7 @@ fn buildPool(
     arena: std.mem.Allocator,
     universe: *const solver_model.Universe,
     policy: solver_model.SolvePolicy,
+    visibility: ?*const solver_visibility.Projection,
 ) SolveError!PoolState {
     const pool = c.pool_create() orelse return error.OutOfMemory;
     errdefer c.pool_free(pool);
@@ -336,10 +385,25 @@ fn buildPool(
     c.pool_addfileprovides(pool);
     c.pool_createwhatprovides(pool);
 
+    const considered = if (visibility) |projection| blk: {
+        const map = try arena.create(c.Map);
+        c.map_init(map, pool.*.nsolvables);
+        c.map_setall(map);
+        for (projection.visible, package_solvids) |
+            is_visible,
+            solvid,
+        | {
+            if (!is_visible) c.map_clr(map, solvid);
+        }
+        pool.*.considered = map;
+        break :blk map;
+    } else null;
+
     return .{
         .pool = pool,
         .package_solvids = package_solvids,
         .job_ids = std.array_list.Managed(?solver_model.JobId).init(std.heap.c_allocator),
+        .considered = considered,
     };
 }
 

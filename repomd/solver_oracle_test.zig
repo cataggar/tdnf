@@ -7,6 +7,7 @@ const oracle = @import("solver_oracle.zig");
 const solver_policy = @import("solver_policy.zig");
 const solver_result = @import("solver_result.zig");
 const solver_rules = @import("solver_rules.zig");
+const solver_visibility = @import("solver_visibility.zig");
 
 const testing = std.testing;
 const golden_schema = "tdnf-libsolv-oracle-v1";
@@ -174,6 +175,23 @@ fn solveNative(
     var solved = try solver_native.solve(
         allocator,
         universe,
+        goal,
+        solve_policy,
+    );
+    return solved.takeResult();
+}
+
+fn solveNativeProjected(
+    allocator: std.mem.Allocator,
+    universe: *const solver_model.Universe,
+    visibility: *const solver_visibility.Projection,
+    goal: solver_model.Goal,
+    solve_policy: solver_model.SolvePolicy,
+) !solver_result.OwnedResult {
+    var solved = try solver_native.solveProjected(
+        allocator,
+        universe,
+        visibility,
         goal,
         solve_policy,
     );
@@ -593,6 +611,159 @@ fn appendFmt(
     const text = try std.fmt.allocPrint(allocator, format, args);
     defer allocator.free(text);
     try out.appendSlice(text);
+}
+
+test "considered mask rejects hidden available packages and providers" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const available = try builder.addRepo("repo", .available, 50);
+    try builder.addPackage(available, .{
+        .name = "provider",
+        .provides = &.{.{ .name = "capability" }},
+    });
+    try builder.addPackage(available, .{
+        .name = "consumer",
+        .requires = &.{.{ .name = "capability" }},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+    var visibility = try solver_visibility.Projection.initConsidered(
+        testing.allocator,
+        &graph.universe,
+        &.{ false, true },
+    );
+    defer visibility.deinit();
+
+    const consumer_goal = solver_model.Goal{ .jobs = &.{.{
+        .action = .install,
+        .selection = .{ .package = @enumFromInt(1) },
+    }} };
+    var consumer = try oracle.solveProjected(
+        testing.allocator,
+        &graph.universe,
+        &visibility,
+        consumer_goal,
+        policy(),
+    );
+    defer consumer.deinit();
+    try testing.expect(consumer.outcome.problems.len != 0);
+    try testing.expectError(
+        error.Unsatisfiable,
+        solver_native.solveProjected(
+            testing.allocator,
+            &graph.universe,
+            &visibility,
+            consumer_goal,
+            policy(),
+        ),
+    );
+
+    const provider_goal = solver_model.Goal{ .jobs = &.{.{
+        .action = .install,
+        .selection = .{ .package = @enumFromInt(0) },
+    }} };
+    var provider = try oracle.solveProjected(
+        testing.allocator,
+        &graph.universe,
+        &visibility,
+        provider_goal,
+        policy(),
+    );
+    defer provider.deinit();
+    try testing.expect(provider.outcome.problems.len != 0);
+    try testing.expectError(
+        error.Unsatisfiable,
+        solver_native.solveProjected(
+            testing.allocator,
+            &graph.universe,
+            &visibility,
+            provider_goal,
+            policy(),
+        ),
+    );
+}
+
+test "considered mask retains hidden installed providers" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    const available = try builder.addRepo("repo", .available, 50);
+    try builder.addPackage(installed, .{
+        .name = "installed-provider",
+        .provides = &.{.{ .name = "capability" }},
+    });
+    try builder.addPackage(available, .{
+        .name = "consumer",
+        .requires = &.{.{ .name = "capability" }},
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+    var visibility = try solver_visibility.Projection.initConsidered(
+        testing.allocator,
+        &graph.universe,
+        &.{ false, true },
+    );
+    defer visibility.deinit();
+
+    const consumer_goal = solver_model.Goal{ .jobs = &.{.{
+        .action = .install,
+        .selection = .{ .package = @enumFromInt(1) },
+    }} };
+    var observation = try oracle.solveProjected(
+        testing.allocator,
+        &graph.universe,
+        &visibility,
+        consumer_goal,
+        policy(),
+    );
+    defer observation.deinit();
+    var native = try solveNativeProjected(
+        testing.allocator,
+        &graph.universe,
+        &visibility,
+        consumer_goal,
+        policy(),
+    );
+    defer native.deinit();
+    try expectNativeMatchesOracle(&native, &observation);
+    try testing.expect(containsSelectedName(
+        &graph,
+        &observation,
+        "installed-provider",
+    ));
+    try testing.expect(containsSelectedName(
+        &graph,
+        &observation,
+        "consumer",
+    ));
+
+    const erase_goal = solver_model.Goal{ .jobs = &.{.{
+        .action = .erase,
+        .selection = .{ .package = @enumFromInt(0) },
+    }} };
+    var erase_policy = policy();
+    erase_policy.allow_erasing = true;
+    var erased = try oracle.solveProjected(
+        testing.allocator,
+        &graph.universe,
+        &visibility,
+        erase_goal,
+        erase_policy,
+    );
+    defer erased.deinit();
+    var native_erased = try solveNativeProjected(
+        testing.allocator,
+        &graph.universe,
+        &visibility,
+        erase_goal,
+        erase_policy,
+    );
+    defer native_erased.deinit();
+    try expectNativeMatchesOracle(&native_erased, &erased);
+    try testing.expectEqual(
+        solver_model.ActionKind.erase,
+        erased.outcome.actions[0].kind,
+    );
 }
 
 test "oracle rejects policies whose semantics are not implemented" {

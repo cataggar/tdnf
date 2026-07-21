@@ -77,7 +77,10 @@ def test_install_testonly(utils):
 
 def test_install_debugsolver_native_shadow(utils):
     pkgname = utils.config["mulversion_pkgname"]
+    hidden_installed = utils.config["sglversion_pkgname"]
     utils.erase_package(pkgname)
+    utils.erase_package(hidden_installed)
+    utils.install_package(hidden_installed)
 
     try:
         ret = utils.run([
@@ -91,6 +94,18 @@ def test_install_debugsolver_native_shadow(utils):
         shutil.rmtree('debugdata', ignore_errors=True)
 
         ret = utils.run([
+            'tdnf', 'install', '-y', '--nogpgcheck', '--testonly',
+            '--debugsolver', '--noautoremove',
+            '--exclude={}'.format(hidden_installed), pkgname,
+        ])
+        assert ret['retval'] == 0
+        assert 'native-solver-shadow: projected match' in \
+            '\n'.join(ret['stdout'] + ret['stderr'])
+        assert not utils.check_package(pkgname)
+        assert utils.check_package(hidden_installed)
+        shutil.rmtree('debugdata', ignore_errors=True)
+
+        ret = utils.run([
             'tdnf', 'install', '-y', '--nogpgcheck', '--urls',
             '--debugsolver', '--noautoremove', '--alldeps', pkgname,
         ])
@@ -100,6 +115,7 @@ def test_install_debugsolver_native_shadow(utils):
         assert not utils.check_package(pkgname)
     finally:
         shutil.rmtree('debugdata', ignore_errors=True)
+        utils.erase_package(hidden_installed)
 
 
 # install multiple packages, one that doesn't exist
