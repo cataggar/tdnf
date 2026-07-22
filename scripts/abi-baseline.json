@@ -12,7 +12,7 @@
     "tdnferror.h": "8edbe06811b4367d7ad4d2b9776391e3cbf3871a3198ec0de76f348993c16ddd",
     "tdnfplugin.h": "5b3c65ab17bcd87a9e682f8af4ce75663214591729b68dec0ae22d5592de2752",
     "tdnfplugineventmap.h": "80fdeaaa13d3802e6095a85a27f9dca6b0b2fb7b2287d43a4a97edec1a0ea48b",
-    "tdnfrepomd.h": "c40041bcfd69d5b3504ccd4a03b0230786d85c949721507b537853240a986c15",
+    "tdnfrepomd.h": "ebc26f1812cc67546c1da54c9bad2bc9dd1229cd4cac6397160ca16929f2c04f",
     "tdnfrpmconfig.h": "3902913a6d2b075d5ad65cc8fb559f7bbb1caee926c1d204b19419644ee8b91b",
     "tdnfrpmtrans.h": "3b91f47299d35169081a565d8556a6dbf04ab5056e50eb25c4c4b4df0472b9e3",
     "tdnftypes.h": "744d8d06215e6ca1d23380092f964029fa437d0654b6e1c22a91d812a7cd9e60"
@@ -247,6 +247,7 @@
       "TDNFRepoMdNativeSearchConfig",
       "TDNFRepoMdNativeSolverLiveCompare",
       "TDNFRepoMdNativeSolverLiveCompareV2",
+      "TDNFRepoMdNativeSolverLiveCompareV3",
       "TDNFRepoMdNativeSolverResultCompare",
       "TDNFRepoMdNativeSolverResultFree",
       "TDNFRepoMdNativeTransactionLastError",

@@ -78,8 +78,12 @@ def test_install_testonly(utils):
 def test_install_debugsolver_native_shadow(utils):
     pkgname = utils.config["mulversion_pkgname"]
     hidden_installed = utils.config["sglversion_pkgname"]
+    alldeps_pkg = 'tdnf-test-cleanreq-leaf1'
+    alldeps_required = 'tdnf-test-cleanreq-required'
     utils.erase_package(pkgname)
     utils.erase_package(hidden_installed)
+    utils.erase_package(alldeps_pkg)
+    utils.erase_package(alldeps_required)
     utils.install_package(hidden_installed)
 
     try:
@@ -105,16 +109,20 @@ def test_install_debugsolver_native_shadow(utils):
         assert utils.check_package(hidden_installed)
         shutil.rmtree('debugdata', ignore_errors=True)
 
+        utils.install_package(alldeps_required)
         ret = utils.run([
             'tdnf', 'install', '-y', '--nogpgcheck', '--urls',
-            '--debugsolver', '--noautoremove', '--alldeps', pkgname,
+            '--debugsolver', '--noautoremove', '--alldeps', alldeps_pkg,
         ])
         assert ret['retval'] == 0
-        assert 'native-solver-shadow: unavailable' in \
+        assert 'native-solver-shadow: projected match' in \
             '\n'.join(ret['stdout'] + ret['stderr'])
-        assert not utils.check_package(pkgname)
+        assert any(alldeps_required in line for line in ret['stdout'])
+        assert not utils.check_package(alldeps_pkg)
     finally:
         shutil.rmtree('debugdata', ignore_errors=True)
+        utils.erase_package(alldeps_pkg)
+        utils.erase_package(alldeps_required)
         utils.erase_package(hidden_installed)
 
 
