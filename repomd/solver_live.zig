@@ -33,6 +33,7 @@ pub const Input = struct {
     jobs: []const JobInput,
     /// Null means the caller did not provide an authoritative considered map.
     hidden_available: ?[]const JobInput = null,
+    include_installed: bool = true,
 };
 
 pub const ProduceError =
@@ -82,33 +83,36 @@ pub fn produce(
     var arena_state = std.heap.ArenaAllocator.init(parent_allocator);
     errdefer arena_state.deinit();
     const arena = arena_state.allocator();
+    const available_offset: usize = @intFromBool(input.include_installed);
     const repository_inputs = try arena.alloc(
         solver_model.RepositoryInput,
-        input.repositories.len + 1,
+        input.repositories.len + available_offset,
     );
     const models = try arena.alloc(
         @import("model.zig").RepositoryModel,
-        input.repositories.len + 1,
+        input.repositories.len + available_offset,
     );
 
-    const installed = try installed_repository.loadModel(
-        arena,
-        input.rpmdb,
-        .{
-            .include_relations = true,
-            .include_files = true,
-            .include_changelogs = false,
-        },
-    );
-    models[0] = installed.repository;
-    repository_inputs[0] = .{
-        .id = system_repository_id,
-        .model = &models[0],
-        .kind = .installed,
-        .installed_states = installed.installed_states,
-    };
+    if (input.include_installed) {
+        const installed = try installed_repository.loadModel(
+            arena,
+            input.rpmdb,
+            .{
+                .include_relations = true,
+                .include_files = true,
+                .include_changelogs = false,
+            },
+        );
+        models[0] = installed.repository;
+        repository_inputs[0] = .{
+            .id = system_repository_id,
+            .model = &models[0],
+            .kind = .installed,
+            .installed_states = installed.installed_states,
+        };
+    }
 
-    for (input.repositories, models[1..], 0..) |
+    for (input.repositories, models[available_offset..], 0..) |
         repository,
         *loaded,
         index,
@@ -135,7 +139,7 @@ pub fn produce(
                 .include_other = false,
             },
         );
-        repository_inputs[index + 1] = .{
+        repository_inputs[index + available_offset] = .{
             .id = try arena.dupe(u8, repository.id),
             .model = loaded,
             .priority = repository.priority,
@@ -356,6 +360,36 @@ test "live producer owns loaded inputs and exact install result" {
     try std.testing.expectEqual(
         @as(u32, 1),
         c_result.dwSelectedPackageCount,
+    );
+}
+
+test "live producer can omit the installed repository" {
+    var fixture = try Fixture.create();
+    defer fixture.cleanup();
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var cache_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var repositories: [1]RepositoryInput = undefined;
+    var jobs: [1]JobInput = undefined;
+    var input = fixtureInput(
+        &fixture,
+        &root_buffer,
+        &cache_buffer,
+        &repositories,
+        &jobs,
+    );
+    input.rpmdb = .{ .root_dir = "/native-solver-alldeps-no-rpmdb" };
+    input.include_installed = false;
+    var solved = try produce(std.testing.allocator, input);
+    defer solved.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), solved.universe.repositories.len);
+    try std.testing.expectEqual(
+        solver_model.RepositoryKind.available,
+        solved.universe.repositories[0].kind,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        solved.solved.result.selected.len,
     );
 }
 
