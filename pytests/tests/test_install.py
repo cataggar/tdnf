@@ -89,7 +89,7 @@ def test_install_debugsolver_native_shadow(utils):
     try:
         ret = utils.run([
             'tdnf', 'install', '-y', '--nogpgcheck', '--testonly',
-            '--debugsolver', '--noautoremove', pkgname,
+            '--debugsolver', pkgname,
         ])
         assert ret['retval'] == 0
         assert 'native-solver-shadow: projected match' in \

@@ -749,6 +749,19 @@ fn validateCleanupPolicy(
         }
     }
     if (!clean_deps) return false;
+    var fresh_exact_install = base.replacement_kind == .none and
+        !options.allow_erasing and
+        !options.installonly_policy and
+        base.jobs.len != 0;
+    for (base.jobs) |job| {
+        if (job.action != .install or
+            std.meta.activeTag(job.selection) != .package)
+        {
+            fresh_exact_install = false;
+            break;
+        }
+    }
+    if (fresh_exact_install) return false;
     if (options.best or base.replacement_kind != .none) {
         return error.UnsupportedPolicy;
     }
