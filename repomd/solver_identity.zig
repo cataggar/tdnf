@@ -60,6 +60,7 @@ pub const ResolveError = error{
 /// Move-only exact-key index whose strings are owned by an arena.
 pub const Index = struct {
     arena_state: std.heap.ArenaAllocator,
+    universe: *const solver_model.Universe,
     entries: []const Entry,
 
     pub fn init(
@@ -124,6 +125,7 @@ pub const Index = struct {
 
         return .{
             .arena_state = arena_state,
+            .universe = universe,
             .entries = entries,
         };
     }
@@ -162,6 +164,31 @@ pub const Index = struct {
             .repository = repository,
             .rpmdb_hnum = rpmdb_hnum,
         } });
+    }
+
+    pub fn resolveInstalledNevra(
+        self: *const Index,
+        selector: AvailableSelector,
+    ) ResolveError!solver_model.PackageId {
+        try validateSelector(selector);
+        if (selector.checksum != null) return error.InvalidPackageSelector;
+        var match: ?solver_model.PackageId = null;
+        for (self.entries) |entry| {
+            const installed = switch (entry.key) {
+                .installed => |value| value,
+                .available => continue,
+            };
+            const package = self.universe.package(entry.package) orelse
+                return error.PackageNotFound;
+            if (!std.mem.eql(
+                u8,
+                installed.repository,
+                selector.repository,
+            ) or !matchesNevra(package.source.nevra, selector)) continue;
+            if (match != null) return error.AmbiguousPackageSelector;
+            match = entry.package;
+        }
+        return match orelse error.PackageNotFound;
     }
 
     pub fn resolveAvailable(
@@ -238,11 +265,13 @@ fn matchesSelector(
     selector: AvailableSelector,
 ) bool {
     if (!std.mem.eql(u8, key.repository, selector.repository) or
-        !std.mem.eql(u8, key.name, selector.name) or
-        key.epoch != (selector.epoch orelse 0) or
-        !std.mem.eql(u8, key.version, selector.version) or
-        !std.mem.eql(u8, key.release, selector.release) or
-        !std.mem.eql(u8, key.arch, selector.arch))
+        !matchesNevra(.{
+            .name = key.name,
+            .epoch = key.epoch,
+            .version = key.version,
+            .release = key.release,
+            .arch = key.arch,
+        }, selector))
     {
         return false;
     }
@@ -252,6 +281,17 @@ fn matchesSelector(
             key.checksum.is_pkgid == checksum.is_pkgid;
     }
     return true;
+}
+
+fn matchesNevra(
+    nevra: model.Nevra,
+    selector: AvailableSelector,
+) bool {
+    return std.mem.eql(u8, nevra.name, selector.name) and
+        (nevra.epoch orelse 0) == (selector.epoch orelse 0) and
+        std.mem.eql(u8, nevra.version, selector.version) and
+        std.mem.eql(u8, nevra.release, selector.release) and
+        std.mem.eql(u8, nevra.arch, selector.arch);
 }
 
 fn entryLessThan(_: void, left: Entry, right: Entry) bool {
@@ -352,10 +392,12 @@ test "index preserves installed duplicates and rejects ambiguous available selec
     var installed_packages = [_]model.Package{
         testPackage("duplicate", null, "installed"),
         testPackage("duplicate", null, "installed"),
+        testPackage("unique", null, "installed-unique"),
     };
     const installed_states = [_]solver_model.InstalledState{
         .{ .rpmdb_hnum = 41 },
         .{ .rpmdb_hnum = 73 },
+        .{ .rpmdb_hnum = 91 },
     };
     var repository_a_packages = [_]model.Package{
         testPackage("candidate", null, "checksum-a"),
@@ -398,6 +440,30 @@ test "index preserves installed duplicates and rejects ambiguous available selec
     try std.testing.expectEqual(
         @as(u32, 73),
         universe.package(second).?.installed.?.rpmdb_hnum,
+    );
+    const installed_selector = AvailableSelector{
+        .repository = "@System",
+        .name = "duplicate",
+        .epoch = 0,
+        .version = "1.0",
+        .release = "1",
+        .arch = "x86_64",
+    };
+    try std.testing.expectError(
+        error.AmbiguousPackageSelector,
+        index.resolveInstalledNevra(installed_selector),
+    );
+    const unique = try index.resolveInstalledNevra(.{
+        .repository = installed_selector.repository,
+        .name = "unique",
+        .epoch = installed_selector.epoch,
+        .version = installed_selector.version,
+        .release = installed_selector.release,
+        .arch = installed_selector.arch,
+    });
+    try std.testing.expectEqual(
+        @as(u32, 91),
+        universe.package(unique).?.installed.?.rpmdb_hnum,
     );
 
     const selector = AvailableSelector{
