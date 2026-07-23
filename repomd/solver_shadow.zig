@@ -22,6 +22,7 @@ const reason_duplicate_key: u32 = 6;
 
 const action_install: u32 = 1;
 const action_erase: u32 = 2;
+const action_reinstall: u32 = 5;
 
 const Key = struct {
     repository: []const u8,
@@ -42,6 +43,7 @@ pub fn compare(
     try validateNative(native);
     _ = try validateLegacyList(legacy.pPkgsToInstall);
     _ = try validateLegacyList(legacy.pPkgsToRemove);
+    _ = try validateLegacyList(legacy.pPkgsToReinstall);
 
     if (native.dwProblemCount != 0) {
         setUnsupported(output, reason_native_problems, 0);
@@ -53,6 +55,13 @@ pub fn compare(
     }
     if (native.dwActionCount != 0) {
         for (native.pActions[0..native.dwActionCount]) |action| {
+            if (action.dwKind == action_reinstall) {
+                if (!hasExactReinstallPrior(native, action)) {
+                    setUnsupported(output, reason_prior_action, action.dwKind);
+                    return;
+                }
+                continue;
+            }
             if (action.dwPriorCount != 0) {
                 setUnsupported(output, reason_prior_action, action.dwKind);
                 return;
@@ -80,6 +89,13 @@ pub fn compare(
         native,
         legacy.pPkgsToRemove,
         action_erase,
+        output,
+    )) return;
+    if (try compareBucket(
+        allocator,
+        native,
+        legacy.pPkgsToReinstall,
+        action_reinstall,
         output,
     )) return;
 
@@ -349,9 +365,42 @@ fn hasUnsupportedLegacyBucket(
     return legacy.pPkgsToDowngrade != null or
         legacy.pPkgsToUpgrade != null or
         legacy.pPkgsUnNeeded != null or
-        legacy.pPkgsToReinstall != null or
         legacy.pPkgsObsoleted != null or
         legacy.pPkgsRemovedByDowngrade != null;
+}
+
+fn hasExactReinstallPrior(
+    native: *const result_abi.Result,
+    action: result_abi.Action,
+) bool {
+    if (action.dwPriorCount != 1) return false;
+    const target = native.pPackages[action.dwPackageRef];
+    const prior_ref = native.pdwPriorPackageRefs[action.dwPriorOffset];
+    const prior = native.pPackages[prior_ref];
+    return target.nRepositoryKind == 2 and
+        prior.nRepositoryKind == 1 and
+        std.mem.eql(
+            u8,
+            std.mem.span(target.pszName.?),
+            std.mem.span(prior.pszName.?),
+        ) and
+        (if (target.nHasEpoch != 0) target.dwEpoch else 0) ==
+            (if (prior.nHasEpoch != 0) prior.dwEpoch else 0) and
+        std.mem.eql(
+            u8,
+            std.mem.span(target.pszVersion.?),
+            std.mem.span(prior.pszVersion.?),
+        ) and
+        std.mem.eql(
+            u8,
+            std.mem.span(target.pszRelease.?),
+            std.mem.span(prior.pszRelease.?),
+        ) and
+        std.mem.eql(
+            u8,
+            std.mem.span(target.pszArch.?),
+            std.mem.span(prior.pszArch.?),
+        );
 }
 
 fn nativeKey(package: *const result_abi.Package) Key {
@@ -536,6 +585,69 @@ test "shadow comparator matches reordered install and erase projections" {
     try compare(std.testing.allocator, &native, &legacy, &output);
     try std.testing.expectEqual(status_projected_match, output.dwStatus);
     try std.testing.expectEqual(reason_none, output.dwReason);
+}
+
+test "shadow comparator matches only an exact single-prior reinstall" {
+    var packages = [_]result_abi.Package{
+        testNativePackage("@System", "alpha", "1"),
+        testNativePackage("available", "alpha", "1"),
+    };
+    for (&packages, 0..) |*package, index| {
+        package.dwPackageId = @intCast(index);
+    }
+    packages[0].nRepositoryKind = 1;
+    packages[0].nHasRpmDbHnum = 1;
+    packages[0].dwRpmDbHnum = 7;
+    var actions = [_]result_abi.Action{
+        std.mem.zeroes(result_abi.Action),
+    };
+    actions[0].dwPackageRef = 1;
+    actions[0].dwKind = action_reinstall;
+    actions[0].dwReason = 1;
+    actions[0].dwPriorCount = 1;
+    var native = testNativeResult(&packages, &actions);
+    var prior_refs = [_]u32{ 0, 0 };
+    var prior_hnums = [_]u32{ 7, 7 };
+    native.pdwPriorPackageRefs = &prior_refs;
+    native.pdwPriorHnums = &prior_hnums;
+    native.dwPriorPackageRefCount = 1;
+    var legacy_package = testLegacyPackage("available", "alpha", "1");
+    var legacy = std.mem.zeroes(shadow_abi.LegacyResult);
+    legacy.pPkgsToReinstall = @ptrCast(&legacy_package);
+    var output: shadow_abi.Comparison = undefined;
+
+    try compare(std.testing.allocator, &native, &legacy, &output);
+    try std.testing.expectEqual(status_projected_match, output.dwStatus);
+
+    legacy_package.pszVersion = "2";
+    try compare(std.testing.allocator, &native, &legacy, &output);
+    try std.testing.expectEqual(status_mismatch, output.dwStatus);
+    try std.testing.expectEqual(action_reinstall, output.dwActionKind);
+
+    legacy_package.pszVersion = "1";
+    packages[0].pszVersion = "0";
+    try compare(std.testing.allocator, &native, &legacy, &output);
+    try std.testing.expectEqual(status_unsupported, output.dwStatus);
+    try std.testing.expectEqual(reason_prior_action, output.dwReason);
+
+    packages[0].pszVersion = "1";
+    actions[0].dwPriorCount = 0;
+    native.pdwPriorPackageRefs = null;
+    native.pdwPriorHnums = null;
+    native.dwPriorPackageRefCount = 0;
+    try compare(std.testing.allocator, &native, &legacy, &output);
+    try std.testing.expectEqual(status_unsupported, output.dwStatus);
+    try std.testing.expectEqual(reason_prior_action, output.dwReason);
+
+    actions[0].dwPriorCount = 2;
+    prior_refs = .{ 0, 0 };
+    prior_hnums = .{ 7, 7 };
+    native.pdwPriorPackageRefs = &prior_refs;
+    native.pdwPriorHnums = &prior_hnums;
+    native.dwPriorPackageRefCount = 2;
+    try compare(std.testing.allocator, &native, &legacy, &output);
+    try std.testing.expectEqual(status_unsupported, output.dwStatus);
+    try std.testing.expectEqual(reason_prior_action, output.dwReason);
 }
 
 test "shadow comparator reports the first canonical mismatch" {
