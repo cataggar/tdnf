@@ -25,6 +25,14 @@ const action_install: u32 = 1;
 const action_erase: u32 = 2;
 const action_upgrade: u32 = 3;
 const action_reinstall: u32 = 5;
+const action_obsolete: u32 = 6;
+const transaction_reason_obsoletes: u32 = 5;
+
+const BucketProjection = enum {
+    target,
+    prior,
+    removal,
+};
 
 const Key = struct {
     repository: []const u8,
@@ -47,6 +55,7 @@ pub fn compare(
     _ = try validateLegacyList(legacy.pPkgsToRemove);
     _ = try validateLegacyList(legacy.pPkgsToUpgrade);
     _ = try validateLegacyList(legacy.pPkgsToReinstall);
+    _ = try validateLegacyList(legacy.pPkgsObsoleted);
 
     if (native.dwProblemCount != 0) {
         setUnsupported(output, reason_native_problems, 0);
@@ -54,6 +63,10 @@ pub fn compare(
     }
     if (native.dwSkippedJobCount != 0) {
         setUnsupported(output, reason_skipped_jobs, 0);
+        return;
+    }
+    if (hasSharedObsoletePrior(native)) {
+        setUnsupported(output, reason_prior_action, action_obsolete);
         return;
     }
     if (native.dwActionCount != 0) {
@@ -67,6 +80,13 @@ pub fn compare(
             }
             if (action.dwKind == action_upgrade) {
                 if (!hasExactUpgradePrior(native, action)) {
+                    setUnsupported(output, reason_prior_action, action.dwKind);
+                    return;
+                }
+                continue;
+            }
+            if (action.dwKind == action_obsolete) {
+                if (!hasExactObsoletePrior(native, action)) {
                     setUnsupported(output, reason_prior_action, action.dwKind);
                     return;
                 }
@@ -92,6 +112,7 @@ pub fn compare(
         native,
         legacy.pPkgsToInstall,
         action_install,
+        .target,
         output,
     )) return;
     if (try compareBucket(
@@ -99,6 +120,7 @@ pub fn compare(
         native,
         legacy.pPkgsToRemove,
         action_erase,
+        .removal,
         output,
     )) return;
     if (try compareBucket(
@@ -106,6 +128,7 @@ pub fn compare(
         native,
         legacy.pPkgsToUpgrade,
         action_upgrade,
+        .target,
         output,
     )) return;
     if (try compareBucket(
@@ -113,6 +136,15 @@ pub fn compare(
         native,
         legacy.pPkgsToReinstall,
         action_reinstall,
+        .target,
+        output,
+    )) return;
+    if (try compareBucket(
+        allocator,
+        native,
+        legacy.pPkgsObsoleted,
+        action_obsolete,
+        .prior,
         output,
     )) return;
 
@@ -131,12 +163,15 @@ fn compareBucket(
     native: *const result_abi.Result,
     legacy_head: [*c]shadow_abi.LegacyPackage,
     action_kind: u32,
+    projection: BucketProjection,
     output: *shadow_abi.Comparison,
 ) CompareError!bool {
     var native_count: usize = 0;
     if (native.dwActionCount != 0) {
         for (native.pActions[0..native.dwActionCount]) |action| {
-            if (action.dwKind == action_kind) native_count += 1;
+            if (projectsIntoBucket(action.dwKind, action_kind, projection)) {
+                native_count += 1;
+            }
         }
     }
     const legacy_count = try validateLegacyList(legacy_head);
@@ -155,9 +190,19 @@ fn compareBucket(
     var native_index: usize = 0;
     if (native.dwActionCount != 0) {
         for (native.pActions[0..native.dwActionCount]) |action| {
-            if (action.dwKind != action_kind) continue;
+            if (!projectsIntoBucket(action.dwKind, action_kind, projection)) {
+                continue;
+            }
+            const package_ref = switch (projection) {
+                .target => action.dwPackageRef,
+                .prior => native.pdwPriorPackageRefs[action.dwPriorOffset],
+                .removal => if (action.dwKind == action_obsolete)
+                    native.pdwPriorPackageRefs[action.dwPriorOffset]
+                else
+                    action.dwPackageRef,
+            };
             native_keys[native_index] = nativeKey(
-                @ptrCast(&native.pPackages[action.dwPackageRef]),
+                @ptrCast(&native.pPackages[package_ref]),
             );
             native_index += 1;
         }
@@ -207,6 +252,23 @@ fn compareBucket(
         return true;
     }
     return false;
+}
+
+fn projectsIntoBucket(
+    native_action_kind: u32,
+    legacy_action_kind: u32,
+    projection: BucketProjection,
+) bool {
+    return switch (projection) {
+        .target => native_action_kind == legacy_action_kind or
+            (legacy_action_kind == action_install and
+                native_action_kind == action_obsolete),
+        .prior => legacy_action_kind == action_obsolete and
+            native_action_kind == action_obsolete,
+        .removal => legacy_action_kind == action_erase and
+            (native_action_kind == action_erase or
+                native_action_kind == action_obsolete),
+    };
 }
 
 fn validateNative(native: *const result_abi.Result) CompareError!void {
@@ -381,8 +443,56 @@ fn hasUnsupportedLegacyBucket(
 ) bool {
     return legacy.pPkgsToDowngrade != null or
         legacy.pPkgsUnNeeded != null or
-        legacy.pPkgsObsoleted != null or
         legacy.pPkgsRemovedByDowngrade != null;
+}
+
+fn hasExactObsoletePrior(
+    native: *const result_abi.Result,
+    action: result_abi.Action,
+) bool {
+    if (action.dwPriorCount != 1 or
+        action.dwReason != transaction_reason_obsoletes)
+    {
+        return false;
+    }
+    const target = native.pPackages[action.dwPackageRef];
+    const prior_ref = native.pdwPriorPackageRefs[action.dwPriorOffset];
+    const prior = native.pPackages[prior_ref];
+    return target.nRepositoryKind == 2 and
+        prior.nRepositoryKind == 1 and
+        !std.mem.eql(
+            u8,
+            std.mem.span(target.pszName.?),
+            std.mem.span(prior.pszName.?),
+        ) and
+        std.mem.eql(
+            u8,
+            std.mem.span(target.pszArch.?),
+            std.mem.span(prior.pszArch.?),
+        );
+}
+
+fn hasSharedObsoletePrior(native: *const result_abi.Result) bool {
+    if (native.dwActionCount == 0) return false;
+    const actions = native.pActions[0..native.dwActionCount];
+    for (actions, 0..) |action, index| {
+        if (action.dwKind != action_obsolete or action.dwPriorCount != 1) {
+            continue;
+        }
+        const prior_ref = native.pdwPriorPackageRefs[action.dwPriorOffset];
+        const prior_hnum = native.pdwPriorHnums[action.dwPriorOffset];
+        for (actions[index + 1 ..]) |other| {
+            if (other.dwKind != action_obsolete or other.dwPriorCount != 1) {
+                continue;
+            }
+            if (native.pdwPriorPackageRefs[other.dwPriorOffset] == prior_ref or
+                native.pdwPriorHnums[other.dwPriorOffset] == prior_hnum)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 fn hasExactUpgradePrior(
@@ -767,6 +877,139 @@ test "shadow comparator matches only an exact single-prior upgrade" {
     try compare(std.testing.allocator, &native, &legacy, &output);
     try std.testing.expectEqual(status_unsupported, output.dwStatus);
     try std.testing.expectEqual(reason_prior_action, output.dwReason);
+}
+
+test "shadow comparator projects an exact single-prior obsoletion" {
+    var packages = [_]result_abi.Package{
+        testNativePackage("@System", "old", "1"),
+        testNativePackage("available", "replacement", "1"),
+    };
+    for (&packages, 0..) |*package, index| {
+        package.dwPackageId = @intCast(index);
+    }
+    packages[0].nRepositoryKind = 1;
+    packages[0].nHasRpmDbHnum = 1;
+    packages[0].dwRpmDbHnum = 7;
+    var actions = [_]result_abi.Action{
+        std.mem.zeroes(result_abi.Action),
+    };
+    actions[0].dwPackageRef = 1;
+    actions[0].dwKind = action_obsolete;
+    actions[0].dwReason = transaction_reason_obsoletes;
+    actions[0].dwPriorCount = 1;
+    var native = testNativeResult(&packages, &actions);
+    var prior_refs = [_]u32{ 0, 0 };
+    var prior_hnums = [_]u32{ 7, 7 };
+    native.pdwPriorPackageRefs = &prior_refs;
+    native.pdwPriorHnums = &prior_hnums;
+    native.dwPriorPackageRefCount = 1;
+    var legacy_install = testLegacyPackage("available", "replacement", "1");
+    var legacy_remove = testLegacyPackage("@System", "old", "1");
+    var legacy_obsoleted = testLegacyPackage("@System", "old", "1");
+    var legacy = std.mem.zeroes(shadow_abi.LegacyResult);
+    legacy.pPkgsToInstall = @ptrCast(&legacy_install);
+    legacy.pPkgsToRemove = @ptrCast(&legacy_remove);
+    legacy.pPkgsObsoleted = @ptrCast(&legacy_obsoleted);
+    var output: shadow_abi.Comparison = undefined;
+
+    try compare(std.testing.allocator, &native, &legacy, &output);
+    try std.testing.expectEqual(status_projected_match, output.dwStatus);
+
+    legacy_install.pszVersion = "2";
+    try compare(std.testing.allocator, &native, &legacy, &output);
+    try std.testing.expectEqual(status_mismatch, output.dwStatus);
+    try std.testing.expectEqual(action_install, output.dwActionKind);
+
+    legacy_install.pszVersion = "1";
+    legacy_remove.pszVersion = "2";
+    try compare(std.testing.allocator, &native, &legacy, &output);
+    try std.testing.expectEqual(status_mismatch, output.dwStatus);
+    try std.testing.expectEqual(action_erase, output.dwActionKind);
+
+    legacy_remove.pszVersion = "1";
+    legacy_obsoleted.pszVersion = "2";
+    try compare(std.testing.allocator, &native, &legacy, &output);
+    try std.testing.expectEqual(status_mismatch, output.dwStatus);
+    try std.testing.expectEqual(action_obsolete, output.dwActionKind);
+
+    legacy_obsoleted.pszVersion = "1";
+    packages[0].pszName = "replacement";
+    try compare(std.testing.allocator, &native, &legacy, &output);
+    try std.testing.expectEqual(status_unsupported, output.dwStatus);
+    try std.testing.expectEqual(reason_prior_action, output.dwReason);
+
+    packages[0].pszName = "old";
+    packages[0].pszArch = "aarch64";
+    try compare(std.testing.allocator, &native, &legacy, &output);
+    try std.testing.expectEqual(status_unsupported, output.dwStatus);
+    try std.testing.expectEqual(reason_prior_action, output.dwReason);
+
+    packages[0].pszArch = "x86_64";
+    actions[0].dwReason = 1;
+    try compare(std.testing.allocator, &native, &legacy, &output);
+    try std.testing.expectEqual(status_unsupported, output.dwStatus);
+    try std.testing.expectEqual(reason_prior_action, output.dwReason);
+
+    actions[0].dwReason = transaction_reason_obsoletes;
+    actions[0].dwPriorCount = 0;
+    native.pdwPriorPackageRefs = null;
+    native.pdwPriorHnums = null;
+    native.dwPriorPackageRefCount = 0;
+    try compare(std.testing.allocator, &native, &legacy, &output);
+    try std.testing.expectEqual(status_unsupported, output.dwStatus);
+    try std.testing.expectEqual(reason_prior_action, output.dwReason);
+
+    actions[0].dwPriorCount = 2;
+    native.pdwPriorPackageRefs = &prior_refs;
+    native.pdwPriorHnums = &prior_hnums;
+    native.dwPriorPackageRefCount = 2;
+    try compare(std.testing.allocator, &native, &legacy, &output);
+    try std.testing.expectEqual(status_unsupported, output.dwStatus);
+    try std.testing.expectEqual(reason_prior_action, output.dwReason);
+}
+
+test "shadow comparator rejects shared obsoletion priors before mismatch" {
+    var packages = [_]result_abi.Package{
+        testNativePackage("@System", "old", "1"),
+        testNativePackage("available", "replacement-one", "1"),
+        testNativePackage("available", "replacement-two", "1"),
+    };
+    for (&packages, 0..) |*package, index| {
+        package.dwPackageId = @intCast(index);
+    }
+    packages[0].nRepositoryKind = 1;
+    packages[0].nHasRpmDbHnum = 1;
+    packages[0].dwRpmDbHnum = 7;
+    var actions = [_]result_abi.Action{
+        std.mem.zeroes(result_abi.Action),
+        std.mem.zeroes(result_abi.Action),
+    };
+    for (&actions, 0..) |*action, index| {
+        action.dwPackageRef = @intCast(index + 1);
+        action.dwKind = action_obsolete;
+        action.dwReason = transaction_reason_obsoletes;
+        action.dwPriorOffset = @intCast(index);
+        action.dwPriorCount = 1;
+    }
+    var native = testNativeResult(&packages, &actions);
+    var prior_refs = [_]u32{ 0, 0 };
+    var prior_hnums = [_]u32{ 7, 7 };
+    native.pdwPriorPackageRefs = &prior_refs;
+    native.pdwPriorHnums = &prior_hnums;
+    native.dwPriorPackageRefCount = 2;
+    var legacy_install = testLegacyPackage(
+        "available",
+        "different",
+        "1",
+    );
+    var legacy = std.mem.zeroes(shadow_abi.LegacyResult);
+    legacy.pPkgsToInstall = @ptrCast(&legacy_install);
+    var output: shadow_abi.Comparison = undefined;
+
+    try compare(std.testing.allocator, &native, &legacy, &output);
+    try std.testing.expectEqual(status_unsupported, output.dwStatus);
+    try std.testing.expectEqual(reason_prior_action, output.dwReason);
+    try std.testing.expectEqual(action_obsolete, output.dwActionKind);
 }
 
 test "shadow comparator reports the first canonical mismatch" {
