@@ -677,7 +677,7 @@ TDNFGoalObserveNativeSolver(
         BAIL_ON_TDNF_ERROR(dwError);
     }
     if(nAllowErasing || nAutoErase || nReInstall ||
-       nProblems || pTdnf->pArgs->nBest || pTdnf->pArgs->nSkipBroken ||
+       nProblems || pTdnf->pArgs->nSkipBroken ||
        pTdnf->pConf->ppszPkgLocks || pTdnf->pConf->ppszProtectedPkgs ||
        pTdnf->pConf->ppszInstallOnlyPkgs)
     {
@@ -717,14 +717,12 @@ TDNFGoalObserveNativeSolver(
                   &pHiddenAvailable,
                   &dwHiddenAvailableCount);
     BAIL_ON_TDNF_ERROR(dwError);
-    dwError = TDNFRepoMdNativeSolverLiveCompareV3(
+    dwError = TDNFRepoMdNativeSolverLiveCompareV4(
                   pRepos,
                   dwRepoCount,
-                  pJobs,
-                  dwJobCount,
-                  pHiddenAvailable,
-                  dwHiddenAvailableCount,
-                  pTdnf->pArgs->nAllDeps,
+                  pJobs, dwJobCount,
+                  pHiddenAvailable, dwHiddenAvailableCount,
+                  pTdnf->pArgs->nAllDeps, pTdnf->pArgs->nBest,
                   pTdnf->pRpmConfig,
                   pszNativeArch,
                   pInfo,
@@ -881,9 +879,9 @@ TDNFGoalBuildNativeSolverJobs(
     PTDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB pJobs = NULL;
     Pool *pPool = NULL;
 
-    if(!pTdnf || !pTdnf->pSack || !pTdnf->pSack->pPool || !pQueueJobs ||
-       !ppJobs || !pdwJobCount || pQueueJobs->count <= 0 ||
-       pQueueJobs->count % 2 != 0)
+    if(!pTdnf || !pTdnf->pArgs || !pTdnf->pSack ||
+       !pTdnf->pSack->pPool || !pQueueJobs || !ppJobs || !pdwJobCount ||
+       pQueueJobs->count <= 0 || pQueueJobs->count % 2 != 0)
     {
         dwError = ERROR_TDNF_INVALID_PARAMETER;
         BAIL_ON_TDNF_ERROR(dwError);
@@ -899,7 +897,9 @@ TDNFGoalBuildNativeSolverJobs(
 
     for(dwIndex = 0; dwIndex < dwCount; dwIndex++)
     {
-        Id how = pQueueJobs->elements[dwIndex * 2];
+        /* XOR removes only an expected force-best bit; wrong shapes stay set. */
+        Id how = pQueueJobs->elements[dwIndex * 2] ^
+                 (pTdnf->pArgs->nBest ? SOLVER_FORCEBEST : 0);
         Id dwPkgId = pQueueJobs->elements[dwIndex * 2 + 1];
         Solvable *pSolvable = NULL;
 
