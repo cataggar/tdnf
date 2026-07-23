@@ -1,8 +1,11 @@
 //! Owning live-input adapter for strict native shadow solves.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const available_loader = @import("available_loader.zig");
 const installed_repository = @import("installed_repository.zig");
+const rpmpkg = if (builtin.is_test) @import("rpmpkg.zig") else struct {};
+const sqlite = if (builtin.is_test) @import("sqlite") else struct {};
 const solver_identity = @import("solver_identity.zig");
 const solver_model = @import("solver_model.zig");
 const solver_native = @import("solver_native.zig");
@@ -40,6 +43,7 @@ pub const Input = struct {
     hidden_available: ?[]const JobInput = null,
     include_installed: bool = true,
     best: bool = false,
+    allow_erasing: bool = false,
     clean_deps: bool = false,
     skip_broken: bool = false,
     protected_names: []const []const u8 = &.{},
@@ -222,7 +226,7 @@ pub fn produce(
         .{
             .architecture = .{ .native_arch = native_arch },
             .best = input.best,
-            .allow_erasing = input.erase_jobs.len != 0,
+            .allow_erasing = input.allow_erasing or input.erase_jobs.len != 0,
             .clean_deps = input.clean_deps,
             .skip_broken = input.skip_broken,
             .protected_names = input.protected_names,
@@ -261,9 +265,9 @@ const fixture_repomd =
     \\<?xml version="1.0" encoding="UTF-8"?>
     \\<repomd xmlns="http://linux.duke.edu/metadata/repo">
     \\  <data type="primary">
-    \\    <checksum type="sha256">f20a7a5300215ee0935c234e6dbb8cca7d8d2dbbed137fc002d502b0bfbd7f8a</checksum>
+    \\    <checksum type="sha256">153e9e69f56e580f4a30074888431cf7297ccdc821a603d6b0fc7cddc84ed4a0</checksum>
     \\    <location href="repodata/primary.xml"/>
-    \\    <size>809</size>
+    \\    <size>927</size>
     \\  </data>
     \\</repomd>
 ;
@@ -278,6 +282,11 @@ const fixture_primary =
     \\    <checksum type="sha256" pkgid="YES">abcdef</checksum>
     \\    <summary>candidate</summary>
     \\    <location href="packages/candidate.rpm"/>
+    \\    <format>
+    \\      <rpm:conflicts>
+    \\        <rpm:entry name="installed-blocker"/>
+    \\      </rpm:conflicts>
+    \\    </format>
     \\  </package>
     \\  <package type="rpm">
     \\    <name>broken</name>
@@ -327,6 +336,38 @@ const Fixture = struct {
         self.* = undefined;
     }
 
+    fn addInstalled(self: *Fixture, hnum: u32, name: []const u8) !void {
+        const blob = try rpmpkg.makeMinimalHeaderForTest(
+            std.testing.allocator,
+            name,
+            "1.0",
+            "1",
+            "x86_64",
+        );
+        defer std.testing.allocator.free(blob);
+        try self.tmp.dir.createDirPath(std.testing.io, "var/lib/rpm");
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const db = try sqlite.Database.open(.{
+            .path = self.path(&path_buffer, "var/lib/rpm/rpmdb.sqlite"),
+        });
+        defer db.close();
+        try db.exec(
+            \\CREATE TABLE Packages (
+            \\    hnum INTEGER PRIMARY KEY,
+            \\    blob BLOB NOT NULL
+            \\)
+        , .{});
+        const blob_hex = try hexLower(std.testing.allocator, blob);
+        defer std.testing.allocator.free(blob_hex);
+        const sql = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "INSERT INTO Packages (hnum, blob) VALUES ({d}, x'{s}')",
+            .{ hnum, blob_hex },
+        );
+        defer std.testing.allocator.free(sql);
+        try db.exec(sql, .{});
+    }
+
     fn path(
         self: *const Fixture,
         buffer: *[std.Io.Dir.max_path_bytes]u8,
@@ -339,6 +380,19 @@ const Fixture = struct {
         ) catch @panic("fixture path too long");
     }
 };
+
+fn hexLower(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+) std.mem.Allocator.Error![]u8 {
+    const digits = "0123456789abcdef";
+    const out = try allocator.alloc(u8, bytes.len * 2);
+    for (bytes, 0..) |byte, index| {
+        out[index * 2] = digits[byte >> 4];
+        out[index * 2 + 1] = digits[byte & 0x0f];
+    }
+    return out;
+}
 
 fn fixtureInput(
     fixture: *const Fixture,
@@ -437,7 +491,7 @@ test "live producer can omit the installed repository" {
     );
 }
 
-test "live producer accepts force-best clean-deps and protected policy" {
+test "live producer accepts force-best cleanup protection and allow erasing" {
     var fixture = try Fixture.create();
     defer fixture.cleanup();
     var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -454,13 +508,58 @@ test "live producer accepts force-best clean-deps and protected policy" {
     input.best = true;
     input.clean_deps = true;
     input.protected_names = &.{"missing-protected"};
-    var solved = try produce(std.testing.allocator, input);
-    defer solved.deinit();
+    {
+        var solved = try produce(std.testing.allocator, input);
+        defer solved.deinit();
 
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            solved.solved.result.selected.len,
+        );
+    }
+    input.clean_deps = false;
+    input.allow_erasing = true;
+    var allowed = try produce(std.testing.allocator, input);
+    defer allowed.deinit();
     try std.testing.expectEqual(
         @as(usize, 1),
-        solved.solved.result.selected.len,
+        allowed.solved.result.selected.len,
     );
+}
+
+test "live allow-erasing changes an installed conflict from unsatisfiable" {
+    var fixture = try Fixture.create();
+    defer fixture.cleanup();
+    try fixture.addInstalled(41, "installed-blocker");
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var cache_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var repositories: [1]RepositoryInput = undefined;
+    var jobs: [1]JobInput = undefined;
+    var input = fixtureInput(
+        &fixture,
+        &root_buffer,
+        &cache_buffer,
+        &repositories,
+        &jobs,
+    );
+
+    try std.testing.expectError(
+        error.Unsatisfiable,
+        produce(std.testing.allocator, input),
+    );
+    input.allow_erasing = true;
+    var solved = try produce(std.testing.allocator, input);
+    defer solved.deinit();
+    const actions = solved.solved.result.outcome.actions;
+    try std.testing.expectEqual(@as(usize, 2), actions.len);
+    var saw_install = false;
+    var saw_erase = false;
+    for (actions) |action| {
+        saw_install = saw_install or action.kind == .install;
+        saw_erase = saw_erase or action.kind == .erase;
+    }
+    try std.testing.expect(saw_install);
+    try std.testing.expect(saw_erase);
 }
 
 test "live producer records broken exact jobs under skip-broken policy" {

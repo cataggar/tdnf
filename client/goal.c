@@ -704,8 +704,11 @@ TDNFGoalObserveNativeSolver(
                   pTdnf, pQueueJobs, &pJobs, &dwJobCount,
                   &pEraseJobs, &dwEraseJobCount);
     BAIL_ON_TDNF_ERROR(dwError);
-    if((nAllowErasing && (!dwEraseJobCount || dwJobCount)) ||
-       (!nAllowErasing && dwEraseJobCount))
+    if((dwEraseJobCount && dwJobCount) ||
+       (!nAllowErasing && dwEraseJobCount) ||
+       (nAllowErasing && !dwEraseJobCount &&
+        (pInfo->pPkgsToRemove || pInfo->pPkgsToUpgrade || pInfo->pPkgsToDowngrade ||
+         pInfo->pPkgsUnNeeded || pInfo->pPkgsToReinstall || pInfo->pPkgsObsoleted || pInfo->pPkgsRemovedByDowngrade)))
     {
         dwError = ERROR_TDNF_CALL_NOT_SUPPORTED;
         BAIL_ON_TDNF_ERROR(dwError);
@@ -715,12 +718,12 @@ TDNFGoalObserveNativeSolver(
                   &pHiddenAvailable,
                   &dwHiddenAvailableCount);
     BAIL_ON_TDNF_ERROR(dwError);
-    dwError = TDNFRepoMdNativeSolverLiveCompareV8(
+    dwError = TDNFRepoMdNativeSolverLiveCompareV9(
                   pRepos, dwRepoCount,
                   pJobs, dwJobCount,
                   pEraseJobs, dwEraseJobCount,
                   pHiddenAvailable, dwHiddenAvailableCount,
-                  pTdnf->pArgs->nAllDeps, pTdnf->pArgs->nBest, nAutoErase, pTdnf->pArgs->nSkipBroken,
+                  pTdnf->pArgs->nAllDeps, pTdnf->pArgs->nBest, nAutoErase, pTdnf->pArgs->nSkipBroken, nAllowErasing,
                   (const char *const *)pTdnf->pConf->ppszProtectedPkgs,
                   pTdnf->pRpmConfig, pszNativeArch,
                   pInfo, &comparison);
