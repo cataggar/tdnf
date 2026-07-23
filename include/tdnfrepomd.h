@@ -620,12 +620,13 @@ TDNFRepoMdNativeSolverResultFree(
     );
 
 /*
- * Compare the exact install/erase target projection of a native result with
- * the authoritative legacy solved-package buckets. This deliberately ignores
- * selected packages, action reasons/request provenance, unresolved/user-
- * install names, and UI flags. Priors, other action kinds, native problems,
- * skipped jobs, legacy upgrade/downgrade/reinstall/obsolete/unneeded buckets,
- * and duplicate projected identities produce UNSUPPORTED rather than MATCH.
+ * Compare the exact install/erase/reinstall target projection of a native
+ * result with the authoritative legacy solved-package buckets. Reinstall
+ * actions require exactly one same-NEVRA installed prior. This deliberately
+ * ignores selected packages, action reasons/request provenance, unresolved/
+ * user-install names, and UI flags. Other priors/action kinds, native
+ * problems, skipped jobs, richer legacy buckets, and duplicate projected
+ * identities produce UNSUPPORTED rather than MATCH.
  *
  * A successful call returns zero and always sets pComparison. Mismatch and
  * unsupported statuses are comparison outcomes, not API errors.
@@ -639,9 +640,9 @@ TDNFRepoMdNativeSolverResultCompare(
 
 /*
  * Produce a strict native solve from live cached metadata and rpmdb inputs,
- * then compare its exact install/erase projection with the authoritative
- * legacy result. This operation is observational: it does not mutate any
- * input and returns mismatch or unsupported as comparison statuses.
+ * then compare its exact install/erase/reinstall projection with the
+ * authoritative legacy result. This operation is observational: it does not
+ * mutate any input and returns mismatch or unsupported as comparison statuses.
  */
 uint32_t
 TDNFRepoMdNativeSolverLiveCompare(

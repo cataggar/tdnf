@@ -143,6 +143,16 @@ def test_install_debugsolver_native_shadow(utils):
         assert utils.check_package(hidden_installed)
         shutil.rmtree('debugdata', ignore_errors=True)
 
+        ret = utils.run([
+            'tdnf', 'reinstall', '-y', '--nogpgcheck', '--testonly',
+            '--debugsolver', '--noautoremove', hidden_installed,
+        ])
+        assert ret['retval'] == 0
+        assert 'native-solver-shadow: projected match' in \
+            '\n'.join(ret['stdout'] + ret['stderr'])
+        assert utils.check_package(hidden_installed)
+        shutil.rmtree('debugdata', ignore_errors=True)
+
         os.makedirs(protected_dir, exist_ok=True)
         with open(os.path.join(protected_dir, 'native-shadow.conf'), 'w') as f:
             f.write(hidden_installed)

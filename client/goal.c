@@ -16,7 +16,6 @@ TDNFGoalObserveNativeSolver(
     const TDNF_SOLVED_PKG_INFO *pInfo,
     int nAllowErasing,
     int nAutoErase,
-    int nReInstall,
     int nProblems, int nUnresolved
 );
 
@@ -484,7 +483,6 @@ TDNFSolv(
                                      pInfo,
                                      nAllowErasing,
                                      nAutoErase,
-                                     nReInstall,
                                      nProblems, nUnresolved);
         if(dwShadowError)
         {
@@ -655,7 +653,6 @@ TDNFGoalObserveNativeSolver(
     const TDNF_SOLVED_PKG_INFO *pInfo,
     int nAllowErasing,
     int nAutoErase,
-    int nReInstall,
     int nProblems, int nUnresolved
     )
 {
@@ -676,7 +673,7 @@ TDNFGoalObserveNativeSolver(
         dwError = ERROR_TDNF_INVALID_PARAMETER;
         BAIL_ON_TDNF_ERROR(dwError);
     }
-    if(nAllowErasing || nReInstall || nProblems || nUnresolved ||
+    if(nAllowErasing || nProblems || nUnresolved ||
        pTdnf->pConf->ppszPkgLocks || pTdnf->pConf->ppszInstallOnlyPkgs)
     {
         dwError = ERROR_TDNF_CALL_NOT_SUPPORTED;
