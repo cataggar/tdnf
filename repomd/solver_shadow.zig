@@ -1,4 +1,5 @@
 const std = @import("std");
+const query_index = @import("index.zig");
 const result_abi = @import("solver_result_abi.zig");
 const shadow_abi = @import("solver_shadow_abi.zig");
 
@@ -22,6 +23,7 @@ const reason_duplicate_key: u32 = 6;
 
 const action_install: u32 = 1;
 const action_erase: u32 = 2;
+const action_upgrade: u32 = 3;
 const action_reinstall: u32 = 5;
 
 const Key = struct {
@@ -43,6 +45,7 @@ pub fn compare(
     try validateNative(native);
     _ = try validateLegacyList(legacy.pPkgsToInstall);
     _ = try validateLegacyList(legacy.pPkgsToRemove);
+    _ = try validateLegacyList(legacy.pPkgsToUpgrade);
     _ = try validateLegacyList(legacy.pPkgsToReinstall);
 
     if (native.dwProblemCount != 0) {
@@ -57,6 +60,13 @@ pub fn compare(
         for (native.pActions[0..native.dwActionCount]) |action| {
             if (action.dwKind == action_reinstall) {
                 if (!hasExactReinstallPrior(native, action)) {
+                    setUnsupported(output, reason_prior_action, action.dwKind);
+                    return;
+                }
+                continue;
+            }
+            if (action.dwKind == action_upgrade) {
+                if (!hasExactUpgradePrior(native, action)) {
                     setUnsupported(output, reason_prior_action, action.dwKind);
                     return;
                 }
@@ -89,6 +99,13 @@ pub fn compare(
         native,
         legacy.pPkgsToRemove,
         action_erase,
+        output,
+    )) return;
+    if (try compareBucket(
+        allocator,
+        native,
+        legacy.pPkgsToUpgrade,
+        action_upgrade,
         output,
     )) return;
     if (try compareBucket(
@@ -363,10 +380,39 @@ fn hasUnsupportedLegacyBucket(
     legacy: *const shadow_abi.LegacyResult,
 ) bool {
     return legacy.pPkgsToDowngrade != null or
-        legacy.pPkgsToUpgrade != null or
         legacy.pPkgsUnNeeded != null or
         legacy.pPkgsObsoleted != null or
         legacy.pPkgsRemovedByDowngrade != null;
+}
+
+fn hasExactUpgradePrior(
+    native: *const result_abi.Result,
+    action: result_abi.Action,
+) bool {
+    if (action.dwPriorCount != 1) return false;
+    const target = native.pPackages[action.dwPackageRef];
+    const prior_ref = native.pdwPriorPackageRefs[action.dwPriorOffset];
+    const prior = native.pPackages[prior_ref];
+    return target.nRepositoryKind == 2 and
+        prior.nRepositoryKind == 1 and
+        std.mem.eql(
+            u8,
+            std.mem.span(target.pszName.?),
+            std.mem.span(prior.pszName.?),
+        ) and
+        std.mem.eql(
+            u8,
+            std.mem.span(target.pszArch.?),
+            std.mem.span(prior.pszArch.?),
+        ) and
+        query_index.compareEvr(
+            if (target.nHasEpoch != 0) target.dwEpoch else null,
+            std.mem.span(target.pszVersion.?),
+            std.mem.span(target.pszRelease.?),
+            if (prior.nHasEpoch != 0) prior.dwEpoch else null,
+            std.mem.span(prior.pszVersion.?),
+            std.mem.span(prior.pszRelease.?),
+        ) > 0;
 }
 
 fn hasExactReinstallPrior(
@@ -650,6 +696,79 @@ test "shadow comparator matches only an exact single-prior reinstall" {
     try std.testing.expectEqual(reason_prior_action, output.dwReason);
 }
 
+test "shadow comparator matches only an exact single-prior upgrade" {
+    var packages = [_]result_abi.Package{
+        testNativePackage("@System", "alpha", "1"),
+        testNativePackage("available", "alpha", "2"),
+    };
+    for (&packages, 0..) |*package, index| {
+        package.dwPackageId = @intCast(index);
+    }
+    packages[0].nRepositoryKind = 1;
+    packages[0].nHasRpmDbHnum = 1;
+    packages[0].dwRpmDbHnum = 7;
+    var actions = [_]result_abi.Action{
+        std.mem.zeroes(result_abi.Action),
+    };
+    actions[0].dwPackageRef = 1;
+    actions[0].dwKind = action_upgrade;
+    actions[0].dwReason = 1;
+    actions[0].dwPriorCount = 1;
+    var native = testNativeResult(&packages, &actions);
+    var prior_refs = [_]u32{ 0, 0 };
+    var prior_hnums = [_]u32{ 7, 7 };
+    native.pdwPriorPackageRefs = &prior_refs;
+    native.pdwPriorHnums = &prior_hnums;
+    native.dwPriorPackageRefCount = 1;
+    var legacy_package = testLegacyPackage("available", "alpha", "2");
+    var legacy = std.mem.zeroes(shadow_abi.LegacyResult);
+    legacy.pPkgsToUpgrade = @ptrCast(&legacy_package);
+    var output: shadow_abi.Comparison = undefined;
+
+    try compare(std.testing.allocator, &native, &legacy, &output);
+    try std.testing.expectEqual(status_projected_match, output.dwStatus);
+
+    legacy_package.pszVersion = "3";
+    try compare(std.testing.allocator, &native, &legacy, &output);
+    try std.testing.expectEqual(status_mismatch, output.dwStatus);
+    try std.testing.expectEqual(action_upgrade, output.dwActionKind);
+
+    legacy_package.pszVersion = "2";
+    packages[0].pszVersion = "2";
+    try compare(std.testing.allocator, &native, &legacy, &output);
+    try std.testing.expectEqual(status_unsupported, output.dwStatus);
+    try std.testing.expectEqual(reason_prior_action, output.dwReason);
+
+    packages[0].pszVersion = "1";
+    packages[0].pszName = "beta";
+    try compare(std.testing.allocator, &native, &legacy, &output);
+    try std.testing.expectEqual(status_unsupported, output.dwStatus);
+    try std.testing.expectEqual(reason_prior_action, output.dwReason);
+
+    packages[0].pszName = "alpha";
+    packages[0].pszArch = "aarch64";
+    try compare(std.testing.allocator, &native, &legacy, &output);
+    try std.testing.expectEqual(status_unsupported, output.dwStatus);
+    try std.testing.expectEqual(reason_prior_action, output.dwReason);
+
+    packages[0].pszArch = "x86_64";
+    actions[0].dwPriorCount = 0;
+    native.pdwPriorPackageRefs = null;
+    native.pdwPriorHnums = null;
+    native.dwPriorPackageRefCount = 0;
+    try compare(std.testing.allocator, &native, &legacy, &output);
+    try std.testing.expectEqual(status_unsupported, output.dwStatus);
+    try std.testing.expectEqual(reason_prior_action, output.dwReason);
+
+    actions[0].dwPriorCount = 2;
+    native.pdwPriorPackageRefs = &prior_refs;
+    native.pdwPriorHnums = &prior_hnums;
+    native.dwPriorPackageRefCount = 2;
+    try compare(std.testing.allocator, &native, &legacy, &output);
+    try std.testing.expectEqual(status_unsupported, output.dwStatus);
+    try std.testing.expectEqual(reason_prior_action, output.dwReason);
+}
+
 test "shadow comparator reports the first canonical mismatch" {
     var packages = [_]result_abi.Package{
         testNativePackage("available", "alpha", "1"),
@@ -722,13 +841,13 @@ test "shadow comparator preserves unsupported distinctions" {
     native.dwPriorPackageRefCount = 0;
     native.pdwPriorPackageRefs = null;
     native.pdwPriorHnums = null;
-    actions[0].dwKind = 3;
+    actions[0].dwKind = 4;
     try compare(std.testing.allocator, &native, &legacy, &output);
     try std.testing.expectEqual(reason_native_action_kind, output.dwReason);
 
     actions[0].dwKind = action_install;
     var unsupported_package = testLegacyPackage("available", "alpha", "1");
-    legacy.pPkgsToUpgrade = @ptrCast(&unsupported_package);
+    legacy.pPkgsToDowngrade = @ptrCast(&unsupported_package);
     try compare(std.testing.allocator, &native, &legacy, &output);
     try std.testing.expectEqual(reason_legacy_action_bucket, output.dwReason);
 }
