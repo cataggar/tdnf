@@ -141,6 +141,8 @@ pub export fn TDNFRepoMdNativeSolverLiveCompare(
         job_count,
         null,
         0,
+        null,
+        0,
         false,
         false,
         false,
@@ -171,6 +173,8 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV2(
         repository_count,
         raw_jobs,
         job_count,
+        null,
+        0,
         raw_hidden_available,
         hidden_available_count,
         true,
@@ -204,6 +208,8 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV3(
         repository_count,
         raw_jobs,
         job_count,
+        null,
+        0,
         raw_hidden_available,
         hidden_available_count,
         true,
@@ -238,6 +244,8 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV4(
         repository_count,
         raw_jobs,
         job_count,
+        null,
+        0,
         raw_hidden_available,
         hidden_available_count,
         true,
@@ -273,6 +281,8 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV5(
         repository_count,
         raw_jobs,
         job_count,
+        null,
+        0,
         raw_hidden_available,
         hidden_available_count,
         true,
@@ -309,6 +319,8 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV6(
         repository_count,
         raw_jobs,
         job_count,
+        null,
+        0,
         raw_hidden_available,
         hidden_available_count,
         true,
@@ -346,6 +358,49 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV7(
         repository_count,
         raw_jobs,
         job_count,
+        null,
+        0,
+        raw_hidden_available,
+        hidden_available_count,
+        true,
+        all_deps != 0,
+        best != 0,
+        clean_deps != 0,
+        skip_broken != 0,
+        raw_protected_names,
+        rpm_config,
+        raw_native_arch,
+        legacy,
+        comparison,
+    );
+}
+
+pub export fn TDNFRepoMdNativeSolverLiveCompareV8(
+    raw_repositories: ?[*]const c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_REPOSITORY,
+    repository_count: u32,
+    raw_jobs: ?[*]const c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB,
+    job_count: u32,
+    raw_erase_jobs: ?[*]const c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB,
+    erase_job_count: u32,
+    raw_hidden_available: ?[*]const c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB,
+    hidden_available_count: u32,
+    all_deps: c_int,
+    best: c_int,
+    clean_deps: c_int,
+    skip_broken: c_int,
+    raw_protected_names: ?[*:null]const ?[*:0]const u8,
+    rpm_config: ?*const c.tdnf_rpm_config,
+    raw_native_arch: ?[*:0]const u8,
+    legacy: ?*const c.TDNF_SOLVED_PKG_INFO,
+    comparison: ?*c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT,
+) u32 {
+    return nativeSolverLiveCompare(
+        raw_repositories,
+        repository_count,
+        raw_jobs,
+        job_count,
+        raw_erase_jobs,
+        erase_job_count,
         raw_hidden_available,
         hidden_available_count,
         true,
@@ -366,6 +421,8 @@ fn nativeSolverLiveCompare(
     repository_count: u32,
     raw_jobs: ?[*]const c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB,
     job_count: u32,
+    raw_erase_jobs: ?[*]const c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB,
+    erase_job_count: u32,
     raw_hidden_available: ?[*]const c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB,
     hidden_available_count: u32,
     has_considered: bool,
@@ -390,11 +447,17 @@ fn nativeSolverLiveCompare(
         setError("null native live repositories", .{});
         return c.ERROR_TDNF_INVALID_PARAMETER;
     };
-    const jobs_ptr = raw_jobs orelse {
+    if (job_count != 0 and raw_jobs == null) {
         setError("null native live jobs", .{});
         return c.ERROR_TDNF_INVALID_PARAMETER;
-    };
-    if (repository_count == 0 or job_count == 0) {
+    }
+    if (erase_job_count != 0 and raw_erase_jobs == null) {
+        setError("null native live erase jobs", .{});
+        return c.ERROR_TDNF_INVALID_PARAMETER;
+    }
+    if (repository_count == 0 or
+        (job_count == 0 and erase_job_count == 0))
+    {
         setError("empty native live input", .{});
         return c.ERROR_TDNF_INVALID_PARAMETER;
     }
@@ -471,11 +534,29 @@ fn nativeSolverLiveCompare(
         return c.ERROR_TDNF_OUT_OF_MEMORY;
     };
     defer allocator.free(jobs);
-    for (jobs_ptr[0..job_count], jobs) |raw, *job| {
-        job.* = liveJobFromC(raw) orelse {
-            setError("invalid native live job selector", .{});
-            return c.ERROR_TDNF_INVALID_PARAMETER;
-        };
+    if (raw_jobs) |jobs_ptr| {
+        for (jobs_ptr[0..job_count], jobs) |raw, *job| {
+            job.* = liveJobFromC(raw) orelse {
+                setError("invalid native live job selector", .{});
+                return c.ERROR_TDNF_INVALID_PARAMETER;
+            };
+        }
+    }
+    const erase_jobs = allocator.alloc(
+        solver_live.EraseJobInput,
+        erase_job_count,
+    ) catch {
+        setError("out of memory translating native live erase jobs", .{});
+        return c.ERROR_TDNF_OUT_OF_MEMORY;
+    };
+    defer allocator.free(erase_jobs);
+    if (raw_erase_jobs) |erase_jobs_ptr| {
+        for (erase_jobs_ptr[0..erase_job_count], erase_jobs) |raw, *job| {
+            job.* = liveEraseJobFromC(raw) orelse {
+                setError("invalid native live erase job selector", .{});
+                return c.ERROR_TDNF_INVALID_PARAMETER;
+            };
+        }
     }
     var hidden_available: ?[]solver_live.JobInput = null;
     defer if (hidden_available) |hidden| allocator.free(hidden);
@@ -519,6 +600,7 @@ fn nativeSolverLiveCompare(
             .rpmdb = .{ .config = config },
             .native_arch = native_arch,
             .jobs = jobs,
+            .erase_jobs = erase_jobs,
             .hidden_available = hidden_available,
             .include_installed = !all_deps,
             .best = best,
@@ -583,6 +665,22 @@ fn liveJobFromC(
         .arch = spanRequired(raw.pszArch) orelse return null,
         .checksum = checksum,
     } };
+}
+
+fn liveEraseJobFromC(
+    raw: c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB,
+) ?solver_live.EraseJobInput {
+    const job = liveJobFromC(raw) orelse return null;
+    if (job.selector.checksum != null or
+        !std.mem.eql(
+            u8,
+            job.selector.repository,
+            solver_live.system_repository_id,
+        ))
+    {
+        return null;
+    }
+    return .{ .selector = job.selector };
 }
 
 fn spanRequired(value: ?[*:0]const u8) ?[]const u8 {
@@ -1027,6 +1125,55 @@ test "native live comparison v7 wrapper initializes invalid output" {
         @as(u32, c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_INVALID),
         comparison.dwStatus,
     );
+}
+
+test "native live comparison v8 wrapper initializes invalid output" {
+    var comparison = std.mem.zeroes(
+        c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT,
+    );
+    const result = TDNFRepoMdNativeSolverLiveCompareV8(
+        null,
+        0,
+        null,
+        0,
+        null,
+        0,
+        null,
+        0,
+        0,
+        0,
+        0,
+        0,
+        null,
+        null,
+        null,
+        null,
+        &comparison,
+    );
+
+    try std.testing.expectEqual(
+        @as(u32, c.ERROR_TDNF_INVALID_PARAMETER),
+        result,
+    );
+    try std.testing.expectEqual(
+        @as(u32, c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_INVALID),
+        comparison.dwStatus,
+    );
+}
+
+test "translates exact installed erase selectors" {
+    var raw = std.mem.zeroes(c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB);
+    raw.pszRepository = "@System";
+    raw.pszName = "installed";
+    raw.pszVersion = "1";
+    raw.pszRelease = "2";
+    raw.pszArch = "x86_64";
+    const job = liveEraseJobFromC(raw).?;
+
+    try std.testing.expectEqualStrings("installed", job.selector.name);
+    try std.testing.expectEqual(@as(?u32, 0), job.selector.epoch);
+    raw.pszRepository = "available";
+    try std.testing.expect(liveEraseJobFromC(raw) == null);
 }
 
 test "translates null-terminated protected package names" {

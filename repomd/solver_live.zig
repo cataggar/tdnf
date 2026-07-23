@@ -26,11 +26,16 @@ pub const JobInput = struct {
     selector: solver_identity.AvailableSelector,
 };
 
+pub const EraseJobInput = struct {
+    selector: solver_identity.AvailableSelector,
+};
+
 pub const Input = struct {
     repositories: []const RepositoryInput,
     rpmdb: installed_repository.Source,
     native_arch: []const u8,
     jobs: []const JobInput,
+    erase_jobs: []const EraseJobInput = &.{},
     /// Null means the caller did not provide an authoritative considered map.
     hidden_available: ?[]const JobInput = null,
     include_installed: bool = true,
@@ -78,10 +83,15 @@ pub fn produce(
     input: Input,
 ) ProduceError!OwnedSolve {
     if (input.repositories.len == 0 or
-        input.jobs.len == 0 or
+        input.jobs.len + input.erase_jobs.len == 0 or
         input.native_arch.len == 0)
     {
         return error.InvalidInput;
+    }
+    if (input.erase_jobs.len != 0 and
+        (input.jobs.len != 0 or input.clean_deps))
+    {
+        return error.UnsupportedInput;
     }
 
     var arena_state = std.heap.ArenaAllocator.init(parent_allocator);
@@ -160,12 +170,24 @@ pub fn produce(
         universe,
     );
     defer identity.deinit();
-    const jobs = try arena.alloc(solver_model.Job, input.jobs.len);
-    for (input.jobs, jobs) |job, *translated| {
+    const jobs = try arena.alloc(
+        solver_model.Job,
+        input.jobs.len + input.erase_jobs.len,
+    );
+    for (input.jobs, jobs[0..input.jobs.len]) |job, *translated| {
         translated.* = .{
             .action = .install,
             .selection = .{
                 .package = try identity.resolveAvailable(job.selector),
+            },
+            .reason = .user,
+        };
+    }
+    for (input.erase_jobs, jobs[input.jobs.len..]) |job, *translated| {
+        translated.* = .{
+            .action = .erase,
+            .selection = .{
+                .package = try identity.resolveInstalledNevra(job.selector),
             },
             .reason = .user,
         };
@@ -200,6 +222,7 @@ pub fn produce(
         .{
             .architecture = .{ .native_arch = native_arch },
             .best = input.best,
+            .allow_erasing = input.erase_jobs.len != 0,
             .clean_deps = input.clean_deps,
             .skip_broken = input.skip_broken,
             .protected_names = input.protected_names,
