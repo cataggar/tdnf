@@ -6,6 +6,7 @@
 # of the License are located in the COPYING file of this distribution.
 #
 
+import os
 import shutil
 
 import pytest
@@ -80,6 +81,7 @@ def test_install_debugsolver_native_shadow(utils):
     hidden_installed = utils.config["sglversion_pkgname"]
     alldeps_pkg = 'tdnf-test-cleanreq-leaf1'
     alldeps_required = 'tdnf-test-cleanreq-required'
+    protected_dir = os.path.join(utils.config['repo_path'], 'protected.d')
     utils.erase_package(pkgname)
     utils.erase_package(hidden_installed)
     utils.erase_package(alldeps_pkg)
@@ -141,6 +143,20 @@ def test_install_debugsolver_native_shadow(utils):
         assert utils.check_package(hidden_installed)
         shutil.rmtree('debugdata', ignore_errors=True)
 
+        os.makedirs(protected_dir, exist_ok=True)
+        with open(os.path.join(protected_dir, 'native-shadow.conf'), 'w') as f:
+            f.write(hidden_installed)
+        ret = utils.run([
+            'tdnf', 'install', '-y', '--nogpgcheck', '--testonly',
+            '--debugsolver', '--noautoremove', pkgname,
+        ])
+        assert ret['retval'] == 0
+        assert 'native-solver-shadow: projected match' in \
+            '\n'.join(ret['stdout'] + ret['stderr'])
+        assert utils.check_package(hidden_installed)
+        shutil.rmtree(protected_dir)
+        shutil.rmtree('debugdata', ignore_errors=True)
+
         utils.install_package(alldeps_required)
         ret = utils.run([
             'tdnf', 'install', '-y', '--nogpgcheck', '--urls',
@@ -152,6 +168,7 @@ def test_install_debugsolver_native_shadow(utils):
         assert any(alldeps_required in line for line in ret['stdout'])
         assert not utils.check_package(alldeps_pkg)
     finally:
+        shutil.rmtree(protected_dir, ignore_errors=True)
         shutil.rmtree('debugdata', ignore_errors=True)
         utils.erase_package(alldeps_pkg)
         utils.erase_package(alldeps_required)

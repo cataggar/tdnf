@@ -51,6 +51,7 @@ const DocState = struct {
 };
 
 const max_repomd_bytes = 16 * 1024 * 1024;
+const ProtectedNamesError = error{ OutOfMemory, InvalidInput };
 
 threadlocal var last_error_buf: [512]u8 = undefined;
 threadlocal var last_error_len: usize = 0;
@@ -145,6 +146,7 @@ pub export fn TDNFRepoMdNativeSolverLiveCompare(
         false,
         false,
         false,
+        null,
         rpm_config,
         raw_native_arch,
         legacy,
@@ -176,6 +178,7 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV2(
         false,
         false,
         false,
+        null,
         rpm_config,
         raw_native_arch,
         legacy,
@@ -208,6 +211,7 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV3(
         false,
         false,
         false,
+        null,
         rpm_config,
         raw_native_arch,
         legacy,
@@ -241,6 +245,7 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV4(
         best != 0,
         false,
         false,
+        null,
         rpm_config,
         raw_native_arch,
         legacy,
@@ -275,6 +280,7 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV5(
         best != 0,
         clean_deps != 0,
         false,
+        null,
         rpm_config,
         raw_native_arch,
         legacy,
@@ -310,6 +316,44 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV6(
         best != 0,
         clean_deps != 0,
         skip_broken != 0,
+        null,
+        rpm_config,
+        raw_native_arch,
+        legacy,
+        comparison,
+    );
+}
+
+pub export fn TDNFRepoMdNativeSolverLiveCompareV7(
+    raw_repositories: ?[*]const c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_REPOSITORY,
+    repository_count: u32,
+    raw_jobs: ?[*]const c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB,
+    job_count: u32,
+    raw_hidden_available: ?[*]const c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB,
+    hidden_available_count: u32,
+    all_deps: c_int,
+    best: c_int,
+    clean_deps: c_int,
+    skip_broken: c_int,
+    raw_protected_names: ?[*:null]const ?[*:0]const u8,
+    rpm_config: ?*const c.tdnf_rpm_config,
+    raw_native_arch: ?[*:0]const u8,
+    legacy: ?*const c.TDNF_SOLVED_PKG_INFO,
+    comparison: ?*c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT,
+) u32 {
+    return nativeSolverLiveCompare(
+        raw_repositories,
+        repository_count,
+        raw_jobs,
+        job_count,
+        raw_hidden_available,
+        hidden_available_count,
+        true,
+        all_deps != 0,
+        best != 0,
+        clean_deps != 0,
+        skip_broken != 0,
+        raw_protected_names,
         rpm_config,
         raw_native_arch,
         legacy,
@@ -329,6 +373,7 @@ fn nativeSolverLiveCompare(
     best: bool,
     clean_deps: bool,
     skip_broken: bool,
+    raw_protected_names: ?[*:null]const ?[*:0]const u8,
     rpm_config: ?*const c.tdnf_rpm_config,
     raw_native_arch: ?[*:0]const u8,
     legacy: ?*const c.TDNF_SOLVED_PKG_INFO,
@@ -373,6 +418,25 @@ fn nativeSolverLiveCompare(
     };
 
     const allocator = std.heap.c_allocator;
+    const protected_names = protectedNamesFromC(
+        allocator,
+        raw_protected_names,
+    ) catch |err| {
+        return switch (err) {
+            error.OutOfMemory => blk: {
+                setError(
+                    "out of memory translating protected package names",
+                    .{},
+                );
+                break :blk c.ERROR_TDNF_OUT_OF_MEMORY;
+            },
+            error.InvalidInput => blk: {
+                setError("invalid protected package name", .{});
+                break :blk c.ERROR_TDNF_INVALID_PARAMETER;
+            },
+        };
+    };
+    defer allocator.free(protected_names);
     const repositories = allocator.alloc(
         solver_live.RepositoryInput,
         repository_count,
@@ -460,6 +524,7 @@ fn nativeSolverLiveCompare(
             .best = best,
             .clean_deps = clean_deps,
             .skip_broken = skip_broken,
+            .protected_names = protected_names,
         },
         @ptrCast(@alignCast(legacy_result)),
         @ptrCast(output),
@@ -471,6 +536,25 @@ fn nativeSolverLiveCompare(
             c.ERROR_TDNF_CALL_NOT_SUPPORTED;
     };
     return 0;
+}
+
+fn protectedNamesFromC(
+    allocator: std.mem.Allocator,
+    raw_protected_names: ?[*:null]const ?[*:0]const u8,
+) ProtectedNamesError![][]const u8 {
+    const raw_names = if (raw_protected_names) |names|
+        std.mem.span(names)
+    else
+        &.{};
+    const protected_names = try allocator.alloc(
+        []const u8,
+        raw_names.len,
+    );
+    errdefer allocator.free(protected_names);
+    for (raw_names, protected_names) |raw, *name| {
+        name.* = spanRequired(raw) orelse return error.InvalidInput;
+    }
+    return protected_names;
 }
 
 fn liveJobFromC(
@@ -910,6 +994,54 @@ test "native live comparison v6 wrapper initializes invalid output" {
     try std.testing.expectEqual(
         @as(u32, c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_INVALID),
         comparison.dwStatus,
+    );
+}
+
+test "native live comparison v7 wrapper initializes invalid output" {
+    var comparison = std.mem.zeroes(
+        c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT,
+    );
+    const result = TDNFRepoMdNativeSolverLiveCompareV7(
+        null,
+        0,
+        null,
+        0,
+        null,
+        0,
+        0,
+        0,
+        0,
+        0,
+        null,
+        null,
+        null,
+        null,
+        &comparison,
+    );
+
+    try std.testing.expectEqual(
+        @as(u32, c.ERROR_TDNF_INVALID_PARAMETER),
+        result,
+    );
+    try std.testing.expectEqual(
+        @as(u32, c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_INVALID),
+        comparison.dwStatus,
+    );
+}
+
+test "translates null-terminated protected package names" {
+    var raw = [_:null]?[*:0]const u8{ "first", "second" };
+    const names = try protectedNamesFromC(std.testing.allocator, &raw);
+    defer std.testing.allocator.free(names);
+
+    try std.testing.expectEqual(@as(usize, 2), names.len);
+    try std.testing.expectEqualStrings("first", names[0]);
+    try std.testing.expectEqualStrings("second", names[1]);
+
+    var invalid = [_:null]?[*:0]const u8{""};
+    try std.testing.expectError(
+        error.InvalidInput,
+        protectedNamesFromC(std.testing.allocator, &invalid),
     );
 }
 

@@ -763,6 +763,30 @@ TDNFRepoMdNativeSolverLiveCompareV6(
     );
 
 /*
+ * Version 7 additionally accepts the authoritative null-terminated protected
+ * package-name array. A null pointer means no protected-package policy.
+ * Authoritative protected-removal failures do not reach the observer.
+ */
+uint32_t
+TDNFRepoMdNativeSolverLiveCompareV7(
+    const TDNF_REPOMD_NATIVE_SOLVER_LIVE_REPOSITORY *pRepositories,
+    uint32_t dwRepositoryCount,
+    const TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB *pJobs,
+    uint32_t dwJobCount,
+    const TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB *pHiddenAvailable,
+    uint32_t dwHiddenAvailableCount,
+    int nAllDeps,
+    int nBest,
+    int nCleanDeps,
+    int nSkipBroken,
+    const char *const *ppszProtectedPackages,
+    const tdnf_rpm_config *pRpmConfig,
+    const char *pszNativeArch,
+    const TDNF_SOLVED_PKG_INFO *pLegacy,
+    TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT *pComparison
+    );
+
+/*
  * Run the native metadata-backed implementation of repoquery-style
  * selectors and field population. `pRepoqueryArgs` uses the public
  * TDNF_REPOQUERY_ARGS layout from tdnftypes.h.
