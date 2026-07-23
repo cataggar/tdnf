@@ -34,6 +34,7 @@ pub const Input = struct {
     /// Null means the caller did not provide an authoritative considered map.
     hidden_available: ?[]const JobInput = null,
     include_installed: bool = true,
+    best: bool = false,
 };
 
 pub const ProduceError =
@@ -195,6 +196,7 @@ pub fn produce(
         .{ .jobs = jobs },
         .{
             .architecture = .{ .native_arch = native_arch },
+            .best = input.best,
         },
     );
     errdefer solved.deinit();
@@ -387,6 +389,30 @@ test "live producer can omit the installed repository" {
         solver_model.RepositoryKind.available,
         solved.universe.repositories[0].kind,
     );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        solved.solved.result.selected.len,
+    );
+}
+
+test "live producer accepts force-best policy" {
+    var fixture = try Fixture.create();
+    defer fixture.cleanup();
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var cache_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var repositories: [1]RepositoryInput = undefined;
+    var jobs: [1]JobInput = undefined;
+    var input = fixtureInput(
+        &fixture,
+        &root_buffer,
+        &cache_buffer,
+        &repositories,
+        &jobs,
+    );
+    input.best = true;
+    var solved = try produce(std.testing.allocator, input);
+    defer solved.deinit();
+
     try std.testing.expectEqual(
         @as(usize, 1),
         solved.solved.result.selected.len,

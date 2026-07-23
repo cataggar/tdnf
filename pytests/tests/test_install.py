@@ -99,6 +99,16 @@ def test_install_debugsolver_native_shadow(utils):
 
         ret = utils.run([
             'tdnf', 'install', '-y', '--nogpgcheck', '--testonly',
+            '--debugsolver', '--noautoremove', '--best', pkgname,
+        ])
+        assert ret['retval'] == 0
+        assert 'native-solver-shadow: projected match' in \
+            '\n'.join(ret['stdout'] + ret['stderr'])
+        assert not utils.check_package(pkgname)
+        shutil.rmtree('debugdata', ignore_errors=True)
+
+        ret = utils.run([
+            'tdnf', 'install', '-y', '--nogpgcheck', '--testonly',
             '--debugsolver', '--noautoremove',
             '--exclude={}'.format(hidden_installed), pkgname,
         ])
