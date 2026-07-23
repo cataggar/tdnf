@@ -677,8 +677,7 @@ TDNFGoalObserveNativeSolver(
         BAIL_ON_TDNF_ERROR(dwError);
     }
     if(nAllowErasing || nReInstall || nProblems || nUnresolved ||
-       pTdnf->pConf->ppszPkgLocks || pTdnf->pConf->ppszProtectedPkgs ||
-       pTdnf->pConf->ppszInstallOnlyPkgs)
+       pTdnf->pConf->ppszPkgLocks || pTdnf->pConf->ppszInstallOnlyPkgs)
     {
         dwError = ERROR_TDNF_CALL_NOT_SUPPORTED;
         BAIL_ON_TDNF_ERROR(dwError);
@@ -716,12 +715,13 @@ TDNFGoalObserveNativeSolver(
                   &pHiddenAvailable,
                   &dwHiddenAvailableCount);
     BAIL_ON_TDNF_ERROR(dwError);
-    dwError = TDNFRepoMdNativeSolverLiveCompareV6(
+    dwError = TDNFRepoMdNativeSolverLiveCompareV7(
                   pRepos,
                   dwRepoCount,
                   pJobs, dwJobCount,
                   pHiddenAvailable, dwHiddenAvailableCount,
                   pTdnf->pArgs->nAllDeps, pTdnf->pArgs->nBest, nAutoErase, pTdnf->pArgs->nSkipBroken,
+                  (const char *const *)pTdnf->pConf->ppszProtectedPkgs,
                   pTdnf->pRpmConfig,
                   pszNativeArch,
                   pInfo,

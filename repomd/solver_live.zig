@@ -37,6 +37,7 @@ pub const Input = struct {
     best: bool = false,
     clean_deps: bool = false,
     skip_broken: bool = false,
+    protected_names: []const []const u8 = &.{},
 };
 
 pub const ProduceError =
@@ -201,6 +202,7 @@ pub fn produce(
             .best = input.best,
             .clean_deps = input.clean_deps,
             .skip_broken = input.skip_broken,
+            .protected_names = input.protected_names,
         },
     );
     errdefer solved.deinit();
@@ -412,7 +414,7 @@ test "live producer can omit the installed repository" {
     );
 }
 
-test "live producer accepts force-best and clean-deps policy" {
+test "live producer accepts force-best clean-deps and protected policy" {
     var fixture = try Fixture.create();
     defer fixture.cleanup();
     var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -428,6 +430,7 @@ test "live producer accepts force-best and clean-deps policy" {
     );
     input.best = true;
     input.clean_deps = true;
+    input.protected_names = &.{"missing-protected"};
     var solved = try produce(std.testing.allocator, input);
     defer solved.deinit();
 
