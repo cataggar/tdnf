@@ -1547,7 +1547,7 @@ TDNFResolve(
                       pTdnf,
                       &queueGoal,
                       &pSolvedPkgInfo,
-                      nAlterType);
+                      nAlterType, ppszPkgsNotResolved[0] != NULL);
     } else {
         dwError = TDNFGoalNoDeps(
                       pTdnf,

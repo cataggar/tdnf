@@ -89,10 +89,32 @@ def test_install_debugsolver_native_shadow(utils):
     try:
         ret = utils.run([
             'tdnf', 'install', '-y', '--nogpgcheck', '--testonly',
-            '--debugsolver', pkgname,
+            '--debugsolver', '--skip-broken', pkgname,
         ])
         assert ret['retval'] == 0
         assert 'native-solver-shadow: projected match' in \
+            '\n'.join(ret['stdout'] + ret['stderr'])
+        assert not utils.check_package(pkgname)
+        shutil.rmtree('debugdata', ignore_errors=True)
+
+        ret = utils.run([
+            'tdnf', 'install', '-y', '--nogpgcheck', '--testonly',
+            '--debugsolver', '--noautoremove', '--skip-broken',
+            pkgname, 'missing',
+        ])
+        assert ret['retval'] == 0
+        assert 'native-solver-shadow: unavailable' in \
+            '\n'.join(ret['stdout'] + ret['stderr'])
+        assert not utils.check_package(pkgname)
+        shutil.rmtree('debugdata', ignore_errors=True)
+
+        ret = utils.run([
+            'tdnf', 'install', '-y', '--nogpgcheck', '--testonly',
+            '--debugsolver', '--noautoremove', '--skip-broken',
+            pkgname, 'tdnf-missing-dep',
+        ])
+        assert ret['retval'] == 0
+        assert 'native-solver-shadow: unavailable' in \
             '\n'.join(ret['stdout'] + ret['stderr'])
         assert not utils.check_package(pkgname)
         shutil.rmtree('debugdata', ignore_errors=True)
