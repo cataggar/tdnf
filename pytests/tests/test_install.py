@@ -166,6 +166,19 @@ def test_install_debugsolver_native_shadow(utils):
 
         ret = utils.run([
             'tdnf', 'install', '-y', '--nogpgcheck', '--testonly',
+            '--debugsolver', '--noautoremove', PKGNAME_OBSING,
+        ])
+        assert ret['retval'] == 0
+        assert 'native-solver-shadow: projected match' in \
+            '\n'.join(ret['stdout'] + ret['stderr'])
+        assert 'native-solver-shadow: unavailable' not in \
+            '\n'.join(ret['stdout'] + ret['stderr'])
+        assert utils.check_package(PKGNAME_OBSED)
+        assert not utils.check_package(PKGNAME_OBSING)
+        shutil.rmtree('debugdata', ignore_errors=True)
+
+        ret = utils.run([
+            'tdnf', 'install', '-y', '--nogpgcheck', '--testonly',
             '--debugsolver', '--noautoremove', '--skip-broken',
             pkgname, 'missing',
         ])
