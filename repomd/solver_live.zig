@@ -36,6 +36,7 @@ pub const Input = struct {
     include_installed: bool = true,
     best: bool = false,
     clean_deps: bool = false,
+    skip_broken: bool = false,
 };
 
 pub const ProduceError =
@@ -199,6 +200,7 @@ pub fn produce(
             .architecture = .{ .native_arch = native_arch },
             .best = input.best,
             .clean_deps = input.clean_deps,
+            .skip_broken = input.skip_broken,
         },
     );
     errdefer solved.deinit();
@@ -234,16 +236,16 @@ const fixture_repomd =
     \\<?xml version="1.0" encoding="UTF-8"?>
     \\<repomd xmlns="http://linux.duke.edu/metadata/repo">
     \\  <data type="primary">
-    \\    <checksum type="sha256">048be7ad0199c0267a884bf2bf58df47c7fed78db55809e599d0473cd245a77f</checksum>
+    \\    <checksum type="sha256">f20a7a5300215ee0935c234e6dbb8cca7d8d2dbbed137fc002d502b0bfbd7f8a</checksum>
     \\    <location href="repodata/primary.xml"/>
-    \\    <size>387</size>
+    \\    <size>809</size>
     \\  </data>
     \\</repomd>
 ;
 
 const fixture_primary =
     \\<?xml version="1.0" encoding="UTF-8"?>
-    \\<metadata xmlns="http://linux.duke.edu/metadata/common" packages="1">
+    \\<metadata xmlns="http://linux.duke.edu/metadata/common" xmlns:rpm="http://linux.duke.edu/metadata/rpm" packages="2">
     \\  <package type="rpm">
     \\    <name>candidate</name>
     \\    <arch>x86_64</arch>
@@ -251,6 +253,19 @@ const fixture_primary =
     \\    <checksum type="sha256" pkgid="YES">abcdef</checksum>
     \\    <summary>candidate</summary>
     \\    <location href="packages/candidate.rpm"/>
+    \\  </package>
+    \\  <package type="rpm">
+    \\    <name>broken</name>
+    \\    <arch>x86_64</arch>
+    \\    <version epoch="0" ver="1.0" rel="1"/>
+    \\    <checksum type="sha256" pkgid="YES">fedcba</checksum>
+    \\    <summary>broken</summary>
+    \\    <location href="packages/broken.rpm"/>
+    \\    <format>
+    \\      <rpm:requires>
+    \\        <rpm:entry name="missing-capability"/>
+    \\      </rpm:requires>
+    \\    </format>
     \\  </package>
     \\</metadata>
 ;
@@ -416,6 +431,50 @@ test "live producer accepts force-best and clean-deps policy" {
     var solved = try produce(std.testing.allocator, input);
     defer solved.deinit();
 
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        solved.solved.result.selected.len,
+    );
+}
+
+test "live producer records broken exact jobs under skip-broken policy" {
+    var fixture = try Fixture.create();
+    defer fixture.cleanup();
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var cache_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var repositories: [1]RepositoryInput = undefined;
+    var base_jobs: [1]JobInput = undefined;
+    var input = fixtureInput(
+        &fixture,
+        &root_buffer,
+        &cache_buffer,
+        &repositories,
+        &base_jobs,
+    );
+    var jobs = [_]JobInput{
+        base_jobs[0],
+        .{ .selector = .{
+            .repository = "repo",
+            .name = "broken",
+            .epoch = null,
+            .version = "1.0",
+            .release = "1",
+            .arch = "x86_64",
+        } },
+    };
+    input.jobs = &jobs;
+    input.skip_broken = true;
+    var solved = try produce(std.testing.allocator, input);
+    defer solved.deinit();
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        solved.solved.result.outcome.skipped_jobs.len,
+    );
+    try std.testing.expectEqual(
+        @as(solver_model.JobId, @enumFromInt(1)),
+        solved.solved.result.outcome.skipped_jobs[0],
+    );
     try std.testing.expectEqual(
         @as(usize, 1),
         solved.solved.result.selected.len,

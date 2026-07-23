@@ -495,7 +495,7 @@ TDNFGoal(
     PTDNF pTdnf,
     Queue* pkgList,
     PTDNF_SOLVED_PKG_INFO* ppInfo,
-    TDNF_ALTERTYPE nAlterType
+    TDNF_ALTERTYPE nAlterType, int nUnresolved
     );
 
 uint32_t

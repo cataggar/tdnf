@@ -17,7 +17,7 @@ TDNFGoalObserveNativeSolver(
     int nAllowErasing,
     int nAutoErase,
     int nReInstall,
-    int nProblems
+    int nProblems, int nUnresolved
 );
 
 static
@@ -345,7 +345,7 @@ TDNFSolv(
     uint32_t dwExcludeCount,
     int nAllowErasing,
     int nAutoErase,
-    int nReInstall,
+    int nReInstall, int nUnresolved,
     PTDNF_SOLVED_PKG_INFO* ppInfo
     )
 {
@@ -485,7 +485,7 @@ TDNFSolv(
                                      nAllowErasing,
                                      nAutoErase,
                                      nReInstall,
-                                     nProblems);
+                                     nProblems, nUnresolved);
         if(dwShadowError)
         {
             pr_info("native-solver-shadow: unavailable (%u)\n",
@@ -563,7 +563,7 @@ TDNFGoal(
     PTDNF pTdnf,
     Queue* pQueuePkgList,
     PTDNF_SOLVED_PKG_INFO* ppInfo,
-    TDNF_ALTERTYPE nAlterType
+    TDNF_ALTERTYPE nAlterType, int nUnresolved
     )
 {
     uint32_t dwError = 0;
@@ -628,7 +628,7 @@ TDNFGoal(
                                 nAlterType == ALTER_AUTOERASE,
                                 nAlterType == ALTER_REINSTALL ||
                                 (nAlterType == ALTER_DISTRO_SYNC && pTdnf->pConf->nDistroSyncReinstallChanged),
-                       ppInfo);
+                       nUnresolved, ppInfo);
     BAIL_ON_TDNF_ERROR(dwError);
 
     if (nAlterType == ALTER_INSTALL)
@@ -656,7 +656,7 @@ TDNFGoalObserveNativeSolver(
     int nAllowErasing,
     int nAutoErase,
     int nReInstall,
-    int nProblems
+    int nProblems, int nUnresolved
     )
 {
     uint32_t dwError = 0;
@@ -676,7 +676,7 @@ TDNFGoalObserveNativeSolver(
         dwError = ERROR_TDNF_INVALID_PARAMETER;
         BAIL_ON_TDNF_ERROR(dwError);
     }
-    if(nAllowErasing || nReInstall || nProblems || pTdnf->pArgs->nSkipBroken ||
+    if(nAllowErasing || nReInstall || nProblems || nUnresolved ||
        pTdnf->pConf->ppszPkgLocks || pTdnf->pConf->ppszProtectedPkgs ||
        pTdnf->pConf->ppszInstallOnlyPkgs)
     {
@@ -716,12 +716,12 @@ TDNFGoalObserveNativeSolver(
                   &pHiddenAvailable,
                   &dwHiddenAvailableCount);
     BAIL_ON_TDNF_ERROR(dwError);
-    dwError = TDNFRepoMdNativeSolverLiveCompareV5(
+    dwError = TDNFRepoMdNativeSolverLiveCompareV6(
                   pRepos,
                   dwRepoCount,
                   pJobs, dwJobCount,
                   pHiddenAvailable, dwHiddenAvailableCount,
-                  pTdnf->pArgs->nAllDeps, pTdnf->pArgs->nBest, nAutoErase,
+                  pTdnf->pArgs->nAllDeps, pTdnf->pArgs->nBest, nAutoErase, pTdnf->pArgs->nSkipBroken,
                   pTdnf->pRpmConfig,
                   pszNativeArch,
                   pInfo,
@@ -1136,7 +1136,7 @@ TDNFHistoryGoal(
     dwError = TDNFSolv(pTdnf, &queueJobs, ppszExcludes, dwExcludeCount,
                        1, /* nAllowErasing */
                        0, /* nAutoErase */
-                       0, /* nReInstall */
+                       0, /* nReInstall */ 0, /* nUnresolved */
                        ppInfo);
     BAIL_ON_TDNF_ERROR(dwError);
 
