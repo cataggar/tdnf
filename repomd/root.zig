@@ -143,6 +143,7 @@ pub export fn TDNFRepoMdNativeSolverLiveCompare(
         false,
         false,
         false,
+        false,
         rpm_config,
         raw_native_arch,
         legacy,
@@ -170,6 +171,7 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV2(
         raw_hidden_available,
         hidden_available_count,
         true,
+        false,
         false,
         false,
         rpm_config,
@@ -202,6 +204,7 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV3(
         true,
         all_deps != 0,
         false,
+        false,
         rpm_config,
         raw_native_arch,
         legacy,
@@ -233,6 +236,40 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV4(
         true,
         all_deps != 0,
         best != 0,
+        false,
+        rpm_config,
+        raw_native_arch,
+        legacy,
+        comparison,
+    );
+}
+
+pub export fn TDNFRepoMdNativeSolverLiveCompareV5(
+    raw_repositories: ?[*]const c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_REPOSITORY,
+    repository_count: u32,
+    raw_jobs: ?[*]const c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB,
+    job_count: u32,
+    raw_hidden_available: ?[*]const c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB,
+    hidden_available_count: u32,
+    all_deps: c_int,
+    best: c_int,
+    clean_deps: c_int,
+    rpm_config: ?*const c.tdnf_rpm_config,
+    raw_native_arch: ?[*:0]const u8,
+    legacy: ?*const c.TDNF_SOLVED_PKG_INFO,
+    comparison: ?*c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT,
+) u32 {
+    return nativeSolverLiveCompare(
+        raw_repositories,
+        repository_count,
+        raw_jobs,
+        job_count,
+        raw_hidden_available,
+        hidden_available_count,
+        true,
+        all_deps != 0,
+        best != 0,
+        clean_deps != 0,
         rpm_config,
         raw_native_arch,
         legacy,
@@ -250,6 +287,7 @@ fn nativeSolverLiveCompare(
     has_considered: bool,
     all_deps: bool,
     best: bool,
+    clean_deps: bool,
     rpm_config: ?*const c.tdnf_rpm_config,
     raw_native_arch: ?[*:0]const u8,
     legacy: ?*const c.TDNF_SOLVED_PKG_INFO,
@@ -379,6 +417,7 @@ fn nativeSolverLiveCompare(
             .hidden_available = hidden_available,
             .include_installed = !all_deps,
             .best = best,
+            .clean_deps = clean_deps,
         },
         @ptrCast(@alignCast(legacy_result)),
         @ptrCast(output),
@@ -752,6 +791,36 @@ test "native live comparison v4 wrapper initializes invalid output" {
         null,
         0,
         null,
+        0,
+        0,
+        1,
+        null,
+        null,
+        null,
+        &comparison,
+    );
+
+    try std.testing.expectEqual(
+        @as(u32, c.ERROR_TDNF_INVALID_PARAMETER),
+        result,
+    );
+    try std.testing.expectEqual(
+        @as(u32, c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_INVALID),
+        comparison.dwStatus,
+    );
+}
+
+test "native live comparison v5 wrapper initializes invalid output" {
+    var comparison = std.mem.zeroes(
+        c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT,
+    );
+    const result = TDNFRepoMdNativeSolverLiveCompareV5(
+        null,
+        0,
+        null,
+        0,
+        null,
+        0,
         0,
         0,
         1,

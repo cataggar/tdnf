@@ -718,6 +718,28 @@ TDNFRepoMdNativeSolverLiveCompareV4(
     );
 
 /*
+ * Version 5 additionally accepts authoritative clean-deps policy. When
+ * nCleanDeps is nonzero, native cleanup policy matches SOLVER_CLEANDEPS on
+ * each original libsolv job. Erase and autoremove jobs remain unsupported.
+ */
+uint32_t
+TDNFRepoMdNativeSolverLiveCompareV5(
+    const TDNF_REPOMD_NATIVE_SOLVER_LIVE_REPOSITORY *pRepositories,
+    uint32_t dwRepositoryCount,
+    const TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB *pJobs,
+    uint32_t dwJobCount,
+    const TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB *pHiddenAvailable,
+    uint32_t dwHiddenAvailableCount,
+    int nAllDeps,
+    int nBest,
+    int nCleanDeps,
+    const tdnf_rpm_config *pRpmConfig,
+    const char *pszNativeArch,
+    const TDNF_SOLVED_PKG_INFO *pLegacy,
+    TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT *pComparison
+    );
+
+/*
  * Run the native metadata-backed implementation of repoquery-style
  * selectors and field population. `pRepoqueryArgs` uses the public
  * TDNF_REPOQUERY_ARGS layout from tdnftypes.h.

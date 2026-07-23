@@ -35,6 +35,7 @@ pub const Input = struct {
     hidden_available: ?[]const JobInput = null,
     include_installed: bool = true,
     best: bool = false,
+    clean_deps: bool = false,
 };
 
 pub const ProduceError =
@@ -197,6 +198,7 @@ pub fn produce(
         .{
             .architecture = .{ .native_arch = native_arch },
             .best = input.best,
+            .clean_deps = input.clean_deps,
         },
     );
     errdefer solved.deinit();
@@ -395,7 +397,7 @@ test "live producer can omit the installed repository" {
     );
 }
 
-test "live producer accepts force-best policy" {
+test "live producer accepts force-best and clean-deps policy" {
     var fixture = try Fixture.create();
     defer fixture.cleanup();
     var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -410,6 +412,7 @@ test "live producer accepts force-best policy" {
         &jobs,
     );
     input.best = true;
+    input.clean_deps = true;
     var solved = try produce(std.testing.allocator, input);
     defer solved.deinit();
 

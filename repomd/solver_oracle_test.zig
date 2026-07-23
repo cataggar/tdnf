@@ -1171,6 +1171,95 @@ test "effective jobs own exact selections including synthetic user-installed job
     ) != null);
 }
 
+test "clean deps is a no-op for a fresh exact install" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    try builder.addPackage(installed, .{ .name = "old-orphan" });
+    builder.repos.items[installed].installed_states.items[0].reason = .automatic;
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(available, .{ .name = "requested" });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    const goal = solver_model.Goal{ .jobs = &.{.{
+        .action = .install,
+        .selection = .{ .package = @enumFromInt(1) },
+    }} };
+    var cleanup_policy = policy();
+    cleanup_policy.best = true;
+    cleanup_policy.clean_deps = true;
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        cleanup_policy,
+    );
+    defer observation.deinit();
+    try testing.expect(containsSelectedName(&graph, &observation, "old-orphan"));
+    try testing.expect(containsSelectedName(&graph, &observation, "requested"));
+    var native = try solveNative(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        cleanup_policy,
+    );
+    defer native.deinit();
+    try expectNativeMatchesOracle(&native, &observation);
+}
+
+test "clean deps exact install replacement remains unsupported" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    var builder = GraphBuilder.init(arena_state.allocator());
+    const installed = try builder.addRepo("@System", .installed, 50);
+    try builder.addPackage(installed, .{
+        .name = "requested",
+        .version = "1",
+        .requires = &.{relation("old-dependency")},
+    });
+    try builder.addPackage(installed, .{ .name = "old-dependency" });
+    builder.repos.items[installed].installed_states.items[0].reason = .user;
+    builder.repos.items[installed].installed_states.items[1].reason = .automatic;
+    const available = try builder.addRepo("available", .available, 50);
+    try builder.addPackage(available, .{
+        .name = "requested",
+        .version = "2",
+    });
+    var graph = try builder.finish(&arena_state);
+    defer graph.deinit();
+
+    const goal = solver_model.Goal{ .jobs = &.{.{
+        .action = .install,
+        .selection = .{ .package = @enumFromInt(2) },
+    }} };
+    var cleanup_policy = policy();
+    cleanup_policy.clean_deps = true;
+    var observation = try oracle.solve(
+        testing.allocator,
+        &graph.universe,
+        goal,
+        cleanup_policy,
+    );
+    defer observation.deinit();
+    try testing.expectEqual(
+        solver_model.ActionKind.upgrade,
+        actionForName(&graph, &observation, "requested").?.kind,
+    );
+    try testing.expectEqual(
+        solver_model.TransactionReason.cleanup,
+        actionForName(&graph, &observation, "old-dependency").?.reason,
+    );
+    try testing.expectError(
+        error.UnsupportedPolicy,
+        solveNative(
+            testing.allocator,
+            &graph.universe,
+            goal,
+            cleanup_policy,
+        ),
+    );
+}
+
 test "clean deps removes only the automatic dependency closure of an exact erase" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     var builder = GraphBuilder.init(arena_state.allocator());
