@@ -86,6 +86,7 @@ def test_install_debugsolver_native_shadow(utils):
     conflict0 = 'tdnf-test-dummy-conflicts-0'
     conflict1 = 'tdnf-test-dummy-conflicts-1'
     protected_dir = os.path.join(utils.config['repo_path'], 'protected.d')
+    locks_dir = os.path.join(utils.config['repo_path'], 'locks.d')
     utils.erase_package(pkgname)
     utils.erase_package(hidden_installed)
     utils.erase_package(alldeps_pkg)
@@ -131,6 +132,55 @@ def test_install_debugsolver_native_shadow(utils):
         assert 'native-solver-shadow: unavailable' not in \
             '\n'.join(ret['stdout'] + ret['stderr'])
         assert utils.check_package(pkgname, version=pkgversion)
+        shutil.rmtree('debugdata', ignore_errors=True)
+        utils.erase_package(pkgname)
+
+        utils.run([
+            'tdnf', 'install', '-y', '--nogpgcheck',
+            '{}-{}'.format(pkgname, pkgversion),
+        ])
+        os.makedirs(locks_dir, exist_ok=True)
+        with open(os.path.join(locks_dir, 'native-shadow.conf'), 'w') as f:
+            f.write(pkgname)
+        ret = utils.run([
+            'tdnf', 'upgrade', '-y', '--nogpgcheck', '--testonly',
+            '--debugsolver', '--noautoremove',
+        ])
+        assert ret['retval'] == 0
+        assert 'native-solver-shadow: projected match' in \
+            '\n'.join(ret['stdout'] + ret['stderr'])
+        assert 'native-solver-shadow: unavailable' not in \
+            '\n'.join(ret['stdout'] + ret['stderr'])
+        assert utils.check_package(pkgname, version=pkgversion)
+
+        with open(os.path.join(locks_dir, 'native-shadow.conf'), 'w') as f:
+            f.write(hidden_installed)
+        utils.erase_package(pkgname)
+        ret = utils.run([
+            'tdnf', 'install', '-y', '--nogpgcheck', '--testonly',
+            '--debugsolver', '--noautoremove', '--best', pkgname,
+        ])
+        assert ret['retval'] == 0
+        assert 'native-solver-shadow: projected match' in \
+            '\n'.join(ret['stdout'] + ret['stderr'])
+        assert 'native-solver-shadow: unavailable' not in \
+            '\n'.join(ret['stdout'] + ret['stderr'])
+        assert not utils.check_package(pkgname)
+        assert utils.check_package(hidden_installed)
+
+        utils.install_package(pkgname)
+        with open(os.path.join(locks_dir, 'native-shadow.conf'), 'w') as f:
+            f.write('{}\nmissing-native-lock'.format(hidden_installed))
+        ret = utils.run([
+            'tdnf', 'erase', '-y', '--testonly', '--debugsolver',
+            '--noautoremove', pkgname,
+        ])
+        assert ret['retval'] == 0
+        assert 'native-solver-shadow: unavailable' in \
+            '\n'.join(ret['stdout'] + ret['stderr'])
+        assert utils.check_package(pkgname)
+        assert utils.check_package(hidden_installed)
+        shutil.rmtree(locks_dir)
         shutil.rmtree('debugdata', ignore_errors=True)
         utils.erase_package(pkgname)
 
@@ -316,6 +366,7 @@ def test_install_debugsolver_native_shadow(utils):
         assert not utils.check_package(alldeps_pkg)
     finally:
         shutil.rmtree(protected_dir, ignore_errors=True)
+        shutil.rmtree(locks_dir, ignore_errors=True)
         shutil.rmtree('debugdata', ignore_errors=True)
         utils.erase_package(alldeps_pkg)
         utils.erase_package(alldeps_required)
