@@ -44,6 +44,7 @@ pub const Input = struct {
     include_installed: bool = true,
     update_all: bool = false,
     dist_sync_all: bool = false,
+    locked_names: []const []const u8 = &.{},
     best: bool = false,
     allow_erasing: bool = false,
     clean_deps: bool = false,
@@ -92,7 +93,8 @@ pub fn produce(
         @as(usize, @intFromBool(input.update_all)) +
         @as(usize, @intFromBool(input.dist_sync_all));
     if (input.repositories.len == 0 or
-        input.jobs.len + input.erase_jobs.len + global_job_count == 0 or
+        input.jobs.len + input.erase_jobs.len + input.locked_names.len +
+            global_job_count == 0 or
         input.native_arch.len == 0)
     {
         return error.InvalidInput;
@@ -108,6 +110,12 @@ pub fn produce(
     }
     if (input.erase_jobs.len != 0 and
         (input.jobs.len != 0 or input.clean_deps))
+    {
+        return error.UnsupportedInput;
+    }
+    if (input.locked_names.len != 0 and
+        (!input.include_installed or
+            (global_job_count != 0 and input.best)))
     {
         return error.UnsupportedInput;
     }
@@ -190,7 +198,8 @@ pub fn produce(
     defer identity.deinit();
     const jobs = try arena.alloc(
         solver_model.Job,
-        input.jobs.len + input.erase_jobs.len + global_job_count,
+        input.jobs.len + input.erase_jobs.len + input.locked_names.len +
+            global_job_count,
     );
     for (input.jobs, jobs[0..input.jobs.len]) |job, *translated| {
         translated.* = .{
@@ -211,6 +220,18 @@ pub fn produce(
                 .package = try identity.resolveInstalledNevra(job.selector),
             },
             .reason = .user,
+        };
+    }
+    const exact_job_count = input.jobs.len + input.erase_jobs.len;
+    for (
+        input.locked_names,
+        jobs[exact_job_count .. exact_job_count + input.locked_names.len],
+    ) |name, *translated| {
+        if (name.len == 0) return error.InvalidInput;
+        translated.* = .{
+            .action = .lock,
+            .selection = .{ .name = try arena.dupe(u8, name) },
+            .reason = .policy,
         };
     }
     if (input.update_all) {
@@ -595,6 +616,45 @@ test "live producer translates a single distro-sync-all job" {
     );
 
     input.update_all = true;
+    try std.testing.expectError(
+        error.UnsupportedInput,
+        produce(std.testing.allocator, input),
+    );
+}
+
+test "live producer translates installed package locks by name" {
+    var fixture = try Fixture.create();
+    defer fixture.cleanup();
+    try fixture.addInstalledVersion(41, "candidate", "0.9");
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var cache_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var repositories: [1]RepositoryInput = undefined;
+    var jobs: [1]JobInput = undefined;
+    var input = fixtureInput(
+        &fixture,
+        &root_buffer,
+        &cache_buffer,
+        &repositories,
+        &jobs,
+    );
+    input.jobs = &.{};
+    input.update_all = true;
+    input.locked_names = &.{"candidate"};
+    var solved = try produce(std.testing.allocator, input);
+    defer solved.deinit();
+
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        solved.solved.result.outcome.actions.len,
+    );
+
+    input.best = true;
+    try std.testing.expectError(
+        error.UnsupportedInput,
+        produce(std.testing.allocator, input),
+    );
+    input.best = false;
+    input.include_installed = false;
     try std.testing.expectError(
         error.UnsupportedInput,
         produce(std.testing.allocator, input),

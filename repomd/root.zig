@@ -156,6 +156,7 @@ pub export fn TDNFRepoMdNativeSolverLiveCompare(
         comparison,
         false,
         false,
+        null,
     );
 }
 
@@ -193,6 +194,7 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV2(
         comparison,
         false,
         false,
+        null,
     );
 }
 
@@ -231,6 +233,7 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV3(
         comparison,
         false,
         false,
+        null,
     );
 }
 
@@ -270,6 +273,7 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV4(
         comparison,
         false,
         false,
+        null,
     );
 }
 
@@ -310,6 +314,7 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV5(
         comparison,
         false,
         false,
+        null,
     );
 }
 
@@ -351,6 +356,7 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV6(
         comparison,
         false,
         false,
+        null,
     );
 }
 
@@ -393,6 +399,7 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV7(
         comparison,
         false,
         false,
+        null,
     );
 }
 
@@ -437,6 +444,7 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV8(
         comparison,
         false,
         false,
+        null,
     );
 }
 
@@ -482,6 +490,7 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV9(
         comparison,
         false,
         false,
+        null,
     );
 }
 
@@ -528,6 +537,7 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV10(
         comparison,
         update_all != 0,
         false,
+        null,
     );
 }
 
@@ -575,6 +585,56 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV11(
         comparison,
         update_all != 0,
         dist_sync_all != 0,
+        null,
+    );
+}
+
+pub export fn TDNFRepoMdNativeSolverLiveCompareV12(
+    raw_repositories: ?[*]const c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_REPOSITORY,
+    repository_count: u32,
+    raw_jobs: ?[*]const c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB,
+    job_count: u32,
+    raw_erase_jobs: ?[*]const c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB,
+    erase_job_count: u32,
+    raw_hidden_available: ?[*]const c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB,
+    hidden_available_count: u32,
+    all_deps: c_int,
+    best: c_int,
+    clean_deps: c_int,
+    skip_broken: c_int,
+    allow_erasing: c_int,
+    update_all: c_int,
+    dist_sync_all: c_int,
+    raw_locked_names: ?[*:null]const ?[*:0]const u8,
+    raw_protected_names: ?[*:null]const ?[*:0]const u8,
+    rpm_config: ?*const c.tdnf_rpm_config,
+    raw_native_arch: ?[*:0]const u8,
+    legacy: ?*const c.TDNF_SOLVED_PKG_INFO,
+    comparison: ?*c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT,
+) u32 {
+    return nativeSolverLiveCompare(
+        raw_repositories,
+        repository_count,
+        raw_jobs,
+        job_count,
+        raw_erase_jobs,
+        erase_job_count,
+        raw_hidden_available,
+        hidden_available_count,
+        true,
+        all_deps != 0,
+        best != 0,
+        clean_deps != 0,
+        skip_broken != 0,
+        allow_erasing != 0,
+        raw_protected_names,
+        rpm_config,
+        raw_native_arch,
+        legacy,
+        comparison,
+        update_all != 0,
+        dist_sync_all != 0,
+        raw_locked_names,
     );
 }
 
@@ -600,6 +660,7 @@ fn nativeSolverLiveCompare(
     comparison: ?*c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT,
     update_all: bool,
     dist_sync_all: bool,
+    raw_locked_names: ?[*:null]const ?[*:0]const u8,
 ) u32 {
     clearError();
     const output = comparison orelse {
@@ -620,9 +681,13 @@ fn nativeSolverLiveCompare(
         setError("null native live erase jobs", .{});
         return c.ERROR_TDNF_INVALID_PARAMETER;
     }
+    const has_locked_names = if (raw_locked_names) |names|
+        names[0] != null
+    else
+        false;
     if (repository_count == 0 or
         (job_count == 0 and erase_job_count == 0 and
-            !update_all and !dist_sync_all))
+            !update_all and !dist_sync_all and !has_locked_names))
     {
         setError("empty native live input", .{});
         return c.ERROR_TDNF_INVALID_PARAMETER;
@@ -647,7 +712,7 @@ fn nativeSolverLiveCompare(
     };
 
     const allocator = std.heap.c_allocator;
-    const protected_names = protectedNamesFromC(
+    const protected_names = namesFromC(
         allocator,
         raw_protected_names,
     ) catch |err| {
@@ -666,6 +731,22 @@ fn nativeSolverLiveCompare(
         };
     };
     defer allocator.free(protected_names);
+    const locked_names = namesFromC(
+        allocator,
+        raw_locked_names,
+    ) catch |err| {
+        return switch (err) {
+            error.OutOfMemory => blk: {
+                setError("out of memory translating locked package names", .{});
+                break :blk c.ERROR_TDNF_OUT_OF_MEMORY;
+            },
+            error.InvalidInput => blk: {
+                setError("invalid locked package name", .{});
+                break :blk c.ERROR_TDNF_INVALID_PARAMETER;
+            },
+        };
+    };
+    defer allocator.free(locked_names);
     const repositories = allocator.alloc(
         solver_live.RepositoryInput,
         repository_count,
@@ -771,6 +852,7 @@ fn nativeSolverLiveCompare(
             .include_installed = !all_deps,
             .update_all = update_all,
             .dist_sync_all = dist_sync_all,
+            .locked_names = locked_names,
             .best = best,
             .allow_erasing = allow_erasing,
             .clean_deps = clean_deps,
@@ -789,23 +871,23 @@ fn nativeSolverLiveCompare(
     return 0;
 }
 
-fn protectedNamesFromC(
+fn namesFromC(
     allocator: std.mem.Allocator,
-    raw_protected_names: ?[*:null]const ?[*:0]const u8,
+    raw_names_pointer: ?[*:null]const ?[*:0]const u8,
 ) ProtectedNamesError![][]const u8 {
-    const raw_names = if (raw_protected_names) |names|
+    const raw_names = if (raw_names_pointer) |names|
         std.mem.span(names)
     else
         &.{};
-    const protected_names = try allocator.alloc(
+    const translated_names = try allocator.alloc(
         []const u8,
         raw_names.len,
     );
-    errdefer allocator.free(protected_names);
-    for (raw_names, protected_names) |raw, *name| {
+    errdefer allocator.free(translated_names);
+    for (raw_names, translated_names) |raw, *name| {
         name.* = spanRequired(raw) orelse return error.InvalidInput;
     }
-    return protected_names;
+    return translated_names;
 }
 
 fn liveJobFromC(
@@ -1455,7 +1537,7 @@ test "translates exact installed erase selectors" {
 
 test "translates null-terminated protected package names" {
     var raw = [_:null]?[*:0]const u8{ "first", "second" };
-    const names = try protectedNamesFromC(std.testing.allocator, &raw);
+    const names = try namesFromC(std.testing.allocator, &raw);
     defer std.testing.allocator.free(names);
 
     try std.testing.expectEqual(@as(usize, 2), names.len);
@@ -1465,7 +1547,7 @@ test "translates null-terminated protected package names" {
     var invalid = [_:null]?[*:0]const u8{""};
     try std.testing.expectError(
         error.InvalidInput,
-        protectedNamesFromC(std.testing.allocator, &invalid),
+        namesFromC(std.testing.allocator, &invalid),
     );
 }
 
