@@ -842,6 +842,34 @@ TDNFRepoMdNativeSolverLiveCompareV9(
     );
 
 /*
+ * Version 10 additionally accepts one authoritative update-all job. When
+ * nUpdateAll is nonzero, exact install and erase job arrays must be empty.
+ * Cleanup and mixed global/exact shapes remain unsupported.
+ */
+uint32_t
+TDNFRepoMdNativeSolverLiveCompareV10(
+    const TDNF_REPOMD_NATIVE_SOLVER_LIVE_REPOSITORY *pRepositories,
+    uint32_t dwRepositoryCount,
+    const TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB *pJobs,
+    uint32_t dwJobCount,
+    const TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB *pEraseJobs,
+    uint32_t dwEraseJobCount,
+    const TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB *pHiddenAvailable,
+    uint32_t dwHiddenAvailableCount,
+    int nAllDeps,
+    int nBest,
+    int nCleanDeps,
+    int nSkipBroken,
+    int nAllowErasing,
+    int nUpdateAll,
+    const char *const *ppszProtectedPackages,
+    const tdnf_rpm_config *pRpmConfig,
+    const char *pszNativeArch,
+    const TDNF_SOLVED_PKG_INFO *pLegacy,
+    TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT *pComparison
+    );
+
+/*
  * Run the native metadata-backed implementation of repoquery-style
  * selectors and field population. `pRepoqueryArgs` uses the public
  * TDNF_REPOQUERY_ARGS layout from tdnftypes.h.

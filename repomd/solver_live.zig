@@ -42,6 +42,7 @@ pub const Input = struct {
     /// Null means the caller did not provide an authoritative considered map.
     hidden_available: ?[]const JobInput = null,
     include_installed: bool = true,
+    update_all: bool = false,
     best: bool = false,
     allow_erasing: bool = false,
     clean_deps: bool = false,
@@ -87,10 +88,19 @@ pub fn produce(
     input: Input,
 ) ProduceError!OwnedSolve {
     if (input.repositories.len == 0 or
-        input.jobs.len + input.erase_jobs.len == 0 or
+        input.jobs.len + input.erase_jobs.len +
+            @intFromBool(input.update_all) == 0 or
         input.native_arch.len == 0)
     {
         return error.InvalidInput;
+    }
+    if (input.update_all and
+        (input.jobs.len != 0 or
+            input.erase_jobs.len != 0 or
+            !input.include_installed or
+            input.clean_deps))
+    {
+        return error.UnsupportedInput;
     }
     if (input.erase_jobs.len != 0 and
         (input.jobs.len != 0 or input.clean_deps))
@@ -176,7 +186,8 @@ pub fn produce(
     defer identity.deinit();
     const jobs = try arena.alloc(
         solver_model.Job,
-        input.jobs.len + input.erase_jobs.len,
+        input.jobs.len + input.erase_jobs.len +
+            @intFromBool(input.update_all),
     );
     for (input.jobs, jobs[0..input.jobs.len]) |job, *translated| {
         translated.* = .{
@@ -187,12 +198,22 @@ pub fn produce(
             .reason = .user,
         };
     }
-    for (input.erase_jobs, jobs[input.jobs.len..]) |job, *translated| {
+    for (
+        input.erase_jobs,
+        jobs[input.jobs.len .. input.jobs.len + input.erase_jobs.len],
+    ) |job, *translated| {
         translated.* = .{
             .action = .erase,
             .selection = .{
                 .package = try identity.resolveInstalledNevra(job.selector),
             },
+            .reason = .user,
+        };
+    }
+    if (input.update_all) {
+        jobs[jobs.len - 1] = .{
+            .action = .update,
+            .selection = .all,
             .reason = .user,
         };
     }
@@ -337,10 +358,19 @@ const Fixture = struct {
     }
 
     fn addInstalled(self: *Fixture, hnum: u32, name: []const u8) !void {
+        return self.addInstalledVersion(hnum, name, "1.0");
+    }
+
+    fn addInstalledVersion(
+        self: *Fixture,
+        hnum: u32,
+        name: []const u8,
+        version: []const u8,
+    ) !void {
         const blob = try rpmpkg.makeMinimalHeaderForTest(
             std.testing.allocator,
             name,
-            "1.0",
+            version,
             "1",
             "x86_64",
         );
@@ -488,6 +518,43 @@ test "live producer can omit the installed repository" {
     try std.testing.expectEqual(
         @as(usize, 1),
         solved.solved.result.selected.len,
+    );
+}
+
+test "live producer translates a single update-all job" {
+    var fixture = try Fixture.create();
+    defer fixture.cleanup();
+    try fixture.addInstalledVersion(41, "candidate", "0.9");
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var cache_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var repositories: [1]RepositoryInput = undefined;
+    var jobs: [1]JobInput = undefined;
+    var input = fixtureInput(
+        &fixture,
+        &root_buffer,
+        &cache_buffer,
+        &repositories,
+        &jobs,
+    );
+    input.jobs = &.{};
+    input.update_all = true;
+    var solved = try produce(std.testing.allocator, input);
+    defer solved.deinit();
+
+    const actions = solved.solved.result.outcome.actions;
+    try std.testing.expectEqual(@as(usize, 1), actions.len);
+    try std.testing.expectEqual(solver_model.ActionKind.upgrade, actions[0].kind);
+
+    input.jobs = &jobs;
+    try std.testing.expectError(
+        error.UnsupportedInput,
+        produce(std.testing.allocator, input),
+    );
+    input.jobs = &.{};
+    input.clean_deps = true;
+    try std.testing.expectError(
+        error.UnsupportedInput,
+        produce(std.testing.allocator, input),
     );
 }
 

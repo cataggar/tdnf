@@ -154,6 +154,7 @@ pub export fn TDNFRepoMdNativeSolverLiveCompare(
         raw_native_arch,
         legacy,
         comparison,
+        false,
     );
 }
 
@@ -189,6 +190,7 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV2(
         raw_native_arch,
         legacy,
         comparison,
+        false,
     );
 }
 
@@ -225,6 +227,7 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV3(
         raw_native_arch,
         legacy,
         comparison,
+        false,
     );
 }
 
@@ -262,6 +265,7 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV4(
         raw_native_arch,
         legacy,
         comparison,
+        false,
     );
 }
 
@@ -300,6 +304,7 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV5(
         raw_native_arch,
         legacy,
         comparison,
+        false,
     );
 }
 
@@ -339,6 +344,7 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV6(
         raw_native_arch,
         legacy,
         comparison,
+        false,
     );
 }
 
@@ -379,6 +385,7 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV7(
         raw_native_arch,
         legacy,
         comparison,
+        false,
     );
 }
 
@@ -421,6 +428,7 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV8(
         raw_native_arch,
         legacy,
         comparison,
+        false,
     );
 }
 
@@ -464,6 +472,52 @@ pub export fn TDNFRepoMdNativeSolverLiveCompareV9(
         raw_native_arch,
         legacy,
         comparison,
+        false,
+    );
+}
+
+pub export fn TDNFRepoMdNativeSolverLiveCompareV10(
+    raw_repositories: ?[*]const c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_REPOSITORY,
+    repository_count: u32,
+    raw_jobs: ?[*]const c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB,
+    job_count: u32,
+    raw_erase_jobs: ?[*]const c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB,
+    erase_job_count: u32,
+    raw_hidden_available: ?[*]const c.TDNF_REPOMD_NATIVE_SOLVER_LIVE_JOB,
+    hidden_available_count: u32,
+    all_deps: c_int,
+    best: c_int,
+    clean_deps: c_int,
+    skip_broken: c_int,
+    allow_erasing: c_int,
+    update_all: c_int,
+    raw_protected_names: ?[*:null]const ?[*:0]const u8,
+    rpm_config: ?*const c.tdnf_rpm_config,
+    raw_native_arch: ?[*:0]const u8,
+    legacy: ?*const c.TDNF_SOLVED_PKG_INFO,
+    comparison: ?*c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT,
+) u32 {
+    return nativeSolverLiveCompare(
+        raw_repositories,
+        repository_count,
+        raw_jobs,
+        job_count,
+        raw_erase_jobs,
+        erase_job_count,
+        raw_hidden_available,
+        hidden_available_count,
+        true,
+        all_deps != 0,
+        best != 0,
+        clean_deps != 0,
+        skip_broken != 0,
+        allow_erasing != 0,
+        raw_protected_names,
+        rpm_config,
+        raw_native_arch,
+        legacy,
+        comparison,
+        update_all != 0,
     );
 }
 
@@ -487,6 +541,7 @@ fn nativeSolverLiveCompare(
     raw_native_arch: ?[*:0]const u8,
     legacy: ?*const c.TDNF_SOLVED_PKG_INFO,
     comparison: ?*c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT,
+    update_all: bool,
 ) u32 {
     clearError();
     const output = comparison orelse {
@@ -508,7 +563,7 @@ fn nativeSolverLiveCompare(
         return c.ERROR_TDNF_INVALID_PARAMETER;
     }
     if (repository_count == 0 or
-        (job_count == 0 and erase_job_count == 0))
+        (job_count == 0 and erase_job_count == 0 and !update_all))
     {
         setError("empty native live input", .{});
         return c.ERROR_TDNF_INVALID_PARAMETER;
@@ -655,6 +710,7 @@ fn nativeSolverLiveCompare(
             .erase_jobs = erase_jobs,
             .hidden_available = hidden_available,
             .include_installed = !all_deps,
+            .update_all = update_all,
             .best = best,
             .allow_erasing = allow_erasing,
             .clean_deps = clean_deps,
@@ -1226,6 +1282,42 @@ test "native live comparison v9 wrapper initializes invalid output" {
         null,
         0,
         null,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        null,
+        null,
+        null,
+        null,
+        &comparison,
+    );
+
+    try std.testing.expectEqual(
+        @as(u32, c.ERROR_TDNF_INVALID_PARAMETER),
+        result,
+    );
+    try std.testing.expectEqual(
+        @as(u32, c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_INVALID),
+        comparison.dwStatus,
+    );
+}
+
+test "native live comparison v10 wrapper initializes invalid output" {
+    var comparison = std.mem.zeroes(
+        c.TDNF_REPOMD_NATIVE_SOLVER_COMPARE_RESULT,
+    );
+    const result = TDNFRepoMdNativeSolverLiveCompareV10(
+        null,
+        0,
+        null,
+        0,
+        null,
+        0,
+        null,
+        0,
         0,
         0,
         0,
