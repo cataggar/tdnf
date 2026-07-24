@@ -43,6 +43,7 @@ pub const Input = struct {
     hidden_available: ?[]const JobInput = null,
     include_installed: bool = true,
     update_all: bool = false,
+    dist_sync_all: bool = false,
     best: bool = false,
     allow_erasing: bool = false,
     clean_deps: bool = false,
@@ -87,15 +88,18 @@ pub fn produce(
     parent_allocator: std.mem.Allocator,
     input: Input,
 ) ProduceError!OwnedSolve {
+    const global_job_count: usize =
+        @as(usize, @intFromBool(input.update_all)) +
+        @as(usize, @intFromBool(input.dist_sync_all));
     if (input.repositories.len == 0 or
-        input.jobs.len + input.erase_jobs.len +
-            @intFromBool(input.update_all) == 0 or
+        input.jobs.len + input.erase_jobs.len + global_job_count == 0 or
         input.native_arch.len == 0)
     {
         return error.InvalidInput;
     }
-    if (input.update_all and
-        (input.jobs.len != 0 or
+    if (global_job_count != 0 and
+        (global_job_count != 1 or
+            input.jobs.len != 0 or
             input.erase_jobs.len != 0 or
             !input.include_installed or
             input.clean_deps))
@@ -186,8 +190,7 @@ pub fn produce(
     defer identity.deinit();
     const jobs = try arena.alloc(
         solver_model.Job,
-        input.jobs.len + input.erase_jobs.len +
-            @intFromBool(input.update_all),
+        input.jobs.len + input.erase_jobs.len + global_job_count,
     );
     for (input.jobs, jobs[0..input.jobs.len]) |job, *translated| {
         translated.* = .{
@@ -213,6 +216,12 @@ pub fn produce(
     if (input.update_all) {
         jobs[jobs.len - 1] = .{
             .action = .update,
+            .selection = .all,
+            .reason = .user,
+        };
+    } else if (input.dist_sync_all) {
+        jobs[jobs.len - 1] = .{
+            .action = .dist_sync,
             .selection = .all,
             .reason = .user,
         };
@@ -552,6 +561,40 @@ test "live producer translates a single update-all job" {
     );
     input.jobs = &.{};
     input.clean_deps = true;
+    try std.testing.expectError(
+        error.UnsupportedInput,
+        produce(std.testing.allocator, input),
+    );
+}
+
+test "live producer translates a single distro-sync-all job" {
+    var fixture = try Fixture.create();
+    defer fixture.cleanup();
+    try fixture.addInstalledVersion(41, "candidate", "2.0");
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var cache_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var repositories: [1]RepositoryInput = undefined;
+    var jobs: [1]JobInput = undefined;
+    var input = fixtureInput(
+        &fixture,
+        &root_buffer,
+        &cache_buffer,
+        &repositories,
+        &jobs,
+    );
+    input.jobs = &.{};
+    input.dist_sync_all = true;
+    var solved = try produce(std.testing.allocator, input);
+    defer solved.deinit();
+
+    const actions = solved.solved.result.outcome.actions;
+    try std.testing.expectEqual(@as(usize, 1), actions.len);
+    try std.testing.expectEqual(
+        solver_model.ActionKind.downgrade,
+        actions[0].kind,
+    );
+
+    input.update_all = true;
     try std.testing.expectError(
         error.UnsupportedInput,
         produce(std.testing.allocator, input),
