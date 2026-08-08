@@ -34,10 +34,9 @@ const client_libsolv_free_srcs = [_][]const u8{
     "api.c",             "goal.c",
     "gpgcheck.c",        "packageutils.c",
     "querynative.c",     "plugins.c",
-    "repo.c",            "remoterepo.c",
-    "repolist.c",        "resolve.c",
-    "rpmtrans.c",        "rpmtrans_native.c",
-    "utils.c",
+    "repo.c",            "repolist.c",
+    "resolve.c",         "rpmtrans.c",
+    "rpmtrans_native.c", "utils.c",
 };
 
 /// Warnings + hardening flags from the former cmake/CFlags.cmake, filtered
@@ -862,6 +861,19 @@ pub fn build(b: *Build) void {
         zig_test_step.dependOn(&run_tests.step);
     }
 
+    const client_download_mod = b.createModule(.{
+        .root_source_file = b.path("client/download/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .pic = true,
+        .imports = &.{
+            .{ .name = "client_abi", .module = client_abi_mod },
+            .{ .name = "tls", .module = tls_dep.module("tls") },
+            .{ .name = "tdnf_error", .module = tdnf_error_mod },
+        },
+    });
+
     const client_repoutils_test_step = b.step(
         "client-repoutils-test",
         "Run client repository utility production tests",
@@ -884,6 +896,34 @@ pub fn build(b: *Build) void {
         const tests = b.addTest(.{ .root_module = test_mod });
         const run_tests = b.addRunArtifact(tests);
         client_repoutils_test_step.dependOn(&run_tests.step);
+        zig_test_step.dependOn(&run_tests.step);
+    }
+
+    const client_remoterepo_test_step = b.step(
+        "client-remoterepo-test",
+        "Run client remote repository production tests",
+    );
+    {
+        const test_mod = b.createModule(.{
+            .root_source_file = b.path("client/remoterepo.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "client_abi", .module = client_abi_mod },
+                .{ .name = "client_download", .module = client_download_mod },
+                .{ .name = "tdnf_error", .module = tdnf_error_mod },
+            },
+        });
+        test_mod.addIncludePath(b.path("include"));
+        test_mod.addIncludePath(b.path("client"));
+        test_mod.addIncludePath(b.path("rpmzig"));
+        test_mod.linkLibrary(common_lib);
+        test_mod.linkLibrary(llconf_lib);
+        test_mod.linkLibrary(rpmzig_lib);
+        const tests = b.addTest(.{ .root_module = test_mod });
+        const run_tests = b.addRunArtifact(tests);
+        client_remoterepo_test_step.dependOn(&run_tests.step);
         zig_test_step.dependOn(&run_tests.step);
     }
 
@@ -940,27 +980,6 @@ pub fn build(b: *Build) void {
         transaction_plan_integration_test_step.dependOn(&run_tests.step);
         zig_test_step.dependOn(&run_tests.step);
     }
-
-    const download_zig_lib = blk: {
-        const mod = b.createModule(.{
-            .root_source_file = b.path("client/download/root.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .pic = true,
-            .imports = &.{
-                .{ .name = "tls", .module = tls_dep.module("tls") },
-                .{ .name = "tdnf_error", .module = tdnf_error_mod },
-            },
-        });
-        const lib = b.addLibrary(.{
-            .name = "tdnfdownloadzig",
-            .linkage = .static,
-            .root_module = mod,
-        });
-        break :blk lib;
-    };
-    b.getInstallStep().dependOn(&download_zig_lib.step);
 
     {
         const test_mod = b.createModule(.{
@@ -1140,6 +1159,10 @@ pub fn build(b: *Build) void {
         zig_test_step.dependOn(&run_tests.step);
     }
 
+    const client_download_test_step = b.step(
+        "client-download-test",
+        "Run Zig HTTP/TLS download transport tests",
+    );
     {
         const test_mod = b.createModule(.{
             .root_source_file = b.path("client/download/root.zig"),
@@ -1147,12 +1170,14 @@ pub fn build(b: *Build) void {
             .optimize = optimize,
             .link_libc = true,
             .imports = &.{
+                .{ .name = "client_abi", .module = client_abi_mod },
                 .{ .name = "tls", .module = tls_dep.module("tls") },
                 .{ .name = "tdnf_error", .module = tdnf_error_mod },
             },
         });
         const tests = b.addTest(.{ .root_module = test_mod });
         const run_tests = b.addRunArtifact(tests);
+        client_download_test_step.dependOn(&run_tests.step);
         zig_test_step.dependOn(&run_tests.step);
     }
 
@@ -1655,6 +1680,7 @@ pub fn build(b: *Build) void {
     tdnf_so_mod.addImport("builtin_plugins", builtin_plugins_mod);
     tdnf_so_mod.addImport("client_history", client_history_mod);
     tdnf_so_mod.addImport("client_abi", client_abi_mod);
+    tdnf_so_mod.addImport("client_download", client_download_mod);
     tdnf_so_mod.addImport("client_config_options", client_config_options.createModule());
     tdnf_so_mod.addImport("client_varsdir", client_varsdir_mod);
     tdnf_so_mod.addImport("rpmtrans_flags", rpmtrans_flags_mod);
@@ -1679,7 +1705,6 @@ pub fn build(b: *Build) void {
     tdnf_so_mod.linkLibrary(history_lib);
     tdnf_so_mod.linkLibrary(llconf_lib);
     tdnf_so_mod.linkLibrary(rpmzig_lib);
-    tdnf_so_mod.linkLibrary(download_zig_lib);
     const libtdnf = b.addLibrary(.{
         .name = "tdnf",
         .linkage = .dynamic,

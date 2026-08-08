@@ -9,6 +9,7 @@
 #pragma once
 
 #include <tdnftypes.h>
+#include <tdnfdownload.h>
 #include <tdnfrepomd.h>
 #include <tdnfrpmconfig.h>
 
