@@ -34,13 +34,13 @@
 #include <dirent.h>
 
 #include <tdnf.h>
-#include <tdnfdownload.h>
 #include <tdnfrpmconfig.h>
 #include <tdnfrepomd.h>
 #include <tdnf-common-defines.h>
 
 #include "../rpmzig/rpmdb.h"
 #include "repoutils_abi.h"
+#include "remoterepo_abi.h"
 
 /* Every C file in client/ uses the native package context. The
    libsolv-confinement-audit build step proves libsolv headers are

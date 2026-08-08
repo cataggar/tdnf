@@ -1,5 +1,6 @@
 const std = @import("std");
 const tls = @import("tls");
+const abi = @import("client_abi");
 const errors = @import("tdnf_error");
 
 const Allocator = std.mem.Allocator;
@@ -11,38 +12,13 @@ const RequestHeadMaxLen: usize = 8192;
 const StreamBufLen: usize = 8192;
 const TestScratchDir = ".zig-cache/tdnf-download-tests";
 
-pub const TDNF_ZIG_XFERINFOFUNCTION = *const fn (
-    userdata: ?*anyopaque,
-    dltotal: i64,
-    dlnow: i64,
-    ultotal: i64,
-    ulnow: i64,
-) callconv(.c) c_int;
-
-pub const TDNF_ZIG_DOWNLOAD_REQUEST = extern struct {
-    pszUrl: ?[*:0]const u8,
-    pszDestination: ?[*:0]const u8,
-    pfnProgress: ?TDNF_ZIG_XFERINFOFUNCTION,
-    pProgressData: ?*anyopaque,
-    pszUserAgent: ?[*:0]const u8,
-    pszProxy: ?[*:0]const u8,
-    pszProxyUserPwd: ?[*:0]const u8,
-    pszUserName: ?[*:0]const u8,
-    pszPassword: ?[*:0]const u8,
-    pszSSLCaCert: ?[*:0]const u8,
-    pszSSLClientCert: ?[*:0]const u8,
-    pszSSLClientKey: ?[*:0]const u8,
-    nSSLVerify: c_int,
-    nConnectTimeout: c_long,
-    nTimeout: c_long,
-    nLowSpeedLimit: c_long,
-    nLowSpeedTime: c_long,
-    nMaxRecvSpeed: c_long,
-};
+pub const TDNF_ZIG_XFERINFOFUNCTION = abi.DownloadProgressFn;
+pub const TDNF_ZIG_DOWNLOAD_REQUEST = abi.DownloadRequest;
 
 const DownloadRequest = struct {
     url: []const u8,
     destination: []const u8,
+    destination_z: [*:0]const u8,
     progress_fn: ?TDNF_ZIG_XFERINFOFUNCTION,
     progress_data: ?*anyopaque,
     user_agent: ?[]const u8,
@@ -81,6 +57,7 @@ const StdHttpTransport = struct {
     allocator: Allocator,
     io: Io,
     request: DownloadRequest,
+    origin: Uri,
     client: std.http.Client,
     proxy: ?*std.http.Client.Proxy = null,
     authorization: ?[]const u8 = null,
@@ -91,6 +68,7 @@ const StdHttpTransport = struct {
             .allocator = allocator,
             .io = io,
             .request = request,
+            .origin = Uri.parse(request.url) catch return error.InvalidUrl,
             .client = .{
                 .allocator = allocator,
                 .io = io,
@@ -109,7 +87,7 @@ const StdHttpTransport = struct {
                     .plain => 80,
                     .tls => 443,
                 },
-                .supports_connect = true,
+                .supports_connect = false,
             };
             transport.proxy = proxy;
             transport.client.http_proxy = proxy;
@@ -162,10 +140,6 @@ const StdHttpTransport = struct {
         };
         defer request.deinit();
 
-        if (effectiveSocketTimeoutSecs(self.request)) |seconds| {
-            try applySocketTimeouts(request.connection.?.stream_reader.stream, seconds);
-        }
-
         request.sendBodiless() catch |err| {
             setError("std.http send failed: {}", .{err});
             return error.TransportWriteFailed;
@@ -187,7 +161,7 @@ const StdHttpTransport = struct {
         const status = @as(u16, @intFromEnum(response.head.status));
         if (response.head.status.class() == .redirect) {
             const location = response.head.location orelse {
-                setError("redirect missing location for {s}", .{self.request.url});
+                setError("redirect response is missing Location", .{});
                 return error.HttpRedirectMissing;
             };
             const next_uri = try resolveRedirect(arena, uri, location);
@@ -200,11 +174,10 @@ const StdHttpTransport = struct {
             return .{ .status = status };
         }
 
-        var output = try openOutputFile(self.io, self.request.destination);
+        var output = try openOutputFile(self.io, self.request.destination_z);
         defer output.close(self.io);
 
         var control = try TransferControl.init(self.io, self.request, response.head.content_length);
-        defer control.finish() catch {};
 
         var transfer_buffer: [StreamBufLen]u8 = undefined;
         const reader = response.reader(&transfer_buffer);
@@ -227,6 +200,7 @@ const StdHttpTransport = struct {
             }
             return err;
         };
+        try control.finish();
 
         return .{ .status = status };
     }
@@ -238,6 +212,9 @@ const StdHttpTransport = struct {
             .accept_encoding = .omit,
         };
         if (self.authorization) |authorization| {
+            if (!sameCredentialOrigin(self.origin, uri)) {
+                return headers;
+            }
             headers.authorization = .{ .override = authorization };
         } else if (uri.user != null or uri.password != null) {
             const len = std.http.Client.basic_authorization.valueLengthFromUri(uri);
@@ -253,6 +230,7 @@ const TlsHttpTransport = struct {
     allocator: Allocator,
     io: Io,
     request: DownloadRequest,
+    origin: Uri,
     proxy: ?ParsedProxy = null,
     authorization: ?[]const u8 = null,
     root_ca: tls.config.cert.Bundle = .empty,
@@ -265,6 +243,7 @@ const TlsHttpTransport = struct {
             .allocator = allocator,
             .io = io,
             .request = request,
+            .origin = Uri.parse(request.url) catch return error.InvalidUrl,
         };
         if (request.proxy_url) |proxy_url| {
             transport.proxy = try parseProxy(allocator, proxy_url, request.proxy_userpwd);
@@ -333,17 +312,12 @@ const TlsHttpTransport = struct {
 
         var host_buf: [Io.net.HostName.max_len]u8 = undefined;
         const host_name = uri.getHost(&host_buf) catch {
-            setError("missing host in URL {s}", .{self.request.url});
+            setError("download URL is missing a host", .{});
             return error.InvalidUrl;
         };
         const port = uri.port orelse 443;
-        const socket_timeout = effectiveSocketTimeoutSecs(self.request);
-
         var tcp = try connectTcp(self.io, host_name, port, self.request.connect_timeout_secs, self.proxy);
         defer tcp.close(self.io);
-        if (socket_timeout) |seconds| {
-            try applySocketTimeouts(tcp, seconds);
-        }
 
         var tcp_reader_buf: [tls.input_buffer_len]u8 = undefined;
         var tcp_writer_buf: [tls.output_buffer_len]u8 = undefined;
@@ -383,7 +357,10 @@ const TlsHttpTransport = struct {
             &conn,
             uri,
             self.request.user_agent,
-            self.authorization,
+            if (sameCredentialOrigin(self.origin, uri))
+                self.authorization
+            else
+                null,
             arena,
         );
 
@@ -397,7 +374,7 @@ const TlsHttpTransport = struct {
 
         if (response.head.status.class() == .redirect) {
             const location = response.head.location orelse {
-                setError("redirect missing location for {s}", .{self.request.url});
+                setError("redirect response is missing Location", .{});
                 return error.HttpRedirectMissing;
             };
             const next_uri = try resolveRedirect(arena, uri, location);
@@ -410,11 +387,10 @@ const TlsHttpTransport = struct {
             return .{ .status = status };
         }
 
-        var output = try openOutputFile(self.io, self.request.destination);
+        var output = try openOutputFile(self.io, self.request.destination_z);
         defer output.close(self.io);
 
         var control = try TransferControl.init(self.io, self.request, response.head.content_length);
-        defer control.finish() catch {};
 
         var transfer_buffer: [StreamBufLen]u8 = undefined;
         const body_reader = response.reader.bodyReader(&transfer_buffer, response.head.transfer_encoding, response.head.content_length);
@@ -430,6 +406,7 @@ const TlsHttpTransport = struct {
             }
             return err;
         };
+        try control.finish();
 
         return .{ .status = status };
     }
@@ -531,6 +508,11 @@ const TransferControl = struct {
     }
 
     fn finish(self: *TransferControl) !void {
+        if (self.total_size) |expected| {
+            if (self.downloaded != expected) {
+                return error.ContentLengthMismatch;
+            }
+        }
         try self.reportProgress();
     }
 };
@@ -599,7 +581,7 @@ pub export fn TDNFZigDownloadFile(
             return errors.ERROR_TDNF_CALL_NOT_SUPPORTED;
         }
         if (err == error.InvalidUrl) {
-            ensureErrorSet("invalid URL: {s}", .{request.url});
+            ensureErrorSet("invalid download URL", .{});
             return errors.ERROR_TDNF_URL_INVALID;
         }
         if (err == error.TlsConfiguration) {
@@ -626,7 +608,7 @@ pub export fn TDNFZigDownloadFile(
         status_out.* = @intCast(status);
     }
     if (status >= 400) {
-        setError("HTTP status {d} while downloading {s}", .{ status, request.url });
+        setError("HTTP status {d} while downloading", .{status});
         return errors.ERROR_TDNF_INVALID_PARAMETER;
     }
     return 0;
@@ -639,6 +621,7 @@ fn parseRequest(raw_request: *const TDNF_ZIG_DOWNLOAD_REQUEST) !DownloadRequest 
     return .{
         .url = url,
         .destination = destination,
+        .destination_z = raw_request.pszDestination.?,
         .progress_fn = raw_request.pfnProgress,
         .progress_data = raw_request.pProgressData,
         .user_agent = optionalSpan(raw_request.pszUserAgent),
@@ -660,7 +643,7 @@ fn parseRequest(raw_request: *const TDNF_ZIG_DOWNLOAD_REQUEST) !DownloadRequest 
 
 fn downloadWithIo(allocator: Allocator, io: Io, request: DownloadRequest) !u16 {
     var current_uri = Uri.parse(request.url) catch {
-        setError("invalid URL: {s}", .{request.url});
+        setError("invalid download URL", .{});
         return error.InvalidUrl;
     };
 
@@ -692,8 +675,14 @@ fn downloadWithIo(allocator: Allocator, io: Io, request: DownloadRequest) !u16 {
             .redirect => |next_uri| {
                 redirects += 1;
                 if (redirects > RedirectLimit) {
-                    setError("too many redirects while downloading {s}", .{request.url});
+                    setError("too many download redirects", .{});
                     return error.TooManyRedirects;
+                }
+                if (schemeEq(current_uri.scheme, "https") and
+                    schemeEq(next_uri.scheme, "http"))
+                {
+                    setError("refusing HTTPS to HTTP redirect", .{});
+                    return error.InsecureRedirect;
                 }
                 current_uri = next_uri;
             },
@@ -717,7 +706,11 @@ fn chooseTransport(uri: Uri, request: DownloadRequest) !DownloadTransport {
         if (has_partial_client_auth) {
             return error.UnsupportedConfiguration;
         }
-        if (!request.ssl_verify or request.ca_cert != null or has_client_auth) {
+        if (!request.ssl_verify or
+            request.ca_cert != null or
+            has_client_auth or
+            request.proxy_url != null)
+        {
             return .tls_http;
         }
         if (request.connect_timeout_secs != 0) {
@@ -735,7 +728,7 @@ fn downloadFileUri(io: Io, request: DownloadRequest, uri: Uri) !DownloadOutcome 
     var source = try openInputFile(io, source_path);
     defer source.close(io);
 
-    var output = try openOutputFile(io, request.destination);
+    var output = try openOutputFile(io, request.destination_z);
     defer output.close(io);
 
     const source_stat = source.stat(io) catch null;
@@ -744,11 +737,11 @@ fn downloadFileUri(io: Io, request: DownloadRequest, uri: Uri) !DownloadOutcome 
     else
         null;
     var control = try TransferControl.init(io, request, total_size);
-    defer control.finish() catch {};
 
     var reader_buf: [StreamBufLen]u8 = undefined;
     var reader = source.reader(io, &reader_buf);
     try streamReaderToFile(io, &reader.interface, &output, &control);
+    try control.finish();
 
     return .{ .status = 200 };
 }
@@ -915,6 +908,14 @@ fn filePathFromUri(allocator: Allocator, uri: Uri) ![]u8 {
     if (!schemeEq(uri.scheme, "file")) {
         return error.InvalidUrl;
     }
+    if (uri.host) |host| {
+        var host_buffer: [Io.net.HostName.max_len]u8 = undefined;
+        const host_name = uri.getHost(&host_buffer) catch return error.InvalidUrl;
+        if (!std.ascii.eqlIgnoreCase(host_name.bytes, "localhost")) {
+            _ = host;
+            return error.InvalidUrl;
+        }
+    }
     if (uri.path.percent_encoded.len == 0 or uri.path.percent_encoded[0] != '/') {
         return error.InvalidUrl;
     }
@@ -929,41 +930,18 @@ fn resolveRedirect(allocator: Allocator, base: Uri, location: []const u8) !Uri {
     @memcpy(buffer[0..location.len], location);
     var aux = buffer;
     return Uri.resolveInPlace(base, location.len, &aux) catch {
-        setError("failed to resolve redirect location {s}", .{location});
+        setError("failed to resolve redirect location", .{});
         return error.HttpRedirectInvalid;
     };
 }
 
-fn applySocketTimeouts(stream: Io.net.Stream, timeout_secs: u32) !void {
-    if (timeout_secs == 0) {
-        return;
-    }
-    const tv = std.posix.timeval{
-        .sec = @intCast(timeout_secs),
-        .usec = 0,
-    };
-    try std.posix.setsockopt(stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv));
-    try std.posix.setsockopt(stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&tv));
-}
-
-fn effectiveSocketTimeoutSecs(request: DownloadRequest) ?u32 {
-    var result: ?u32 = null;
-    if (request.total_timeout_secs != 0) {
-        result = request.total_timeout_secs;
-    }
-    if (request.low_speed_time_secs != 0) {
-        result = if (result) |current| @min(current, request.low_speed_time_secs) else request.low_speed_time_secs;
-    }
-    return result;
-}
-
 fn parseProxy(allocator: Allocator, proxy_url: []const u8, proxy_userpwd: ?[]const u8) !ParsedProxy {
     const uri = Uri.parse(proxy_url) catch Uri.parseAfterScheme("http", proxy_url) catch {
-        setError("invalid proxy URL: {s}", .{proxy_url});
+        setError("invalid proxy URL", .{});
         return error.InvalidUrl;
     };
     if (uri.host == null) {
-        setError("proxy URL missing host: {s}", .{proxy_url});
+        setError("proxy URL missing host", .{});
         return error.InvalidUrl;
     }
     const authorization = if (proxy_userpwd) |combined|
@@ -1001,11 +979,21 @@ fn buildBasicAuthorizationFromCombined(allocator: Allocator, combined: []const u
     return output;
 }
 
-fn openOutputFile(io: Io, path: []const u8) !Io.File {
-    if (std.fs.path.isAbsolute(path)) {
-        return Io.Dir.createFileAbsolute(io, path, .{});
-    }
-    return Io.Dir.cwd().createFile(io, path, .{});
+fn openOutputFile(io: Io, path: [*:0]const u8) !Io.File {
+    _ = io;
+    const fd = std.c.open(
+        path,
+        .{
+            .ACCMODE = .WRONLY,
+            .CREAT = true,
+            .TRUNC = true,
+            .CLOEXEC = true,
+            .NOFOLLOW = true,
+        },
+        @as(c_uint, 0o600),
+    );
+    if (fd < 0) return error.OutputOpenFailed;
+    return .{ .handle = fd, .flags = .{ .nonblocking = false } };
 }
 
 fn openInputFile(io: Io, path: []const u8) !Io.File {
@@ -1057,6 +1045,25 @@ fn schemeEq(actual: []const u8, expected: []const u8) bool {
     return std.ascii.eqlIgnoreCase(actual, expected);
 }
 
+fn sameCredentialOrigin(left: Uri, right: Uri) bool {
+    var left_host_buf: [Io.net.HostName.max_len]u8 = undefined;
+    var right_host_buf: [Io.net.HostName.max_len]u8 = undefined;
+    const left_host = left.getHost(&left_host_buf) catch return false;
+    const right_host = right.getHost(&right_host_buf) catch return false;
+    if (!std.ascii.eqlIgnoreCase(left_host.bytes, right_host.bytes)) {
+        return false;
+    }
+    return effectivePort(left) == effectivePort(right) and
+        (!schemeEq(left.scheme, "https") or schemeEq(right.scheme, "https"));
+}
+
+fn effectivePort(uri: Uri) ?u16 {
+    if (uri.port) |port| return port;
+    if (schemeEq(uri.scheme, "http")) return 80;
+    if (schemeEq(uri.scheme, "https")) return 443;
+    return null;
+}
+
 fn mapStdHttpRequestError(err: anyerror) anyerror {
     return switch (err) {
         error.UnsupportedUriScheme,
@@ -1086,7 +1093,15 @@ const ServerOptions = struct {
     tls_mode: bool,
     require_client_auth: bool = false,
     expected_authorization: ?[]const u8 = null,
+    authorization_must_be_absent: bool = false,
+    expected_proxy_authorization: ?[]const u8 = null,
     body: []const u8 = "hello from zig transport\n",
+    status: u16 = 200,
+    redirect_location: ?[]const u8 = null,
+    content_disposition: ?[]const u8 = null,
+    declared_length: ?usize = null,
+    response_delay_ns: u64 = 0,
+    body_split_delay_ns: u64 = 0,
 };
 
 const ServerContext = struct {
@@ -1127,16 +1142,44 @@ fn serveOne(io: Io, server: *Io.net.Server, options: ServerOptions) !void {
         var writer_buf: [4096]u8 = undefined;
         var reader = stream.reader(io, &reader_buf);
         var writer = stream.writer(io, &writer_buf);
-        const auth_ok = try requestAuthorizationMatches(&reader.interface, options.expected_authorization);
+        const auth_ok = try requestHeadersMatch(&reader.interface, options);
         if (!auth_ok) {
             try writer.interface.writeAll("HTTP/1.1 401 Unauthorized\r\nContent-Length: 4\r\nConnection: close\r\n\r\nauth");
             try writer.interface.flush();
             return;
         }
+        if (options.response_delay_ns != 0) {
+            try Io.sleep(io, .fromNanoseconds(options.response_delay_ns), .awake);
+        }
+        if (options.redirect_location) |location| {
+            try writer.interface.print(
+                "HTTP/1.1 {d} Found\r\nLocation: {s}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                .{ options.status, location },
+            );
+            try writer.interface.flush();
+            return;
+        }
+        const declared_length = options.declared_length orelse options.body.len;
         try writer.interface.print(
-            "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}",
-            .{ options.body.len, options.body },
+            "HTTP/1.1 {d} {s}\r\nContent-Length: {d}\r\nConnection: close\r\n",
+            .{
+                options.status,
+                if (options.status >= 400) "Error" else "OK",
+                declared_length,
+            },
         );
+        if (options.content_disposition) |value| {
+            try writer.interface.print("Content-Disposition: {s}\r\n", .{value});
+        }
+        try writer.interface.writeAll("\r\n");
+        if (options.body_split_delay_ns != 0 and options.body.len > 1) {
+            try writer.interface.writeAll(options.body[0..1]);
+            try writer.interface.flush();
+            try Io.sleep(io, .fromNanoseconds(options.body_split_delay_ns), .awake);
+            try writer.interface.writeAll(options.body[1..]);
+        } else {
+            try writer.interface.writeAll(options.body);
+        }
         try writer.interface.flush();
         return;
     }
@@ -1166,23 +1209,51 @@ fn serveOne(io: Io, server: *Io.net.Server, options: ServerOptions) !void {
 
     var conn_reader_buf: [4096]u8 = undefined;
     var conn_reader = conn.reader(&conn_reader_buf);
-    const auth_ok = try requestAuthorizationMatches(&conn_reader.interface, options.expected_authorization);
+    const auth_ok = try requestHeadersMatch(&conn_reader.interface, options);
     if (!auth_ok) {
         try conn.writeAll("HTTP/1.1 401 Unauthorized\r\nContent-Length: 4\r\nConnection: close\r\n\r\nauth");
         return;
     }
+    if (options.response_delay_ns != 0) {
+        try Io.sleep(io, .fromNanoseconds(options.response_delay_ns), .awake);
+    }
+    if (options.redirect_location) |location| {
+        var redirect_buf: [1024]u8 = undefined;
+        const redirect = try std.fmt.bufPrint(
+            &redirect_buf,
+            "HTTP/1.1 {d} Found\r\nLocation: {s}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            .{ options.status, location },
+        );
+        try conn.writeAll(redirect);
+        return;
+    }
 
-    var response_buf: [256]u8 = undefined;
-    const response = try std.fmt.bufPrint(
-        &response_buf,
-        "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n",
-        .{options.body.len},
+    var response_buf: [1024]u8 = undefined;
+    var response_writer: Io.Writer = .fixed(&response_buf);
+    const declared_length = options.declared_length orelse options.body.len;
+    try response_writer.print(
+        "HTTP/1.1 {d} {s}\r\nContent-Length: {d}\r\nConnection: close\r\n",
+        .{
+            options.status,
+            if (options.status >= 400) "Error" else "OK",
+            declared_length,
+        },
     );
-    try conn.writeAll(response);
-    try conn.writeAll(options.body);
+    if (options.content_disposition) |value| {
+        try response_writer.print("Content-Disposition: {s}\r\n", .{value});
+    }
+    try response_writer.writeAll("\r\n");
+    try conn.writeAll(response_writer.buffered());
+    if (options.body_split_delay_ns != 0 and options.body.len > 1) {
+        try conn.writeAll(options.body[0..1]);
+        try Io.sleep(io, .fromNanoseconds(options.body_split_delay_ns), .awake);
+        try conn.writeAll(options.body[1..]);
+    } else {
+        try conn.writeAll(options.body);
+    }
 }
 
-fn requestAuthorizationMatches(reader: *Io.Reader, expected_authorization: ?[]const u8) !bool {
+fn requestHeadersMatch(reader: *Io.Reader, options: ServerOptions) !bool {
     var http_reader: std.http.Reader = .{
         .in = reader,
         .interface = undefined,
@@ -1190,16 +1261,34 @@ fn requestAuthorizationMatches(reader: *Io.Reader, expected_authorization: ?[]co
         .max_head_len = RequestHeadMaxLen,
     };
     const head_bytes = try http_reader.receiveHead();
-    if (expected_authorization == null) {
-        return true;
-    }
+    var authorization: ?[]const u8 = null;
+    var proxy_authorization: ?[]const u8 = null;
     var iter: std.http.HeaderIterator = .init(head_bytes);
     while (iter.next()) |header| {
         if (std.ascii.eqlIgnoreCase(header.name, "authorization")) {
-            return std.mem.eql(u8, header.value, expected_authorization.?);
+            authorization = header.value;
+        } else if (std.ascii.eqlIgnoreCase(header.name, "proxy-authorization")) {
+            proxy_authorization = header.value;
         }
     }
-    return false;
+    if (options.authorization_must_be_absent and authorization != null) {
+        return false;
+    }
+    if (options.expected_authorization) |expected| {
+        if (authorization == null or
+            !std.mem.eql(u8, authorization.?, expected))
+        {
+            return false;
+        }
+    }
+    if (options.expected_proxy_authorization) |expected| {
+        if (proxy_authorization == null or
+            !std.mem.eql(u8, proxy_authorization.?, expected))
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 fn ensureScratchDir(io: Io) !void {
@@ -1235,6 +1324,32 @@ fn deleteFileIfExists(io: Io, path: []const u8) void {
         return;
     }
     Io.Dir.cwd().deleteFile(io, path) catch {};
+}
+
+fn testRequest(
+    url: [*:0]const u8,
+    destination: [*:0]const u8,
+) TDNF_ZIG_DOWNLOAD_REQUEST {
+    return .{
+        .pszUrl = url,
+        .pszDestination = destination,
+        .pfnProgress = null,
+        .pProgressData = null,
+        .pszUserAgent = null,
+        .pszProxy = null,
+        .pszProxyUserPwd = null,
+        .pszUserName = null,
+        .pszPassword = null,
+        .pszSSLCaCert = null,
+        .pszSSLClientCert = null,
+        .pszSSLClientKey = null,
+        .nSSLVerify = 1,
+        .nConnectTimeout = 0,
+        .nTimeout = 0,
+        .nLowSpeedLimit = 0,
+        .nLowSpeedTime = 0,
+        .nMaxRecvSpeed = 0,
+    };
 }
 
 test "http fetch succeeds" {
@@ -1335,12 +1450,25 @@ test "http fetch supports basic auth" {
     try std.testing.expectEqualStrings("authenticated\n", body);
 }
 
-test "verified https fetch succeeds with system CA" {
+test "verified local https fetch succeeds with configured CA" {
     const io = std.testing.io;
     try ensureScratchDir(io);
 
-    const z_url = try dupeZ(std.testing.allocator, "https://example.com/");
+    const server = try spawnServer(.{ .tls_mode = true, .body = "verified https body\n" });
+    defer server.thread.join();
+
+    const url = try std.fmt.allocPrint(std.testing.allocator, "https://localhost:{d}/payload", .{server.port});
+    defer std.testing.allocator.free(url);
+    const z_url = try dupeZ(std.testing.allocator, url);
     defer std.testing.allocator.free(z_url);
+    const ca_path = try Io.Dir.cwd().realPathFileAlloc(
+        io,
+        "client/download/fixtures/ca-cert.pem",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(ca_path);
+    const z_ca_path = try dupeZ(std.testing.allocator, ca_path);
+    defer std.testing.allocator.free(z_ca_path);
     const dest = try scratchPath(std.testing.allocator, "https-verified.txt");
     defer std.testing.allocator.free(dest);
     const z_dest = try dupeZ(std.testing.allocator, dest);
@@ -1356,7 +1484,7 @@ test "verified https fetch succeeds with system CA" {
         .pszProxyUserPwd = null,
         .pszUserName = null,
         .pszPassword = null,
-        .pszSSLCaCert = null,
+        .pszSSLCaCert = z_ca_path.ptr,
         .pszSSLClientCert = null,
         .pszSSLClientKey = null,
         .nSSLVerify = 1,
@@ -1372,7 +1500,7 @@ test "verified https fetch succeeds with system CA" {
 
     const body = try readFileAlloc(std.testing.allocator, io, z_dest);
     defer std.testing.allocator.free(body);
-    try std.testing.expect(std.mem.indexOf(u8, body, "Example Domain") != null);
+    try std.testing.expectEqualStrings("verified https body\n", body);
 }
 
 test "insecure https fetch succeeds" {
@@ -1468,4 +1596,342 @@ test "file uri copies data" {
     const body = try readFileAlloc(std.testing.allocator, io, z_dest);
     defer std.testing.allocator.free(body);
     try std.testing.expectEqualStrings("file transport body\n", body);
+}
+
+test "redirects succeed and ignore content disposition filenames" {
+    const io = std.testing.io;
+    try ensureScratchDir(io);
+
+    const target = try spawnServer(.{
+        .tls_mode = false,
+        .body = "redirected body\n",
+        .content_disposition = "attachment; filename=../../escape.rpm",
+    });
+    defer target.thread.join();
+    const target_url = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "http://127.0.0.1:{d}/target",
+        .{target.port},
+    );
+    defer std.testing.allocator.free(target_url);
+    const redirect = try spawnServer(.{
+        .tls_mode = false,
+        .status = 302,
+        .redirect_location = target_url,
+    });
+    defer redirect.thread.join();
+
+    const url = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "http://127.0.0.1:{d}/redirect",
+        .{redirect.port},
+    );
+    defer std.testing.allocator.free(url);
+    const z_url = try dupeZ(std.testing.allocator, url);
+    defer std.testing.allocator.free(z_url);
+    const dest = try scratchPath(std.testing.allocator, "redirect-final.rpm");
+    defer std.testing.allocator.free(dest);
+    const z_dest = try dupeZ(std.testing.allocator, dest);
+    defer std.testing.allocator.free(z_dest);
+    deleteFileIfExists(io, z_dest);
+    deleteFileIfExists(io, "escape.rpm");
+
+    var request = testRequest(z_url.ptr, z_dest.ptr);
+    var status: c_long = 0;
+    try std.testing.expectEqual(
+        @as(u32, 0),
+        TDNFZigDownloadFile(&request, &status),
+    );
+    const body = try readFileAlloc(std.testing.allocator, io, z_dest);
+    defer std.testing.allocator.free(body);
+    try std.testing.expectEqualStrings("redirected body\n", body);
+    try std.testing.expectError(
+        error.FileNotFound,
+        Io.Dir.cwd().access(io, "escape.rpm", .{}),
+    );
+}
+
+test "HTTPS redirects cannot downgrade to HTTP" {
+    const io = std.testing.io;
+    try ensureScratchDir(io);
+    const redirect = try spawnServer(.{
+        .tls_mode = true,
+        .status = 302,
+        .redirect_location = "http://127.0.0.1:9/plaintext",
+    });
+    defer redirect.thread.join();
+    const url = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "https://localhost:{d}/redirect",
+        .{redirect.port},
+    );
+    defer std.testing.allocator.free(url);
+    const z_url = try dupeZ(std.testing.allocator, url);
+    defer std.testing.allocator.free(z_url);
+    const ca_path = try Io.Dir.cwd().realPathFileAlloc(
+        io,
+        "client/download/fixtures/ca-cert.pem",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(ca_path);
+    const z_ca = try dupeZ(std.testing.allocator, ca_path);
+    defer std.testing.allocator.free(z_ca);
+    const dest = try scratchPath(std.testing.allocator, "downgrade.txt");
+    defer std.testing.allocator.free(dest);
+    const z_dest = try dupeZ(std.testing.allocator, dest);
+    defer std.testing.allocator.free(z_dest);
+    deleteFileIfExists(io, z_dest);
+
+    var request = testRequest(z_url.ptr, z_dest.ptr);
+    request.pszSSLCaCert = z_ca.ptr;
+    var status: c_long = 0;
+    try std.testing.expectEqual(
+        errors.ERROR_TDNF_REPO_PERFORM,
+        TDNFZigDownloadFile(&request, &status),
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            std.mem.span(TDNFZigDownloadLastError()),
+            "HTTPS to HTTP",
+        ) != null,
+    );
+}
+
+test "origin credentials are not forwarded across redirects" {
+    const io = std.testing.io;
+    try ensureScratchDir(io);
+    const expected = try buildBasicAuthorizationFromFields(
+        std.testing.allocator,
+        "repo-user",
+        "repo-secret",
+    );
+    defer std.testing.allocator.free(expected);
+    const target = try spawnServer(.{
+        .tls_mode = false,
+        .body = "no leaked credentials\n",
+        .authorization_must_be_absent = true,
+    });
+    defer target.thread.join();
+    const target_url = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "http://localhost:{d}/target",
+        .{target.port},
+    );
+    defer std.testing.allocator.free(target_url);
+    const redirect = try spawnServer(.{
+        .tls_mode = false,
+        .status = 302,
+        .redirect_location = target_url,
+        .expected_authorization = expected,
+    });
+    defer redirect.thread.join();
+    const url = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "http://127.0.0.1:{d}/redirect",
+        .{redirect.port},
+    );
+    defer std.testing.allocator.free(url);
+    const z_url = try dupeZ(std.testing.allocator, url);
+    defer std.testing.allocator.free(z_url);
+    const dest = try scratchPath(std.testing.allocator, "redirect-auth.txt");
+    defer std.testing.allocator.free(dest);
+    const z_dest = try dupeZ(std.testing.allocator, dest);
+    defer std.testing.allocator.free(z_dest);
+    deleteFileIfExists(io, z_dest);
+
+    var request = testRequest(z_url.ptr, z_dest.ptr);
+    request.pszUserName = "repo-user";
+    request.pszPassword = "repo-secret";
+    var status: c_long = 0;
+    try std.testing.expectEqual(
+        @as(u32, 0),
+        TDNFZigDownloadFile(&request, &status),
+    );
+}
+
+test "HTTP proxy authentication is sent only to the proxy" {
+    const io = std.testing.io;
+    try ensureScratchDir(io);
+    const expected = try buildBasicAuthorizationFromCombined(
+        std.testing.allocator,
+        "proxy-user:proxy-secret",
+    );
+    defer std.testing.allocator.free(expected);
+    const proxy = try spawnServer(.{
+        .tls_mode = false,
+        .body = "proxied body\n",
+        .authorization_must_be_absent = true,
+        .expected_proxy_authorization = expected,
+    });
+    defer proxy.thread.join();
+    const proxy_url = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "http://127.0.0.1:{d}",
+        .{proxy.port},
+    );
+    defer std.testing.allocator.free(proxy_url);
+    const z_proxy = try dupeZ(std.testing.allocator, proxy_url);
+    defer std.testing.allocator.free(z_proxy);
+    const dest = try scratchPath(std.testing.allocator, "proxy.txt");
+    defer std.testing.allocator.free(dest);
+    const z_dest = try dupeZ(std.testing.allocator, dest);
+    defer std.testing.allocator.free(z_dest);
+    deleteFileIfExists(io, z_dest);
+
+    var request = testRequest("http://origin.invalid/payload", z_dest.ptr);
+    request.pszProxy = z_proxy.ptr;
+    request.pszProxyUserPwd = "proxy-user:proxy-secret";
+    var status: c_long = 0;
+    try std.testing.expectEqual(
+        @as(u32, 0),
+        TDNFZigDownloadFile(&request, &status),
+    );
+}
+
+test "mutual TLS uses configured client certificate and key" {
+    const io = std.testing.io;
+    try ensureScratchDir(io);
+    const server = try spawnServer(.{
+        .tls_mode = true,
+        .require_client_auth = true,
+        .body = "mutual tls body\n",
+    });
+    defer server.thread.join();
+    const url = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "https://localhost:{d}/mtls",
+        .{server.port},
+    );
+    defer std.testing.allocator.free(url);
+    const z_url = try dupeZ(std.testing.allocator, url);
+    defer std.testing.allocator.free(z_url);
+    const ca_path = try Io.Dir.cwd().realPathFileAlloc(
+        io,
+        "client/download/fixtures/ca-cert.pem",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(ca_path);
+    const cert_path = try Io.Dir.cwd().realPathFileAlloc(
+        io,
+        "client/download/fixtures/client-cert.pem",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(cert_path);
+    const key_path = try Io.Dir.cwd().realPathFileAlloc(
+        io,
+        "client/download/fixtures/client-key.pem",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(key_path);
+    const z_ca = try dupeZ(std.testing.allocator, ca_path);
+    defer std.testing.allocator.free(z_ca);
+    const z_cert = try dupeZ(std.testing.allocator, cert_path);
+    defer std.testing.allocator.free(z_cert);
+    const z_key = try dupeZ(std.testing.allocator, key_path);
+    defer std.testing.allocator.free(z_key);
+    const dest = try scratchPath(std.testing.allocator, "mtls.txt");
+    defer std.testing.allocator.free(dest);
+    const z_dest = try dupeZ(std.testing.allocator, dest);
+    defer std.testing.allocator.free(z_dest);
+    deleteFileIfExists(io, z_dest);
+
+    var request = testRequest(z_url.ptr, z_dest.ptr);
+    request.pszSSLCaCert = z_ca.ptr;
+    request.pszSSLClientCert = z_cert.ptr;
+    request.pszSSLClientKey = z_key.ptr;
+    var status: c_long = 0;
+    try std.testing.expectEqual(
+        @as(u32, 0),
+        TDNFZigDownloadFile(&request, &status),
+    );
+}
+
+test "HTTP status and truncated bodies return errors" {
+    const io = std.testing.io;
+    try ensureScratchDir(io);
+
+    const missing = try spawnServer(.{
+        .tls_mode = false,
+        .status = 404,
+        .body = "missing",
+    });
+    defer missing.thread.join();
+    const missing_url = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "http://127.0.0.1:{d}/missing",
+        .{missing.port},
+    );
+    defer std.testing.allocator.free(missing_url);
+    const z_missing_url = try dupeZ(std.testing.allocator, missing_url);
+    defer std.testing.allocator.free(z_missing_url);
+    const missing_dest = try scratchPath(std.testing.allocator, "missing.txt");
+    defer std.testing.allocator.free(missing_dest);
+    const z_missing_dest = try dupeZ(std.testing.allocator, missing_dest);
+    defer std.testing.allocator.free(z_missing_dest);
+    var missing_request = testRequest(z_missing_url.ptr, z_missing_dest.ptr);
+    var status: c_long = 0;
+    try std.testing.expectEqual(
+        errors.ERROR_TDNF_INVALID_PARAMETER,
+        TDNFZigDownloadFile(&missing_request, &status),
+    );
+    try std.testing.expectEqual(@as(c_long, 404), status);
+
+    const truncated = try spawnServer(.{
+        .tls_mode = false,
+        .body = "short",
+        .declared_length = 1024,
+    });
+    defer truncated.thread.join();
+    const truncated_url = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "http://127.0.0.1:{d}/truncated",
+        .{truncated.port},
+    );
+    defer std.testing.allocator.free(truncated_url);
+    const z_truncated_url = try dupeZ(std.testing.allocator, truncated_url);
+    defer std.testing.allocator.free(z_truncated_url);
+    const truncated_dest = try scratchPath(std.testing.allocator, "truncated.txt");
+    defer std.testing.allocator.free(truncated_dest);
+    const z_truncated_dest = try dupeZ(std.testing.allocator, truncated_dest);
+    defer std.testing.allocator.free(z_truncated_dest);
+    var truncated_request = testRequest(
+        z_truncated_url.ptr,
+        z_truncated_dest.ptr,
+    );
+    try std.testing.expect(
+        TDNFZigDownloadFile(&truncated_request, &status) != 0,
+    );
+}
+
+test "slow responses honor the total timeout" {
+    const io = std.testing.io;
+    try ensureScratchDir(io);
+    const server = try spawnServer(.{
+        .tls_mode = false,
+        .body = "too late",
+        .body_split_delay_ns = 2 * std.time.ns_per_s,
+    });
+    defer server.thread.join();
+    const url = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "http://127.0.0.1:{d}/slow",
+        .{server.port},
+    );
+    defer std.testing.allocator.free(url);
+    const z_url = try dupeZ(std.testing.allocator, url);
+    defer std.testing.allocator.free(z_url);
+    const dest = try scratchPath(std.testing.allocator, "timeout.txt");
+    defer std.testing.allocator.free(dest);
+    const z_dest = try dupeZ(std.testing.allocator, dest);
+    defer std.testing.allocator.free(z_dest);
+    deleteFileIfExists(io, z_dest);
+
+    var request = testRequest(z_url.ptr, z_dest.ptr);
+    request.nTimeout = 1;
+    var status: c_long = 0;
+    try std.testing.expectEqual(
+        errors.ERROR_TDNF_TIMED_OUT,
+        TDNFZigDownloadFile(&request, &status),
+    );
 }
