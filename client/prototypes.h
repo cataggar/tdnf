@@ -194,62 +194,6 @@ TDNFFreeHistoryInfoItems(
     int nCount
 );
 
-//remoterepo.c
-uint32_t
-TDNFDownloadFileFromRepo(
-    PTDNF pTdnf,
-    PTDNF_REPO_DATA pRepo,
-    const char *pszLocation,
-    const char *pszFile,
-    const char *pszProgressData
-);
-
-uint32_t
-TDNFDownloadFile(
-    PTDNF pTdnf,
-    PTDNF_REPO_DATA pRepo,
-    const char *pszFileUrl,
-    const char *pszFile,
-    const char *pszProgressData
-    );
-
-uint32_t
-TDNFCreatePackageUrl(
-    PTDNF_REPO_DATA pRepo,
-    const char* pszPackageLocation,
-    char **ppszPackageUrl
-    );
-
-
-uint32_t
-TDNFDownloadPackageToCache(
-    PTDNF pTdnf,
-    const char* pszPackageLocation,
-    const char* pszPkgName,
-    PTDNF_REPO_DATA pRepo,
-    char** ppszFilePath
-    );
-
-uint32_t
-TDNFDownloadPackageToTree(
-    PTDNF pTdnf,
-    const char* pszPackageLocation,
-    const char* pszPkgName,
-    PTDNF_REPO_DATA pRepo,
-    char* pszNormalRpmCacheDir,
-    char** ppszFilePath
-    );
-
-uint32_t
-TDNFDownloadPackageToDirectory(
-    PTDNF pTdnf,
-    const char* pszPackageLocation,
-    const char* pszPkgName,
-    PTDNF_REPO_DATA pRepo,
-    const char* pszDirectory,
-    char** ppszFilePath
-    );
-
 //packageutils.c
 
 uint32_t

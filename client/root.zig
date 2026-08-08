@@ -2,6 +2,7 @@ pub const updateinfo = @import("client_updateinfo");
 
 comptime {
     _ = @import("repoutils.zig");
+    _ = @import("remoterepo.zig");
     _ = @import("repomd_client_exports").query_native;
     _ = @import("repomd_client_exports").repo_cache;
     _ = @import("transaction_plan_capture");

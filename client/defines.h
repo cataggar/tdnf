@@ -121,9 +121,6 @@ typedef enum
 };
 
 
-//remoterepo.c
-#define sizeOfStruct(ARRAY) (sizeof(ARRAY)/sizeof(*ARRAY))
-
 //metalink.c
 typedef void (*TDNF_ML_FREE_FUNC) (void* data);
 
@@ -152,4 +149,3 @@ typedef void (*TDNF_ML_FREE_FUNC) (void* data);
 #define TDNF_REPO_IS_QUERYABLE(pRepo) \
     ((pRepo)->nEnabled && !IsNullOrEmptyString((pRepo)->pszId) && \
      ((pRepo)->nHasMetaData || TDNF_REPO_RPM_DIRECTORY(pRepo) != NULL))
-
